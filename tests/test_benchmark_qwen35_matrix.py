@@ -43,6 +43,19 @@ def test_default_matrix_covers_tp_state_and_kv_variants():
     assert len({case.name for case in cases}) == len(cases)
 
 
+def test_default_sequence_capacity_matches_default_workload(monkeypatch):
+    monkeypatch.setattr(
+        MODULE.sys,
+        "argv",
+        ["benchmark_qwen35_matrix.py", "--model", "/models/qwen35"],
+    )
+
+    parsed = MODULE.parse_args()
+
+    assert parsed.num_seqs == 64
+    assert parsed.max_num_seqs == parsed.num_seqs
+
+
 def test_case_command_is_eager_and_fully_identified():
     case = MODULE.BenchmarkCase(8, "model", "int8")
     command = MODULE.command_for_case(args(), case, repeat=2)

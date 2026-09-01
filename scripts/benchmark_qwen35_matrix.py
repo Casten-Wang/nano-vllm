@@ -106,7 +106,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-len", type=int, default=128)
     parser.add_argument("--max-model-len", type=int, default=4096)
     parser.add_argument("--max-num-batched-tokens", type=int, default=16384)
-    parser.add_argument("--max-num-seqs", type=int, default=512)
+    parser.add_argument("--max-num-seqs", type=int, default=64)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--repeats", type=int, default=1)
     parser.add_argument("--result-dir", default="benchmark_results/qwen35_matrix")
