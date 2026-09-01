@@ -193,6 +193,15 @@ def recurrent_gated_delta_step(
     return output.to(value.dtype), next_state
 
 
+def effective_chunk_size(sequence_length: int, maximum: int) -> int:
+    """Avoid padding short DeltaNet prefills to the full chunk size."""
+
+    if sequence_length <= 0 or maximum <= 0:
+        raise ValueError("sequence length and maximum chunk size must be positive")
+    next_power_of_two = 1 << (sequence_length - 1).bit_length()
+    return min(maximum, next_power_of_two)
+
+
 def chunk_gated_delta_rule(
     query: torch.Tensor,
     key: torch.Tensor,
@@ -221,6 +230,8 @@ def chunk_gated_delta_rule(
         return recurrent_gated_delta_rule(
             query, key, value, log_decay, beta, initial_state
         )
+
+    chunk_size = effective_chunk_size(query.shape[1], chunk_size)
 
     input_dtype = query.dtype
     batch_size, sequence_length, num_heads, key_dim = query.shape

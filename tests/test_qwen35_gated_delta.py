@@ -27,6 +27,7 @@ Qwen35GatedDeltaNet = qwen35_gated_delta.Qwen35GatedDeltaNet
 causal_conv1d_scan = qwen35_gated_delta.causal_conv1d_scan
 causal_conv1d_prefill = qwen35_gated_delta.causal_conv1d_prefill
 chunk_gated_delta_rule = qwen35_gated_delta.chunk_gated_delta_rule
+effective_chunk_size = qwen35_gated_delta.effective_chunk_size
 recurrent_gated_delta_rule = qwen35_gated_delta.recurrent_gated_delta_rule
 recurrent_gated_delta_step = qwen35_gated_delta.recurrent_gated_delta_step
 
@@ -39,6 +40,18 @@ def inputs(seed=0):
     decay = -torch.rand(2, 5, 3, generator=generator)
     beta = torch.rand(2, 5, 3, generator=generator)
     return q, k, v, decay, beta
+
+
+@pytest.mark.parametrize(
+    ("sequence_length", "maximum", "expected"),
+    [(1, 64, 1), (5, 64, 8), (16, 64, 16), (17, 64, 32), (65, 64, 64)],
+)
+def test_effective_chunk_size_avoids_excess_short_prefill_padding(
+    sequence_length,
+    maximum,
+    expected,
+):
+    assert effective_chunk_size(sequence_length, maximum) == expected
 
 
 @pytest.mark.parametrize("batch_size", [1, 3])
