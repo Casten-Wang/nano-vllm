@@ -66,9 +66,15 @@ def summarize(run_dir: Path, run_id: str) -> dict:
         clean_worktrees = clean_worktrees and not result["git_dirty"]
         cuda_measurements = cuda_measurements and result["cuda_available"]
 
-    quality_case_paths = sorted(
-        (run_dir / "quality").glob(f"{run_id}_qwen35_*/*.json")
+    quality_case_dirs = sorted(
+        path
+        for path in (run_dir / "quality").glob(f"{run_id}_qwen35_*")
+        if path.is_dir()
     )
+    quality_case_paths = [
+        case_dir / f"{case_dir.name}.json"
+        for case_dir in quality_case_dirs
+    ]
     if not quality_case_paths:
         raise ValueError("no quality case artifacts were found")
     checkpoint_digests = {performance["workload"]["checkpoint_manifest_digest"]}

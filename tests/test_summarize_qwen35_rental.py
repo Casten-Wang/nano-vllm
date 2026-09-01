@@ -60,10 +60,12 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
             "comparisons_by_tp": {"tp4": {"baseline_decode_ppl": 3.0}},
         },
     )
+    quality_dir = tmp_path / f"quality/{run_id}_qwen35_tp4"
     write(
-        tmp_path / f"quality/{run_id}_qwen35_tp4/case.json",
+        quality_dir / f"{quality_dir.name}.json",
         {"commit": "abc", "git_dirty": False, "checkpoint_manifest": {"digest": "weights"}},
     )
+    write(quality_dir / "batch0_len128_cases.json", [{"prompt_ids": [1, 2]}])
     write(
         tmp_path / "kernels/tp4.json",
         {
