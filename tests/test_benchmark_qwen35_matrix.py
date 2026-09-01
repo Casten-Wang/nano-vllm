@@ -43,17 +43,34 @@ def test_default_matrix_covers_tp_state_and_kv_variants():
     assert len({case.name for case in cases}) == len(cases)
 
 
-def test_default_sequence_capacity_matches_default_workload(monkeypatch):
+def test_default_sequence_capacity_tracks_workload(monkeypatch):
     monkeypatch.setattr(
         MODULE.sys,
         "argv",
-        ["benchmark_qwen35_matrix.py", "--model", "/models/qwen35"],
+        [
+            "benchmark_qwen35_matrix.py",
+            "--model",
+            "/models/qwen35",
+            "--num-seqs",
+            "96",
+        ],
     )
 
-    parsed = MODULE.parse_args()
+    parsed = MODULE.normalize_args(MODULE.parse_args())
 
-    assert parsed.num_seqs == 64
+    assert parsed.num_seqs == 96
     assert parsed.max_num_seqs == parsed.num_seqs
+
+
+def test_explicit_sequence_capacity_is_preserved():
+    parsed = args(max_num_seqs=32)
+
+    assert MODULE.normalize_args(parsed).max_num_seqs == 32
+
+
+def test_non_positive_repeat_count_is_rejected():
+    with pytest.raises(ValueError, match="repeats must be positive"):
+        MODULE.normalize_args(args(repeats=0))
 
 
 def test_case_command_is_eager_and_fully_identified():

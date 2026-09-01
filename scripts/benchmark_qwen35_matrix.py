@@ -106,7 +106,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-len", type=int, default=128)
     parser.add_argument("--max-model-len", type=int, default=4096)
     parser.add_argument("--max-num-batched-tokens", type=int, default=16384)
-    parser.add_argument("--max-num-seqs", type=int, default=64)
+    parser.add_argument(
+        "--max-num-seqs",
+        type=int,
+        default=None,
+        help="Concurrent state slots; defaults to --num-seqs.",
+    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--repeats", type=int, default=1)
     parser.add_argument("--result-dir", default="benchmark_results/qwen35_matrix")
@@ -115,10 +120,19 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def main() -> None:
-    args = parse_args()
+def normalize_args(args: argparse.Namespace) -> argparse.Namespace:
+    if args.max_num_seqs is None:
+        args.max_num_seqs = args.num_seqs
     if args.repeats <= 0:
-        raise SystemExit("--repeats must be positive")
+        raise ValueError("--repeats must be positive")
+    return args
+
+
+def main() -> None:
+    try:
+        args = normalize_args(parse_args())
+    except ValueError as error:
+        raise SystemExit(str(error)) from error
     cases = build_cases(args.tp_sizes)
     if not args.dry_run:
         required_gpus = max(case.tensor_parallel_size for case in cases)
