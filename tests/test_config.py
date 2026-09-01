@@ -28,10 +28,13 @@ def test_qwen35_moe_decode_backend_is_forwarded_to_text_config(
         monkeypatch,
         tmp_path,
         qwen35_moe_decode_backend="batched",
+        qwen35_moe_decode_chunk_size=4,
     )
 
     assert config.qwen35_moe_decode_backend == "batched"
     assert text_config.qwen35_moe_decode_backend == "batched"
+    assert config.qwen35_moe_decode_chunk_size == 4
+    assert text_config.qwen35_moe_decode_chunk_size == 4
 
 
 def test_invalid_qwen35_moe_decode_backend_is_rejected(monkeypatch, tmp_path):
@@ -40,4 +43,13 @@ def test_invalid_qwen35_moe_decode_backend_is_rejected(monkeypatch, tmp_path):
             monkeypatch,
             tmp_path,
             qwen35_moe_decode_backend="unknown",
+        )
+
+
+def test_invalid_qwen35_moe_decode_chunk_size_is_rejected(monkeypatch, tmp_path):
+    with pytest.raises(ValueError, match="qwen35_moe_decode_chunk_size"):
+        make_config(
+            monkeypatch,
+            tmp_path,
+            qwen35_moe_decode_chunk_size=0,
         )

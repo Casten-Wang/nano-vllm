@@ -58,6 +58,7 @@ def write_markdown(path: Path, result: dict) -> None:
         f"- tensor_parallel_size: `{result['tensor_parallel_size']}`",
         f"- recurrent_state_dtype: `{result['recurrent_state_dtype']}`",
         f"- qwen35_moe_decode_backend: `{result['qwen35_moe_decode_backend']}`",
+        f"- qwen35_moe_decode_chunk_size: `{result['qwen35_moe_decode_chunk_size']}`",
         f"- kv_cache_dtype: `{result['kv_cache_dtype']}`",
         f"- kv_dequant_backend: `{result['kv_dequant_backend']}`",
         f"- int8_partitioned_decode_threshold: `{result['int8_partitioned_decode_threshold']}`",
@@ -125,6 +126,7 @@ def parse_args() -> argparse.Namespace:
         default="sorted",
         help="Qwen3.5 single-token MoE dispatch implementation.",
     )
+    parser.add_argument("--qwen35-moe-decode-chunk-size", type=int, default=8)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--vocab-size", type=int, default=10000)
     parser.add_argument("--enforce-eager", action="store_true")
@@ -186,6 +188,7 @@ def main() -> None:
         gpu_memory_utilization=args.gpu_memory_utilization,
         recurrent_state_dtype=args.recurrent_state_dtype,
         qwen35_moe_decode_backend=args.qwen35_moe_decode_backend,
+        qwen35_moe_decode_chunk_size=args.qwen35_moe_decode_chunk_size,
         kv_cache_dtype=args.kv_cache_dtype,
         kv_dequant_backend=args.kv_dequant_backend,
         int8_partitioned_decode_threshold=args.int8_partitioned_decode_threshold,
@@ -267,6 +270,7 @@ def main() -> None:
         "gpu_memory_utilization": args.gpu_memory_utilization,
         "recurrent_state_dtype": args.recurrent_state_dtype,
         "qwen35_moe_decode_backend": args.qwen35_moe_decode_backend,
+        "qwen35_moe_decode_chunk_size": args.qwen35_moe_decode_chunk_size,
         "kv_cache_dtype": args.kv_cache_dtype,
         "kv_dequant_backend": args.kv_dequant_backend,
         "int8_partitioned_decode_threshold": args.int8_partitioned_decode_threshold,

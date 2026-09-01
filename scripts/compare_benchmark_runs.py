@@ -37,6 +37,7 @@ OPTIMIZATION_FIELDS = (
     "tensor_parallel_size",
     "recurrent_state_dtype",
     "qwen35_moe_decode_backend",
+    "qwen35_moe_decode_chunk_size",
     "kv_cache_dtype",
     "kv_dequant_backend",
     "int8_partitioned_decode_threshold",

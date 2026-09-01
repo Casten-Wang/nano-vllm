@@ -251,30 +251,44 @@ def expert_dispatch_batched_decode(
     topk_weights: torch.Tensor,
     gate_up_proj: torch.Tensor,
     down_proj: torch.Tensor,
+    chunk_size: int = 8,
 ) -> torch.Tensor:
-    """Graph-safe single-token candidate using batched expert matmuls.
+    """Graph-safe decode candidate using bounded batched expert matmuls.
 
     This removes device-to-host routing synchronization at the cost of
-    gathering the selected expert weights. It remains benchmark-only until
-    GPU latency and peak-memory measurements justify that trade-off.
+    gathering selected expert weights. Token chunking bounds that temporary
+    storage for realistic continuous-batching decode sizes.
     """
 
-    if hidden_states.shape[0] != 1:
-        raise ValueError("batched decode dispatch requires exactly one token")
-    expert_ids = topk_ids[0]
-    selected_gate_up = gate_up_proj.index_select(0, expert_ids)
-    expanded_hidden = hidden_states.expand(expert_ids.numel(), -1).unsqueeze(-1)
-    gate_up = torch.bmm(selected_gate_up, expanded_hidden).squeeze(-1)
-    gate, up = gate_up.chunk(2, dim=-1)
-    selected_down = down_proj.index_select(0, expert_ids)
-    expert_output = torch.bmm(
-        selected_down,
-        (F.silu(gate) * up).unsqueeze(-1),
-    ).squeeze(-1)
-    return (expert_output * topk_weights[0].unsqueeze(-1)).sum(
-        dim=0,
-        keepdim=True,
-    )
+    if chunk_size <= 0:
+        raise ValueError("decode chunk size must be positive")
+    top_k = topk_ids.shape[1]
+    chunks = []
+    for start in range(0, hidden_states.shape[0], chunk_size):
+        end = min(start + chunk_size, hidden_states.shape[0])
+        expert_ids = topk_ids[start:end].reshape(-1)
+        selected_gate_up = gate_up_proj.index_select(0, expert_ids)
+        route_hidden = (
+            hidden_states[start:end]
+            .unsqueeze(1)
+            .expand(-1, top_k, -1)
+            .reshape(expert_ids.numel(), -1, 1)
+        )
+        gate_up = torch.bmm(selected_gate_up, route_hidden).squeeze(-1)
+        del selected_gate_up, route_hidden
+        gate, up = gate_up.chunk(2, dim=-1)
+        selected_down = down_proj.index_select(0, expert_ids)
+        expert_output = torch.bmm(
+            selected_down,
+            (F.silu(gate) * up).unsqueeze(-1),
+        ).squeeze(-1)
+        chunks.append(
+            (
+                expert_output.reshape(end - start, top_k, -1)
+                * topk_weights[start:end].unsqueeze(-1)
+            ).sum(dim=1)
+        )
+    return torch.cat(chunks, dim=0)
 
 
 def evaluate_graph_safe_moe_candidate(
@@ -435,56 +449,58 @@ def benchmark_expert_dispatch(args, device, dtype, token_count: int) -> dict:
         result["decode_fast_path_speedup"] = (
             general_timing["median_ms"] / result["candidate"]["median_ms"]
         )
-        graph_safe_output = expert_dispatch_batched_decode(
+    graph_safe_output = expert_dispatch_batched_decode(
+        hidden,
+        topk_ids,
+        topk_weights,
+        gate_up_proj,
+        down_proj,
+        args.moe_decode_chunk_size,
+    )
+    graph_safe_timing = measure(
+        lambda: expert_dispatch_batched_decode(
             hidden,
             topk_ids,
             topk_weights,
             gate_up_proj,
             down_proj,
-        )
-        graph_safe_timing = measure(
-            lambda: expert_dispatch_batched_decode(
-                hidden,
-                topk_ids,
-                topk_weights,
-                gate_up_proj,
-                down_proj,
+            args.moe_decode_chunk_size,
+        ),
+        device=device,
+        warmup=args.warmup,
+        iterations=args.iterations,
+        repeats=args.repeats,
+    )
+    graph_safe_timing.update(
+        {
+            "chunk_size": args.moe_decode_chunk_size,
+            "speedup_vs_current": (
+                result["candidate"]["median_ms"]
+                / graph_safe_timing["median_ms"]
             ),
-            device=device,
-            warmup=args.warmup,
-            iterations=args.iterations,
-            repeats=args.repeats,
-        )
-        graph_safe_timing.update(
-            {
-                "speedup_vs_current": (
-                    result["candidate"]["median_ms"]
-                    / graph_safe_timing["median_ms"]
-                ),
-                "errors_vs_current": error(graph_safe_output, output),
-                "estimated_selected_weight_mib": (
-                    args.top_k
-                    * 3
-                    * local_intermediate_size
-                    * args.hidden_size
-                    * hidden.element_size()
-                    / 1024
-                    / 1024
-                ),
-            }
-        )
-        graph_safe_timing["promotion"] = evaluate_graph_safe_moe_candidate(
-            device_type=device.type,
-            speedup=graph_safe_timing["speedup_vs_current"],
-            peak_extra_mib=graph_safe_timing["peak_extra_mib"],
-            max_abs_error=graph_safe_timing["errors_vs_current"][
-                "max_abs_error"
-            ],
-            min_speedup=args.moe_graph_safe_min_speedup,
-            max_peak_extra_mib=args.moe_graph_safe_max_peak_extra_mib,
-            max_allowed_abs_error=args.moe_graph_safe_max_abs_error,
-        )
-        result["graph_safe_batched_candidate"] = graph_safe_timing
+            "errors_vs_current": error(graph_safe_output, output),
+            "estimated_selected_weight_mib": (
+                min(token_count, args.moe_decode_chunk_size)
+                * args.top_k
+                * 2
+                * local_intermediate_size
+                * args.hidden_size
+                * hidden.element_size()
+                / 1024
+                / 1024
+            ),
+        }
+    )
+    graph_safe_timing["promotion"] = evaluate_graph_safe_moe_candidate(
+        device_type=device.type,
+        speedup=graph_safe_timing["speedup_vs_current"],
+        peak_extra_mib=graph_safe_timing["peak_extra_mib"],
+        max_abs_error=graph_safe_timing["errors_vs_current"]["max_abs_error"],
+        min_speedup=args.moe_graph_safe_min_speedup,
+        max_peak_extra_mib=args.moe_graph_safe_max_peak_extra_mib,
+        max_allowed_abs_error=args.moe_graph_safe_max_abs_error,
+    )
+    result["graph_safe_batched_candidate"] = graph_safe_timing
     return result
 
 
@@ -858,7 +874,7 @@ def parse_args() -> argparse.Namespace:
         "--expert-token-counts",
         type=int,
         nargs="+",
-        default=(1, 8, 32, 128, 512),
+        default=(1, 8, 32, 64, 128, 512),
         metavar="N",
         help="MoE token counts to scan from decode to prefill workloads",
     )
@@ -875,6 +891,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--warmup", type=int, default=10)
     parser.add_argument("--iterations", type=int, default=50)
     parser.add_argument("--repeats", type=int, default=5)
+    parser.add_argument("--moe-decode-chunk-size", type=int, default=8)
     parser.add_argument("--moe-graph-safe-min-speedup", type=float, default=1.05)
     parser.add_argument(
         "--moe-graph-safe-max-peak-extra-mib",
@@ -908,6 +925,7 @@ def main() -> None:
         "decode_batch": args.decode_batch,
         "drift_steps": args.drift_steps,
         "warmup": args.warmup,
+        "moe_decode_chunk_size": args.moe_decode_chunk_size,
         "iterations": args.iterations,
         "repeats": args.repeats,
         "moe_graph_safe_min_speedup": args.moe_graph_safe_min_speedup,

@@ -58,6 +58,7 @@ def result(
         "tensor_parallel_size": 4,
         "recurrent_state_dtype": "float32",
         "qwen35_moe_decode_backend": "sorted",
+        "qwen35_moe_decode_chunk_size": 8,
         "kv_cache_dtype": "auto",
         "kv_dequant_backend": "fused",
         "int8_partitioned_decode_threshold": 8192,

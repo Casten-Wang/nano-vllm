@@ -167,6 +167,7 @@ def summarize(run_dir: Path, run_id: str) -> dict:
     moe_runtime = summarize_moe_runtime(performance["runs"])
 
     kernels = {}
+    configured_max_decode_batch = performance["workload"]["max_num_seqs"]
     commits = {
         row["commit"]
         for row in performance["runs"]
@@ -175,16 +176,47 @@ def summarize(run_dir: Path, run_id: str) -> dict:
     cuda_measurements = True
     for path in kernel_paths:
         result = load_json(path)
-        candidate = result["results"]["expert_dispatch_torch"]["1"][
-            "graph_safe_batched_candidate"
-        ]
+        dispatch_results = result["results"]["expert_dispatch_torch"]
+        measured_decode_batches = sorted(
+            int(token_count)
+            for token_count in dispatch_results
+            if int(token_count) <= configured_max_decode_batch
+        )
+        if not measured_decode_batches or measured_decode_batches[0] != 1:
+            raise ValueError(f"kernel benchmark has no batch-1 MoE result: {path}")
+        selected_batches = tuple(
+            dict.fromkeys((1, measured_decode_batches[-1]))
+        )
+        candidates_by_batch = {
+            str(batch): dispatch_results[str(batch)][
+                "graph_safe_batched_candidate"
+            ]
+            for batch in selected_batches
+        }
+        candidate = candidates_by_batch["1"]
         tp_name = path.stem
         kernels[tp_name] = {
-            "promotion": candidate["promotion"],
+            "promotion": {
+                "promote_to_runtime": all(
+                    item["promotion"]["promote_to_runtime"]
+                    for item in candidates_by_batch.values()
+                ),
+                "selected_decode_batches": list(selected_batches),
+            },
             "median_ms": candidate["median_ms"],
             "speedup_vs_current": candidate["speedup_vs_current"],
             "peak_extra_mib": candidate["peak_extra_mib"],
             "errors_vs_current": candidate["errors_vs_current"],
+            "by_decode_batch": {
+                batch: {
+                    "promotion": item["promotion"],
+                    "median_ms": item["median_ms"],
+                    "speedup_vs_current": item["speedup_vs_current"],
+                    "peak_extra_mib": item["peak_extra_mib"],
+                    "errors_vs_current": item["errors_vs_current"],
+                }
+                for batch, item in candidates_by_batch.items()
+            },
         }
         commits.add(result["commit"])
         clean_worktrees = clean_worktrees and not result["git_dirty"]

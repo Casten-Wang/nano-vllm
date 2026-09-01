@@ -57,14 +57,18 @@ class Qwen35Experts(nn.Module):
         intermediate_size: int,
         num_experts: int,
         decode_backend: str = "sorted",
+        decode_chunk_size: int = 8,
     ) -> None:
         super().__init__()
         if decode_backend not in ("sorted", "batched"):
             raise ValueError("decode_backend must be 'sorted' or 'batched'")
+        if decode_chunk_size <= 0:
+            raise ValueError("decode_chunk_size must be positive")
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size
         self.num_experts = num_experts
         self.decode_backend = decode_backend
+        self.decode_chunk_size = decode_chunk_size
         self.tp_size = dist.get_world_size()
         self.tp_rank = dist.get_rank()
         self.local_intermediate_size = divide(intermediate_size, self.tp_size)
@@ -175,31 +179,44 @@ class Qwen35Experts(nn.Module):
         hidden_states: torch.Tensor,
         topk_ids: torch.Tensor,
         topk_weights: torch.Tensor,
+        *,
+        is_decode: bool | None = None,
     ) -> torch.Tensor:
         output = torch.zeros_like(hidden_states)
-        if hidden_states.shape[0] == 1:
-            if self.decode_backend == "batched":
-                expert_ids = topk_ids[0]
+        if is_decode is None:
+            is_decode = hidden_states.shape[0] == 1
+        if is_decode and self.decode_backend == "batched":
+            chunks = []
+            top_k = topk_ids.shape[1]
+            for start in range(0, hidden_states.shape[0], self.decode_chunk_size):
+                end = min(start + self.decode_chunk_size, hidden_states.shape[0])
+                expert_ids = topk_ids[start:end].reshape(-1)
                 selected_gate_up = self.gate_up_proj.index_select(0, expert_ids)
-                expanded_hidden = hidden_states.expand(
-                    expert_ids.numel(), -1
-                ).unsqueeze(-1)
-                gate_up = torch.bmm(
-                    selected_gate_up,
-                    expanded_hidden,
-                ).squeeze(-1)
+                route_hidden = (
+                    hidden_states[start:end]
+                    .unsqueeze(1)
+                    .expand(-1, top_k, -1)
+                    .reshape(expert_ids.numel(), -1, 1)
+                )
+                gate_up = torch.bmm(selected_gate_up, route_hidden).squeeze(-1)
+                del selected_gate_up, route_hidden
                 gate, up = gate_up.chunk(2, dim=-1)
                 selected_down = self.down_proj.index_select(0, expert_ids)
                 expert_output = torch.bmm(
                     selected_down,
                     (F.silu(gate) * up).unsqueeze(-1),
                 ).squeeze(-1)
-                output = (
-                    expert_output * topk_weights[0].unsqueeze(-1)
-                ).sum(dim=0, keepdim=True)
-                if self.tp_size > 1:
-                    dist.all_reduce(output)
-                return output
+                chunks.append(
+                    (
+                        expert_output.reshape(end - start, top_k, -1)
+                        * topk_weights[start:end].unsqueeze(-1)
+                    ).sum(dim=1)
+                )
+            output = torch.cat(chunks, dim=0)
+            if self.tp_size > 1:
+                dist.all_reduce(output)
+            return output
+        if hidden_states.shape[0] == 1:
             # Decode has only ``top_k`` routes. Preserve the expert-sorted
             # accumulation order without building the general flattened
             # token/group metadata used by prefill batches.
@@ -293,6 +310,7 @@ class Qwen35SparseMoeBlock(nn.Module):
             int(config.moe_intermediate_size),
             int(config.num_experts),
             getattr(config, "qwen35_moe_decode_backend", "sorted"),
+            int(getattr(config, "qwen35_moe_decode_chunk_size", 8)),
         )
         self.shared_expert = Qwen35SharedExpert(
             self.hidden_size,
@@ -304,7 +322,14 @@ class Qwen35SparseMoeBlock(nn.Module):
         original_shape = hidden_states.shape
         flat_states = hidden_states.reshape(-1, self.hidden_size)
         topk_weights, topk_ids = self.gate(flat_states)
-        routed = self.experts(flat_states, topk_ids, topk_weights)
+        from nanovllm.utils.context import get_context
+
+        routed = self.experts(
+            flat_states,
+            topk_ids,
+            topk_weights,
+            is_decode=not get_context().is_prefill,
+        )
         shared = self.shared_expert(flat_states)
         shared = torch.sigmoid(self.shared_expert_gate(flat_states)) * shared
         return (routed + shared).reshape(original_shape)

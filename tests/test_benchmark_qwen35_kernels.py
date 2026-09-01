@@ -94,6 +94,34 @@ def test_graph_safe_batched_decode_matches_current_single_token_path():
     torch.testing.assert_close(actual, expected)
 
 
+def test_graph_safe_batched_decode_matches_multi_token_path():
+    torch.manual_seed(113)
+    hidden = torch.randn(5, 4)
+    topk_ids = torch.randint(0, 4, (5, 2))
+    topk_weights = torch.rand(5, 2)
+    topk_weights /= topk_weights.sum(dim=-1, keepdim=True)
+    gate_up = torch.randn(4, 6, 4)
+    down = torch.randn(4, 4, 3)
+
+    expected = MODULE.expert_dispatch(
+        hidden,
+        topk_ids,
+        topk_weights,
+        gate_up,
+        down,
+    )
+    actual = MODULE.expert_dispatch_batched_decode(
+        hidden,
+        topk_ids,
+        topk_weights,
+        gate_up,
+        down,
+        chunk_size=2,
+    )
+
+    torch.testing.assert_close(actual, expected)
+
+
 def test_expert_dispatch_sweep_preserves_requested_token_counts(monkeypatch):
     calls = []
 
@@ -102,7 +130,7 @@ def test_expert_dispatch_sweep_preserves_requested_token_counts(monkeypatch):
         return {"tokens": token_count}
 
     monkeypatch.setattr(MODULE, "benchmark_expert_dispatch", fake_benchmark)
-    args = SimpleNamespace(expert_token_counts=(1, 8, 32, 128, 512))
+    args = SimpleNamespace(expert_token_counts=(1, 8, 32, 64, 128, 512))
 
     result = MODULE.benchmark_expert_dispatch_sweep(
         args,
@@ -110,8 +138,8 @@ def test_expert_dispatch_sweep_preserves_requested_token_counts(monkeypatch):
         torch.float32,
     )
 
-    assert calls == [1, 8, 32, 128, 512]
-    assert list(result) == ["1", "8", "32", "128", "512"]
+    assert calls == [1, 8, 32, 64, 128, 512]
+    assert list(result) == ["1", "8", "32", "64", "128", "512"]
     assert result["128"] == {"tokens": 128}
 
 
@@ -126,6 +154,7 @@ def test_single_token_dispatch_reports_general_path_baseline():
         warmup=0,
         iterations=1,
         repeats=1,
+        moe_decode_chunk_size=2,
         moe_graph_safe_min_speedup=1.05,
         moe_graph_safe_max_peak_extra_mib=64.0,
         moe_graph_safe_max_abs_error=0.05,

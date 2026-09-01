@@ -70,7 +70,10 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
         tmp_path / f"performance/{run_id}_matrix_summary.json",
         {
             "commits": ["abc"],
-            "workload": {"checkpoint_manifest_digest": "weights"},
+            "workload": {
+                "checkpoint_manifest_digest": "weights",
+                "max_num_seqs": 64,
+            },
             "all_execution_paths_valid": True,
             "all_generation_valid": True,
             "all_output_digests_match": True,
@@ -98,13 +101,16 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
             "commit": "abc",
             "git_dirty": False,
             "cuda_available": True,
-            "results": {"expert_dispatch_torch": {"1": {"graph_safe_batched_candidate": {
-                "promotion": {"promote_to_runtime": True},
-                "median_ms": 1.0,
-                "speedup_vs_current": 1.2,
-                "peak_extra_mib": 4.0,
-                "errors_vs_current": {"max_abs_error": 0.01},
-            }}}},
+            "results": {"expert_dispatch_torch": {
+                batch: {"graph_safe_batched_candidate": {
+                    "promotion": {"promote_to_runtime": True},
+                    "median_ms": 1.0,
+                    "speedup_vs_current": 1.2,
+                    "peak_extra_mib": 4.0,
+                    "errors_vs_current": {"max_abs_error": 0.01},
+                }}
+                for batch in ("1", "64")
+            }},
         },
     )
 
@@ -114,6 +120,9 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     assert report["performance"]["best_throughput"]["label"] == "batched"
     assert report["performance"]["lowest_peak_memory"]["label"] == "sorted"
     assert report["graph_safe_moe"]["all_tp_promoted"]
+    assert report["graph_safe_moe"]["by_tp"]["tp4"]["promotion"][
+        "selected_decode_batches"
+    ] == [1, 64]
     runtime = report["graph_safe_moe"]["runtime_by_tp"]["tp4"]
     assert runtime["output_digest_matches"]
     assert runtime["throughput_speedup"] == 2.0

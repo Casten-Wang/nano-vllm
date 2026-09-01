@@ -37,6 +37,7 @@ def make_experts(
     intermediate_size: int = 4,
     num_experts: int = 2,
     decode_backend: str = "sorted",
+    decode_chunk_size: int = 8,
 ):
     with (
         patch.object(qwen35_moe.dist, "get_world_size", return_value=world_size),
@@ -47,6 +48,7 @@ def make_experts(
             intermediate_size=intermediate_size,
             num_experts=num_experts,
             decode_backend=decode_backend,
+            decode_chunk_size=decode_chunk_size,
         )
 
 
@@ -213,6 +215,74 @@ def test_batched_single_token_decode_matches_sorted_backend():
         actual = batched_experts(hidden, topk_ids, topk_weights)
 
     torch.testing.assert_close(actual, expected)
+
+
+def test_batched_multi_token_decode_matches_sorted_backend_in_chunks():
+    torch.manual_seed(53)
+    sorted_experts = make_experts(num_experts=4)
+    batched_experts = make_experts(
+        num_experts=4,
+        decode_backend="batched",
+        decode_chunk_size=2,
+    )
+    batched_experts.load_state_dict(sorted_experts.state_dict())
+    hidden = torch.randn(5, 2)
+    topk_ids = torch.tensor([[3, 0], [1, 2], [0, 3], [2, 1], [3, 2]])
+    topk_weights = torch.rand(5, 2)
+    topk_weights /= topk_weights.sum(dim=-1, keepdim=True)
+
+    expected = sorted_experts(
+        hidden,
+        topk_ids,
+        topk_weights,
+        is_decode=False,
+    )
+    selected_route_counts = []
+    original_bmm = qwen35_moe.torch.bmm
+
+    def record_bmm(left, right, *args, **kwargs):
+        if left.shape[1] == 2 * batched_experts.local_intermediate_size:
+            selected_route_counts.append(left.shape[0])
+        return original_bmm(left, right, *args, **kwargs)
+
+    with (
+        patch.object(
+            qwen35_moe.torch.Tensor,
+            "cpu",
+            side_effect=AssertionError("batched decode must not synchronize to CPU"),
+        ),
+        patch.object(
+            qwen35_moe.torch,
+            "bmm",
+            side_effect=record_bmm,
+        ),
+    ):
+        actual = batched_experts(
+            hidden,
+            topk_ids,
+            topk_weights,
+            is_decode=True,
+        )
+
+    torch.testing.assert_close(actual, expected)
+    assert selected_route_counts == [4, 4, 2]
+
+
+def test_batched_backend_keeps_prefill_on_grouped_dispatch():
+    experts = make_experts(decode_backend="batched")
+    hidden = torch.randn(3, 2)
+    topk_ids = torch.tensor([[0, 1], [1, 0], [0, 1]])
+    topk_weights = torch.full((3, 2), 0.5)
+
+    with patch.object(qwen35_moe.torch, "bmm", side_effect=AssertionError):
+        output = experts(
+            hidden,
+            topk_ids,
+            topk_weights,
+            is_decode=False,
+        )
+
+    assert output.shape == hidden.shape
 
 
 def test_invalid_decode_backend_is_rejected():
