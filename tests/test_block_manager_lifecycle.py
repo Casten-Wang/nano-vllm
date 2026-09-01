@@ -350,6 +350,41 @@ class BlockManagerLifecycleTest(unittest.TestCase):
         self.assertEqual(scheduler.state_manager.num_used_slots, 0)
         self.assertEqual(scheduler.state_manager.num_free_slots, 1)
 
+    def test_preempted_hybrid_request_replays_from_a_reset_state_slot(self):
+        scheduler = Scheduler(
+            FakeConfig(
+                num_kvcache_blocks=4,
+                kvcache_block_size=4,
+                model_spec=types.SimpleNamespace(is_hybrid=True),
+            )
+        )
+        seq = Sequence([1, 2, 3, 4])
+        scheduler.add(seq)
+
+        first = scheduler.schedule()
+        self.assertEqual(first.prefill_seqs, [seq])
+        scheduler.postprocess_mixed(first, [5])
+        self.assertEqual(seq.num_cached_tokens, 4)
+        first_slot = seq.state_slot
+        self.assertIsNotNone(first_slot)
+
+        scheduler.running.remove(seq)
+        scheduler.preempt(seq)
+        self.assertEqual(seq.num_cached_tokens, 0)
+        self.assertIsNone(seq.state_slot)
+
+        replay = scheduler.schedule()
+
+        self.assertEqual(replay.prefill_seqs, [seq])
+        self.assertEqual(seq.num_scheduled_tokens, len(seq))
+        self.assertEqual(seq.num_cached_tokens, 0)
+        replay_slot = seq.state_slot
+        self.assertIsNotNone(replay_slot)
+        self.assertNotEqual(replay_slot, first_slot)
+        self.assertTrue(scheduler.state_manager.owns(seq.seq_id, replay_slot))
+        self.assertEqual(scheduler.state_manager.num_used_slots, 1)
+        assert_block_conservation(self, scheduler.block_manager)
+
     def test_dynamic_allocation_can_grow_a_sequence(self):
         manager = BlockManager(num_blocks=4, block_size=4)
         seq = Sequence(list(range(12)))
