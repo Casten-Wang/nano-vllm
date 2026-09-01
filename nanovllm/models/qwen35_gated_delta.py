@@ -165,32 +165,62 @@ def recurrent_gated_delta_step(
     beta: torch.Tensor,
     state: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Apply one batched Delta Rule decode step without scan overhead."""
+    """Apply one decode step, broadcasting key heads over value-head groups."""
 
     if query.shape != key.shape or query.ndim != 3 or value.ndim != 3:
         raise ValueError("query, key, and value shapes are inconsistent")
-    if query.shape[:2] != value.shape[:2]:
-        raise ValueError("query/key and value batch and heads must match")
-    if log_decay.shape != query.shape[:2] or beta.shape != query.shape[:2]:
-        raise ValueError("decay and beta must have shape [batch, heads]")
-    expected_state_shape = (*query.shape, value.shape[-1])
+    if query.shape[0] != value.shape[0]:
+        raise ValueError("query/key and value batch dimensions must match")
+    if query.shape[1] <= 0 or value.shape[1] % query.shape[1]:
+        raise ValueError("value heads must be a multiple of key heads")
+    if log_decay.shape != value.shape[:2] or beta.shape != value.shape[:2]:
+        raise ValueError("decay and beta must have shape [batch, value_heads]")
+    expected_state_shape = (
+        value.shape[0],
+        value.shape[1],
+        query.shape[2],
+        value.shape[2],
+    )
     if tuple(state.shape) != expected_state_shape:
         raise ValueError(
             f"invalid recurrent state shape: {tuple(state.shape)}; "
             f"expected {expected_state_shape}"
         )
 
-    normalized_query = l2_normalize(query.float()) / (query.shape[-1] ** 0.5)
-    normalized_key = l2_normalize(key.float())
-    next_state = state.float() * log_decay.float().exp()[..., None, None]
+    batch_size, key_heads, key_dim = query.shape
+    value_heads, value_dim = value.shape[1:]
+    groups = value_heads // key_heads
+    grouped_state = state.float().reshape(
+        batch_size,
+        key_heads,
+        groups,
+        key_dim,
+        value_dim,
+    )
+    normalized_query = (
+        l2_normalize(query.float()).unsqueeze(2) / (key_dim**0.5)
+    )
+    normalized_key = l2_normalize(key.float()).unsqueeze(2)
+    grouped_decay = log_decay.float().reshape(batch_size, key_heads, groups)
+    grouped_beta = beta.float().reshape(batch_size, key_heads, groups)
+    grouped_value = value.float().reshape(
+        batch_size,
+        key_heads,
+        groups,
+        value_dim,
+    )
+    next_state = grouped_state * grouped_decay.exp()[..., None, None]
     prediction = (next_state * normalized_key.unsqueeze(-1)).sum(dim=-2)
-    correction = (value.float() - prediction) * beta.float().unsqueeze(-1)
+    correction = (grouped_value - prediction) * grouped_beta.unsqueeze(-1)
     next_state = (
         next_state
         + normalized_key.unsqueeze(-1) * correction.unsqueeze(-2)
     )
     output = (next_state * normalized_query.unsqueeze(-1)).sum(dim=-2)
-    return output.to(value.dtype), next_state
+    return (
+        output.reshape(batch_size, value_heads, value_dim).to(value.dtype),
+        next_state.reshape(expected_state_shape),
+    )
 
 
 def effective_chunk_size(sequence_length: int, maximum: int) -> int:
@@ -583,10 +613,6 @@ class Qwen35GatedDeltaNet(nn.Module):
         query = query.view(batch_size, 1, self.num_k_heads, self.key_head_dim)
         key = key.view(batch_size, 1, self.num_k_heads, self.key_head_dim)
         value = value.view(batch_size, 1, self.num_v_heads, self.value_head_dim)
-        repeat_factor = self.num_v_heads // self.num_k_heads
-        if repeat_factor > 1:
-            query = query.repeat_interleave(repeat_factor, dim=2)
-            key = key.repeat_interleave(repeat_factor, dim=2)
         output, recurrent_state = recurrent_gated_delta_step(
             query.squeeze(1),
             key.squeeze(1),

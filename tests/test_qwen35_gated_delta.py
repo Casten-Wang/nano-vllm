@@ -155,6 +155,37 @@ def test_specialized_decode_step_matches_recurrent_oracle(dtype):
     torch.testing.assert_close(actual_state, expected_state)
 
 
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_decode_step_broadcasts_key_heads_without_replication(dtype):
+    torch.manual_seed(43)
+    query = torch.randn(2, 2, 4, dtype=dtype)
+    key = torch.randn(2, 2, 4, dtype=dtype)
+    value = torch.randn(2, 6, 3, dtype=dtype)
+    decay = -torch.rand(2, 6)
+    beta = torch.rand(2, 6, dtype=dtype)
+    state = torch.randn(2, 6, 4, 3, dtype=dtype)
+
+    expected, expected_state = recurrent_gated_delta_rule(
+        query.repeat_interleave(3, dim=1).unsqueeze(1),
+        key.repeat_interleave(3, dim=1).unsqueeze(1),
+        value.unsqueeze(1),
+        decay.unsqueeze(1),
+        beta.unsqueeze(1),
+        state,
+    )
+    actual, actual_state = recurrent_gated_delta_step(
+        query,
+        key,
+        value,
+        decay,
+        beta,
+        state,
+    )
+
+    torch.testing.assert_close(actual, expected.squeeze(1))
+    torch.testing.assert_close(actual_state, expected_state)
+
+
 @pytest.mark.parametrize("sequence_length", [1, 5, 17, 64, 65])
 def test_chunk_rule_matches_recurrent_oracle(sequence_length):
     q, k, v, decay, beta = inputs(5)

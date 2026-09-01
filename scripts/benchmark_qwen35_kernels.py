@@ -406,8 +406,14 @@ def benchmark_convolution(args, device, dtype, local_conv_channels) -> dict:
     )
 
 
-def benchmark_delta_decode(args, device, dtype, local_value_heads) -> dict:
-    shape = (args.decode_batch, local_value_heads, args.key_head_dim)
+def benchmark_delta_decode(
+    args,
+    device,
+    dtype,
+    local_key_heads,
+    local_value_heads,
+) -> dict:
+    shape = (args.decode_batch, local_key_heads, args.key_head_dim)
     query = torch.randn(*shape, device=device, dtype=dtype)
     key = torch.randn_like(query)
     value = torch.randn(
@@ -437,9 +443,12 @@ def benchmark_delta_decode(args, device, dtype, local_value_heads) -> dict:
         dtype=dtype,
     )
     def reference():
+        repeat_factor = local_value_heads // local_key_heads
+        repeated_query = query.repeat_interleave(repeat_factor, dim=1)
+        repeated_key = key.repeat_interleave(repeat_factor, dim=1)
         output, next_state = GDN.recurrent_gated_delta_rule(
-            query.unsqueeze(1),
-            key.unsqueeze(1),
+            repeated_query.unsqueeze(1),
+            repeated_key.unsqueeze(1),
             value.unsqueeze(1),
             decay.unsqueeze(1),
             beta.unsqueeze(1),
@@ -457,7 +466,7 @@ def benchmark_delta_decode(args, device, dtype, local_value_heads) -> dict:
             state,
         )
 
-    return compare(
+    result = compare(
         reference,
         candidate,
         device=device,
@@ -465,6 +474,18 @@ def benchmark_delta_decode(args, device, dtype, local_value_heads) -> dict:
         iterations=args.iterations,
         repeats=args.repeats,
     )
+    repeated_qk_elements = (
+        2
+        * args.decode_batch
+        * (local_value_heads - local_key_heads)
+        * args.key_head_dim
+    )
+    result["avoided_qk_replication_mib"] = (
+        repeated_qk_elements * torch.empty((), dtype=dtype).element_size()
+        / 1024
+        / 1024
+    )
+    return result
 
 
 def evaluate_recurrent_storage_drift(
@@ -681,6 +702,7 @@ def main() -> None:
                 args,
                 device,
                 dtype,
+                local_key_heads,
                 local_value_heads,
             ),
             "recurrent_storage_drift": evaluate_recurrent_storage_drift(
