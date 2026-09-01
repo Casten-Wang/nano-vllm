@@ -97,6 +97,29 @@ def test_sorted_expert_dispatch_matches_naive_topk_accumulation():
     torch.testing.assert_close(actual, expected)
 
 
+def test_tensor_parallel_expert_outputs_sum_to_single_rank_reference():
+    torch.manual_seed(13)
+    full = make_experts(world_size=1)
+    ranks = [make_experts(rank=rank, world_size=2) for rank in range(2)]
+    source_gate_up = torch.randn(2, 8, 2)
+    source_down = torch.randn(2, 2, 4)
+    full._load_gate_up(full.gate_up_proj, source_gate_up)
+    full._load_down(full.down_proj, source_down)
+    for rank in ranks:
+        rank._load_gate_up(rank.gate_up_proj, source_gate_up)
+        rank._load_down(rank.down_proj, source_down)
+    hidden = torch.randn(7, 2)
+    topk_ids = torch.randint(0, 2, (7, 2))
+    topk_weights = torch.rand(7, 2)
+    topk_weights /= topk_weights.sum(dim=-1, keepdim=True)
+
+    expected = full(hidden, topk_ids, topk_weights)
+    with patch.object(qwen35_moe.dist, "all_reduce", return_value=None):
+        actual = sum(rank(hidden, topk_ids, topk_weights) for rank in ranks)
+
+    torch.testing.assert_close(actual, expected, rtol=2e-5, atol=2e-5)
+
+
 def test_expert_weights_are_sharded_and_replicable_across_tp_ranks():
     source_gate_up = torch.arange(32, dtype=torch.float32).reshape(2, 8, 2)
     source_down = torch.arange(16, dtype=torch.float32).reshape(2, 2, 4)
