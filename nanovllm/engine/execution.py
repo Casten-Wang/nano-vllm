@@ -111,6 +111,26 @@ def select_model_path(step_kind: str, *, use_cuda_graph: bool) -> str:
     return f"{step_kind}_eager"
 
 
+def supports_cudagraph_policy(
+    *,
+    enforce_eager: bool,
+    sliding_window_size: int | None,
+    is_hybrid: bool,
+    qwen35_moe_decode_backend: str,
+    kv_cache_dtype: str,
+    kv_dequant_backend: str,
+) -> bool:
+    """Return whether every configured decode component is graph-safe."""
+
+    if enforce_eager or sliding_window_size is not None:
+        return False
+    if is_hybrid and qwen35_moe_decode_backend != "batched":
+        return False
+    if kv_cache_dtype == "int8" and kv_dequant_backend != "fused":
+        return False
+    return True
+
+
 def partition_count(
     *,
     max_context_len: int,

@@ -12,6 +12,7 @@ from nanovllm.engine.execution import (
     cuda_graph_buckets,
     select_attention_paths,
     select_model_path,
+    supports_cudagraph_policy,
 )
 from nanovllm.engine.sequence import Sequence
 from nanovllm.engine.kv_cache_packing import PackedBlockMetadata, build_packed_block_metadata
@@ -166,18 +167,15 @@ class ModelRunner:
             dist.destroy_process_group()
 
     def supports_cudagraph(self) -> bool:
-        if self.enforce_eager or self.config.sliding_window_size is not None:
-            return False
-        if self.config.model_spec is not None and self.config.model_spec.is_hybrid:
-            # Hybrid recurrent state needs dedicated graph input buffers. Keep
-            # the first correctness baseline eager until those are captured.
-            return False
-        if self.config.kv_cache_dtype == "int8":
-            # First INT8 graph version only covers the fused V1 decode path.
-            # Dequant-then-FlashAttention and partitioned long-context decode
-            # keep their eager paths because they have extra buffers/branches.
-            return self.config.kv_dequant_backend == "fused"
-        return True
+        model_spec = self.config.model_spec
+        return supports_cudagraph_policy(
+            enforce_eager=self.enforce_eager,
+            sliding_window_size=self.config.sliding_window_size,
+            is_hybrid=model_spec is not None and model_spec.is_hybrid,
+            qwen35_moe_decode_backend=self.config.qwen35_moe_decode_backend,
+            kv_cache_dtype=self.config.kv_cache_dtype,
+            kv_dequant_backend=self.config.kv_dequant_backend,
+        )
 
     def should_use_cudagraph(self, input_ids: torch.Tensor, is_prefill: bool) -> bool:
         if not hasattr(self, "graphs"):
@@ -247,6 +245,9 @@ class ModelRunner:
             "total_bytes_local_rank": recurrent_bytes + convolution_bytes,
             "recurrent_dtypes": sorted(recurrent_dtypes),
             "convolution_dtypes": sorted(convolution_dtypes),
+            "graph_padding_slots": int(
+                getattr(self, "recurrent_graph_padding_slot", None) is not None
+            ),
         }
 
     def get_recurrent_state_stats_by_rank(self):
@@ -488,11 +489,17 @@ class ModelRunner:
             else model_config.dtype
         )
         allocated_layers = 0
+        num_state_slots = self.config.max_num_seqs
+        if self.supports_cudagraph():
+            self.recurrent_graph_padding_slot = num_state_slots
+            num_state_slots += 1
+        else:
+            self.recurrent_graph_padding_slot = None
         for module in self.model.modules():
             allocate = getattr(module, "allocate_state_cache", None)
             if allocate is not None and callable(allocate):
                 allocate(
-                    self.config.max_num_seqs,
+                    num_state_slots,
                     torch.cuda.current_device(),
                     recurrent_dtype=recurrent_dtype,
                 )
@@ -973,6 +980,9 @@ class ModelRunner:
         graph_vars["context_lens"][:bs] = context.context_lens
         graph_vars["block_tables"][:bs].fill_(-1)
         graph_vars["block_tables"][:bs, :context.block_tables.size(1)] = context.block_tables
+        if graph_vars["state_slots"] is not None:
+            graph_vars["state_slots"].fill_(self.recurrent_graph_padding_slot)
+            graph_vars["state_slots"][:bs] = context.state_slots
         graph.replay()
         return self.model.compute_logits(graph_vars["outputs"][:bs])
 
@@ -1037,6 +1047,15 @@ class ModelRunner:
         context_lens = torch.zeros(max_bs, dtype=torch.int32)
         block_tables = torch.zeros(max_bs, max_num_blocks, dtype=torch.int32)
         outputs = torch.zeros(max_bs, hf_config.hidden_size)
+        state_slots = None
+        if config.model_spec is not None and config.model_spec.is_hybrid:
+            if self.recurrent_graph_padding_slot is None:
+                raise RuntimeError("hybrid CUDA Graph has no padding state slot")
+            state_slots = torch.full(
+                (max_bs,),
+                self.recurrent_graph_padding_slot,
+                dtype=torch.int32,
+            )
         self.graph_bs = cuda_graph_buckets(max_bs)
         self.graphs = {}
         self.graph_pool = None
@@ -1044,6 +1063,10 @@ class ModelRunner:
             "supported": True,
             "max_batch_size": max_bs,
             "max_num_blocks": max_num_blocks,
+            "hybrid_recurrent_state": (
+                config.model_spec is not None and config.model_spec.is_hybrid
+            ),
+            "recurrent_padding_slot": self.recurrent_graph_padding_slot,
             "buckets": [],
         }
 
@@ -1055,6 +1078,7 @@ class ModelRunner:
                 context_lens=context_lens[:bs],
                 block_tables=block_tables[:bs],
                 max_context_len=0,
+                state_slots=state_slots[:bs] if state_slots is not None else None,
             )
             warmup_start = perf_counter()
             outputs[:bs] = self.model(input_ids[:bs], positions[:bs])    # warmup
@@ -1085,4 +1109,5 @@ class ModelRunner:
             context_lens=context_lens,
             block_tables=block_tables,
             outputs=outputs,
+            state_slots=state_slots,
         )

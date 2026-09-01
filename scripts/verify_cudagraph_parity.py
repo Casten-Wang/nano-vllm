@@ -78,6 +78,9 @@ def run_worker(args: argparse.Namespace) -> None:
         max_model_len=args.max_model_len,
         max_num_batched_tokens=args.max_num_batched_tokens,
         max_num_seqs=args.max_num_seqs,
+        tensor_parallel_size=args.tensor_parallel_size,
+        qwen35_moe_decode_backend=args.qwen35_moe_decode_backend,
+        qwen35_moe_decode_chunk_size=args.qwen35_moe_decode_chunk_size,
         kv_cache_dtype=args.kv_cache_dtype,
         kv_dequant_backend=args.kv_dequant_backend,
         int8_partitioned_decode_threshold=args.partition_threshold,
@@ -139,6 +142,9 @@ def run_worker(args: argparse.Namespace) -> None:
             "max_model_len": args.max_model_len,
             "max_num_batched_tokens": args.max_num_batched_tokens,
             "max_num_seqs": args.max_num_seqs,
+            "tensor_parallel_size": args.tensor_parallel_size,
+            "qwen35_moe_decode_backend": args.qwen35_moe_decode_backend,
+            "qwen35_moe_decode_chunk_size": args.qwen35_moe_decode_chunk_size,
             "output_len": args.output_len,
             "seed": args.seed,
         },
@@ -175,6 +181,12 @@ def worker_command(
         str(args.max_num_batched_tokens),
         "--max-num-seqs",
         str(args.max_num_seqs),
+        "--tensor-parallel-size",
+        str(args.tensor_parallel_size),
+        "--qwen35-moe-decode-backend",
+        args.qwen35_moe_decode_backend,
+        "--qwen35-moe-decode-chunk-size",
+        str(args.qwen35_moe_decode_chunk_size),
         "--vocab-size",
         str(args.vocab_size),
         "--seed",
@@ -343,6 +355,13 @@ def main() -> None:
     parser.add_argument("--max-model-len", type=int, default=1024)
     parser.add_argument("--max-num-batched-tokens", type=int, default=4096)
     parser.add_argument("--max-num-seqs", type=int, default=32)
+    parser.add_argument("--tensor-parallel-size", type=int, default=1)
+    parser.add_argument(
+        "--qwen35-moe-decode-backend",
+        choices=("sorted", "batched"),
+        default="batched",
+    )
+    parser.add_argument("--qwen35-moe-decode-chunk-size", type=int, default=8)
     parser.add_argument("--vocab-size", type=int, default=10000)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
@@ -398,6 +417,10 @@ def main() -> None:
         )
     if max(batch_sizes) > args.max_num_seqs:
         parser.error("max_num_seqs must cover every scenario batch size")
+    if args.tensor_parallel_size <= 0:
+        parser.error("tensor_parallel_size must be positive")
+    if args.qwen35_moe_decode_chunk_size <= 0:
+        parser.error("qwen35_moe_decode_chunk_size must be positive")
     if args.partition_threshold <= args.max_model_len:
         parser.error(
             "partition-threshold must exceed max-model-len so the parity run "
@@ -476,6 +499,9 @@ def main() -> None:
         "model": args.model,
         "kv_cache_dtype": args.kv_cache_dtype,
         "kv_dequant_backend": args.kv_dequant_backend,
+        "tensor_parallel_size": args.tensor_parallel_size,
+        "qwen35_moe_decode_backend": args.qwen35_moe_decode_backend,
+        "qwen35_moe_decode_chunk_size": args.qwen35_moe_decode_chunk_size,
         "output_len": args.output_len,
         "atol": args.atol,
         "rtol": args.rtol,

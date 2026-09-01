@@ -728,6 +728,38 @@ def test_batched_decode_matches_individual_slot_updates():
     torch.testing.assert_close(layer.state_pool.recurrent, batched_state)
 
 
+def test_decode_padding_scratch_slot_does_not_change_real_states():
+    torch.manual_seed(29)
+    layer = make_layer()
+    layer.allocate_state_cache(3, "cpu")
+    for parameter in layer.parameters():
+        parameter.data.normal_(mean=0.0, std=0.2)
+    real_hidden = torch.randn(2, 4)
+    padded_hidden = torch.cat((real_hidden, torch.randn(2, 4)))
+    context = SimpleNamespace(
+        is_mixed=False,
+        is_prefill=False,
+        state_slots=torch.tensor([0, 1, 2, 2], dtype=torch.int32),
+        state_reset_mask=None,
+        state_token_ranges=(),
+    )
+    context_module = types.ModuleType("nanovllm.utils.context")
+    context_module.get_context = lambda: context
+
+    with patch.dict(sys.modules, {"nanovllm.utils.context": context_module}):
+        padded_output = layer(padded_hidden)
+        padded_real_state = layer.state_pool.recurrent[:, :2].clone()
+        layer.state_pool.reset(torch.tensor([0, 1, 2]))
+        context.state_slots = torch.tensor([0, 1], dtype=torch.int32)
+        expected_output = layer(real_hidden)
+
+    torch.testing.assert_close(padded_output[:2], expected_output)
+    torch.testing.assert_close(
+        padded_real_state,
+        layer.state_pool.recurrent[:, :2],
+    )
+
+
 def test_equal_length_prefills_batch_without_changing_results():
     torch.manual_seed(23)
     layer = make_layer()

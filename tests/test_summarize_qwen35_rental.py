@@ -113,6 +113,20 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
             }},
         },
     )
+    write(
+        tmp_path / "cudagraph/tp4/run_1/summary.json",
+        {
+            "commit": "abc",
+            "git_dirty": False,
+            "cuda_available": True,
+            "passed": True,
+            "scenarios": [
+                {"batch_size": 3},
+                {"batch_size": 9},
+                {"batch_size": 64},
+            ],
+        },
+    )
 
     report = MODULE.summarize(tmp_path, run_id)
 
@@ -120,6 +134,7 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     assert report["performance"]["best_throughput"]["label"] == "batched"
     assert report["performance"]["lowest_peak_memory"]["label"] == "sorted"
     assert report["graph_safe_moe"]["all_tp_promoted"]
+    assert report["hybrid_cudagraph"]["all_tp_passed"]
     assert report["graph_safe_moe"]["by_tp"]["tp4"]["promotion"][
         "selected_decode_batches"
     ] == [1, 64]

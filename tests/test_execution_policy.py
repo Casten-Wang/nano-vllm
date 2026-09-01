@@ -120,6 +120,29 @@ class ExecutionPolicyTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "CUDA Graph"):
             select("mixed", use_cuda_graph=True)
 
+    def test_hybrid_cuda_graph_requires_graph_safe_moe_backend(self):
+        supports = self.execution.supports_cudagraph_policy
+        common = dict(
+            enforce_eager=False,
+            sliding_window_size=None,
+            is_hybrid=True,
+            kv_cache_dtype="auto",
+            kv_dequant_backend="fused",
+        )
+
+        self.assertFalse(
+            supports(qwen35_moe_decode_backend="sorted", **common)
+        )
+        self.assertTrue(
+            supports(qwen35_moe_decode_backend="batched", **common)
+        )
+        self.assertFalse(
+            supports(
+                qwen35_moe_decode_backend="batched",
+                **{**common, "kv_cache_dtype": "int8", "kv_dequant_backend": "torch"},
+            )
+        )
+
     def test_partition_count_uses_real_visible_context(self):
         count = self.execution.partition_count
 

@@ -16,6 +16,7 @@ MATRIX_SCRIPT = ROOT / "scripts" / "benchmark_qwen35_matrix.py"
 KERNEL_SCRIPT = ROOT / "scripts" / "benchmark_qwen35_kernels.py"
 QUALITY_SCRIPT = ROOT / "scripts" / "benchmark_qwen35_quality_matrix.py"
 SUMMARY_SCRIPT = ROOT / "scripts" / "summarize_qwen35_rental.py"
+CUDAGRAPH_PARITY_SCRIPT = ROOT / "scripts" / "verify_cudagraph_parity.py"
 
 
 def parse_tp_sizes(value: str) -> tuple[int, ...]:
@@ -84,6 +85,27 @@ def commands(args: argparse.Namespace) -> list[tuple[str, list[str]]]:
                     str(tp_size),
                     "--output",
                     str(root / "kernels" / f"tp{tp_size}.json"),
+                ],
+            )
+        )
+        result.append(
+            (
+                f"cudagraph-tp{tp_size}",
+                [
+                    sys.executable,
+                    str(CUDAGRAPH_PARITY_SCRIPT),
+                    "--model",
+                    args.model,
+                    "--tensor-parallel-size",
+                    str(tp_size),
+                    "--batch-sizes",
+                    f"3,9,{args.max_num_seqs}",
+                    "--max-num-seqs",
+                    str(args.max_num_seqs),
+                    "--qwen35-moe-decode-backend",
+                    "batched",
+                    "--result-dir",
+                    str(root / "cudagraph" / f"tp{tp_size}"),
                 ],
             )
         )
@@ -179,6 +201,15 @@ def collect_stage_artifacts(
     elif stage_name.startswith("kernels-tp"):
         required = [root / "kernels" / f"{stage_name.removeprefix('kernels-')}.json"]
         search_root = root / "kernels"
+    elif stage_name.startswith("cudagraph-tp"):
+        search_root = root / "cudagraph" / stage_name.removeprefix(
+            "cudagraph-"
+        )
+        required = sorted(search_root.glob("run_*/summary.json"))
+        if len(required) != 1:
+            raise RuntimeError(
+                f"stage {stage_name} must produce exactly one summary"
+            )
     elif stage_name == "performance-matrix":
         search_root = root / "performance"
         required = (
@@ -203,6 +234,7 @@ def collect_stage_artifacts(
         required
         if stage_name in ("preflight", "final-summary")
         or stage_name.startswith("kernels-tp")
+        or stage_name.startswith("cudagraph-tp")
         else sorted(search_root.rglob("*.json"))
     )
     if not artifacts:

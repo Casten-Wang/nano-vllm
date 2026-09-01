@@ -146,6 +146,11 @@ def summarize(run_dir: Path, run_id: str) -> dict:
     kernel_paths = sorted((run_dir / "kernels").glob("tp*.json"))
     if not kernel_paths:
         raise ValueError("no kernel benchmark artifacts were found")
+    cudagraph_paths = sorted(
+        (run_dir / "cudagraph").glob("tp*/run_*/summary.json")
+    )
+    if not cudagraph_paths:
+        raise ValueError("no CUDA Graph parity artifacts were found")
 
     valid_runs = [
         row
@@ -222,6 +227,23 @@ def summarize(run_dir: Path, run_id: str) -> dict:
         clean_worktrees = clean_worktrees and not result["git_dirty"]
         cuda_measurements = cuda_measurements and result["cuda_available"]
 
+    cudagraph = {}
+    for path in cudagraph_paths:
+        result = load_json(path)
+        tp_name = path.parents[1].name
+        if tp_name in cudagraph:
+            raise ValueError(f"multiple CUDA Graph summaries found for {tp_name}")
+        cudagraph[tp_name] = {
+            "passed": result["passed"],
+            "scenario_count": len(result["scenarios"]),
+            "batch_sizes": [
+                scenario["batch_size"] for scenario in result["scenarios"]
+            ],
+        }
+        commits.add(result["commit"])
+        clean_worktrees = clean_worktrees and not result["git_dirty"]
+        cuda_measurements = cuda_measurements and result["cuda_available"]
+
     quality_case_dirs = sorted(
         path
         for path in (run_dir / "quality").glob(f"{run_id}_qwen35_*")
@@ -248,6 +270,10 @@ def summarize(run_dir: Path, run_id: str) -> dict:
         "performance_output_parity": performance["all_output_digests_match"],
         "moe_runtime_output_parity": all(
             item["output_digest_matches"] for item in moe_runtime.values()
+        ),
+        "hybrid_cudagraph_parity": (
+            set(cudagraph) == set(kernels)
+            and all(item["passed"] for item in cudagraph.values())
         ),
         "quality_reads_stored_kv": all(
             row["kv_sensitive_token_rows"] > 0 for row in quality["cases"]
@@ -292,6 +318,13 @@ def summarize(run_dir: Path, run_id: str) -> dict:
             "runtime_all_tp_promoted": runtime_promoted,
             "by_tp": kernels,
             "runtime_by_tp": moe_runtime,
+        },
+        "hybrid_cudagraph": {
+            "all_tp_passed": all(
+                item["passed"] for item in cudagraph.values()
+            ),
+            "same_tp_coverage": set(cudagraph) == set(kernels),
+            "by_tp": cudagraph,
         },
     }
 

@@ -103,6 +103,7 @@ def load_model_runner_module():
         execution_module.cuda_graph_buckets = lambda value: (value,)
         execution_module.select_attention_paths = lambda **kwargs: ()
         execution_module.select_model_path = lambda *args, **kwargs: ""
+        execution_module.supports_cudagraph_policy = lambda **kwargs: False
         sequence_module.Sequence = object
         packing_module.PackedBlockMetadata = object
         packing_module.build_packed_block_metadata = lambda *args, **kwargs: None
@@ -428,8 +429,25 @@ class HybridStateContextTest(unittest.TestCase):
         runner = self.make_hybrid_runner()
         runner.enforce_eager = False
         runner.config.kv_cache_dtype = "auto"
+        runner.config.kv_dequant_backend = "fused"
+        runner.config.qwen35_moe_decode_backend = "sorted"
 
         self.assertFalse(runner.supports_cudagraph())
+
+    def test_hybrid_model_enables_graph_safe_decode(self):
+        runner = self.make_hybrid_runner()
+        runner.enforce_eager = False
+        runner.config.kv_cache_dtype = "auto"
+        runner.config.kv_dequant_backend = "fused"
+        runner.config.qwen35_moe_decode_backend = "batched"
+        original = model_runner_module.supports_cudagraph_policy
+        model_runner_module.supports_cudagraph_policy = (
+            lambda **kwargs: kwargs["qwen35_moe_decode_backend"] == "batched"
+        )
+        try:
+            self.assertTrue(runner.supports_cudagraph())
+        finally:
+            model_runner_module.supports_cudagraph_policy = original
 
     def test_recurrent_state_stats_report_local_storage(self):
         runner = object.__new__(ModelRunner)

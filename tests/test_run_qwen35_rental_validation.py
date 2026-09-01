@@ -37,14 +37,18 @@ def test_commands_are_fail_fast_and_cover_complete_validation_suite():
     assert [name for name, _ in stages] == [
         "preflight",
         "kernels-tp4",
+        "cudagraph-tp4",
         "kernels-tp8",
+        "cudagraph-tp8",
         "performance-matrix",
         "quality-matrix",
         "final-summary",
     ]
     assert "--preflight-only" in stages[0][1]
     assert stages[1][1][stages[1][1].index("--tp-size") + 1] == "4"
-    assert stages[2][1][stages[2][1].index("--tp-size") + 1] == "8"
+    assert stages[2][1][stages[2][1].index("--tensor-parallel-size") + 1] == "4"
+    assert stages[3][1][stages[3][1].index("--tp-size") + 1] == "8"
+    assert stages[4][1][stages[4][1].index("--tensor-parallel-size") + 1] == "8"
     assert "--no-checkpoint-audit" in stages[-3][1]
     assert "--no-memory-preflight" in stages[-3][1]
     assert "--include-moe-candidate" in stages[-3][1]
