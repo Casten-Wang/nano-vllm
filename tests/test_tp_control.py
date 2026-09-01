@@ -19,6 +19,16 @@ class FakeTensor:
     def cuda(self, non_blocking=False):
         return self
 
+    def numel(self):
+        return len(self.values)
+
+    def element_size(self):
+        return 2
+
+    @property
+    def dtype(self):
+        return "fake16"
+
 
 class FakeEvent:
     def __init__(self, ready=False):
@@ -328,6 +338,24 @@ class HybridStateContextTest(unittest.TestCase):
         runner.config.kv_cache_dtype = "auto"
 
         self.assertFalse(runner.supports_cudagraph())
+
+    def test_recurrent_state_stats_report_local_storage(self):
+        runner = object.__new__(ModelRunner)
+        first = SimpleNamespace(
+            state_pool=SimpleNamespace(
+                recurrent=FakeTensor(range(6)),
+                convolution=FakeTensor(range(4)),
+            )
+        )
+        second = SimpleNamespace(state_pool=None)
+        runner.model = SimpleNamespace(modules=lambda: [first, second])
+
+        stats = runner.get_recurrent_state_stats()
+
+        self.assertEqual(stats["layer_count"], 1)
+        self.assertEqual(stats["recurrent_bytes_local_rank"], 12)
+        self.assertEqual(stats["convolution_bytes_local_rank"], 8)
+        self.assertEqual(stats["total_bytes_local_rank"], 20)
 
 
 if __name__ == "__main__":

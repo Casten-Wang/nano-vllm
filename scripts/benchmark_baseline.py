@@ -49,6 +49,8 @@ def write_markdown(path: Path, result: dict) -> None:
         f"- max_model_len: `{result['max_model_len']}`",
         f"- max_num_batched_tokens: `{result['max_num_batched_tokens']}`",
         f"- max_num_seqs: `{result['max_num_seqs']}`",
+        f"- tensor_parallel_size: `{result['tensor_parallel_size']}`",
+        f"- recurrent_state_dtype: `{result['recurrent_state_dtype']}`",
         f"- kv_cache_dtype: `{result['kv_cache_dtype']}`",
         f"- kv_dequant_backend: `{result['kv_dequant_backend']}`",
         f"- int8_partitioned_decode_threshold: `{result['int8_partitioned_decode_threshold']}`",
@@ -71,6 +73,7 @@ def write_markdown(path: Path, result: dict) -> None:
         f"| peak_torch_reserved_mib | {result['peak_torch_reserved_mib']:.2f} |",
         f"| kv_storage_local_rank_mib | {result['kv_cache_storage']['total_mib']:.2f} |",
         f"| kv_storage_estimated_all_ranks_mib | {result['kv_cache_storage']['estimated_all_ranks_mib']:.2f} |",
+        f"| recurrent_state_local_rank_mib | {result['recurrent_state_storage']['total_bytes_local_rank'] / 1024 / 1024:.2f} |",
         f"| num_kvcache_blocks | {result['num_kvcache_blocks']} |",
         f"| final_used_kvcache_blocks | {result['final_used_kvcache_blocks']} |",
         f"| final_free_kvcache_blocks | {result['final_free_kvcache_blocks']} |",
@@ -99,6 +102,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-model-len", type=int, default=4096)
     parser.add_argument("--max-num-batched-tokens", type=int, default=16384)
     parser.add_argument("--max-num-seqs", type=int, default=512)
+    parser.add_argument("--tensor-parallel-size", type=int, default=1)
+    parser.add_argument(
+        "--recurrent-state-dtype",
+        choices=("float32", "model"),
+        default="float32",
+    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--vocab-size", type=int, default=10000)
     parser.add_argument("--enforce-eager", action="store_true")
@@ -148,6 +157,8 @@ def main() -> None:
         max_model_len=args.max_model_len,
         max_num_batched_tokens=args.max_num_batched_tokens,
         max_num_seqs=args.max_num_seqs,
+        tensor_parallel_size=args.tensor_parallel_size,
+        recurrent_state_dtype=args.recurrent_state_dtype,
         kv_cache_dtype=args.kv_cache_dtype,
         kv_dequant_backend=args.kv_dequant_backend,
         int8_partitioned_decode_threshold=args.int8_partitioned_decode_threshold,
@@ -199,6 +210,8 @@ def main() -> None:
         "max_model_len": args.max_model_len,
         "max_num_batched_tokens": args.max_num_batched_tokens,
         "max_num_seqs": args.max_num_seqs,
+        "tensor_parallel_size": args.tensor_parallel_size,
+        "recurrent_state_dtype": args.recurrent_state_dtype,
         "kv_cache_dtype": args.kv_cache_dtype,
         "kv_dequant_backend": args.kv_dequant_backend,
         "int8_partitioned_decode_threshold": args.int8_partitioned_decode_threshold,
@@ -218,6 +231,9 @@ def main() -> None:
         "peak_torch_reserved_mib": torch.cuda.max_memory_reserved() / 1024 / 1024,
         "num_kvcache_blocks": llm.model_runner.config.num_kvcache_blocks,
         "kv_cache_storage": kv_cache_storage_metadata(llm.model_runner),
+        "recurrent_state_storage": llm.model_runner.call(
+            "get_recurrent_state_stats"
+        ),
         "model_config": model_config_metadata(llm.model_runner.config.hf_config),
         "final_used_kvcache_blocks": block_manager.num_used_blocks,
         "final_free_kvcache_blocks": block_manager.num_free_blocks,

@@ -208,6 +208,32 @@ class ModelRunner:
     def get_cudagraph_capture_stats(self):
         return self.cudagraph_capture_stats
 
+    def get_recurrent_state_stats(self):
+        recurrent_bytes = 0
+        convolution_bytes = 0
+        recurrent_dtypes = set()
+        convolution_dtypes = set()
+        layer_count = 0
+        for module in self.model.modules():
+            pool = getattr(module, "state_pool", None)
+            if pool is None:
+                continue
+            layer_count += 1
+            recurrent_bytes += pool.recurrent.numel() * pool.recurrent.element_size()
+            convolution_bytes += (
+                pool.convolution.numel() * pool.convolution.element_size()
+            )
+            recurrent_dtypes.add(str(pool.recurrent.dtype))
+            convolution_dtypes.add(str(pool.convolution.dtype))
+        return {
+            "layer_count": layer_count,
+            "recurrent_bytes_local_rank": recurrent_bytes,
+            "convolution_bytes_local_rank": convolution_bytes,
+            "total_bytes_local_rank": recurrent_bytes + convolution_bytes,
+            "recurrent_dtypes": sorted(recurrent_dtypes),
+            "convolution_dtypes": sorted(convolution_dtypes),
+        }
+
     def _record_execution(
         self,
         *,
