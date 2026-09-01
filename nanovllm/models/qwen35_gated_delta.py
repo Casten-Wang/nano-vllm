@@ -528,6 +528,53 @@ class Qwen35GatedDeltaNet(nn.Module):
             z.reshape(-1, self.value_head_dim),
         ).reshape(batch_size, self.local_value_dim)
 
+    def _prefill_batch(
+        self,
+        mixed_qkv: torch.Tensor,
+        z: torch.Tensor,
+        beta: torch.Tensor,
+        log_decay: torch.Tensor,
+        slots: torch.Tensor,
+    ) -> torch.Tensor:
+        assert self.state_pool is not None
+        recurrent_state, conv_state = self.state_pool.get(0, slots)
+        convolved, conv_state = causal_conv1d_scan(
+            mixed_qkv,
+            conv_state,
+            self.conv1d.weight.squeeze(1),
+        )
+        query, key, value = convolved.split(
+            (self.local_key_dim, self.local_key_dim, self.local_value_dim),
+            dim=-1,
+        )
+        batch_size, sequence_length = mixed_qkv.shape[:2]
+        query = query.view(
+            batch_size, sequence_length, self.num_k_heads, self.key_head_dim
+        )
+        key = key.view(
+            batch_size, sequence_length, self.num_k_heads, self.key_head_dim
+        )
+        value = value.view(
+            batch_size, sequence_length, self.num_v_heads, self.value_head_dim
+        )
+        repeat_factor = self.num_v_heads // self.num_k_heads
+        if repeat_factor > 1:
+            query = query.repeat_interleave(repeat_factor, dim=2)
+            key = key.repeat_interleave(repeat_factor, dim=2)
+        output, recurrent_state = chunk_gated_delta_rule(
+            query,
+            key,
+            value,
+            log_decay,
+            beta,
+            recurrent_state,
+        )
+        self.state_pool.update(0, slots, recurrent_state, conv_state)
+        return self.norm(
+            output.reshape(-1, self.value_head_dim),
+            z.reshape(-1, self.value_head_dim),
+        ).reshape(batch_size, sequence_length, self.local_value_dim)
+
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         from nanovllm.utils.context import get_context
 
@@ -558,8 +605,6 @@ class Qwen35GatedDeltaNet(nn.Module):
             a.float() + self.dt_bias
         )
         outputs = torch.empty_like(z)
-        repeat_factor = self.num_v_heads // self.num_k_heads
-
         if decode_count:
             decode_slots = context.state_slots[:decode_count].to(torch.long)
             outputs[:decode_count] = self._decode_batch(
@@ -570,43 +615,33 @@ class Qwen35GatedDeltaNet(nn.Module):
                 decode_slots,
             )
 
+        ranges_by_length: dict[int, list[tuple[int, int, int]]] = {}
         for (start, end), slot in zip(ranges, slots[decode_count:]):
-            slot_tensor = context.state_slots.new_tensor([slot], dtype=torch.long)
-            recurrent_state, conv_state = self.state_pool.get(0, slot_tensor)
-            convolved, conv_state = causal_conv1d_scan(
-                mixed_qkv[start:end].unsqueeze(0),
-                conv_state,
-                self.conv1d.weight.squeeze(1),
+            ranges_by_length.setdefault(end - start, []).append((start, end, slot))
+        for sequence_length, group in ranges_by_length.items():
+            group_slots = context.state_slots.new_tensor(
+                [slot for _, _, slot in group],
+                dtype=torch.long,
             )
-            query, key, value = convolved.split(
-                (self.local_key_dim, self.local_key_dim, self.local_value_dim),
-                dim=-1,
+            group_qkv = torch.stack(
+                [mixed_qkv[start:end] for start, end, _ in group]
             )
-            query = query.view(1, end - start, self.num_k_heads, self.key_head_dim)
-            key = key.view(1, end - start, self.num_k_heads, self.key_head_dim)
-            value = value.view(1, end - start, self.num_v_heads, self.value_head_dim)
-            if repeat_factor > 1:
-                query = query.repeat_interleave(repeat_factor, dim=2)
-                key = key.repeat_interleave(repeat_factor, dim=2)
-            delta_rule = (
-                chunk_gated_delta_rule
-                if end - start > 1
-                else recurrent_gated_delta_rule
+            group_z = torch.stack([z[start:end] for start, end, _ in group])
+            group_beta = torch.stack(
+                [beta[start:end] for start, end, _ in group]
             )
-            output, recurrent_state = delta_rule(
-                query,
-                key,
-                value,
-                log_decay[start:end].unsqueeze(0),
-                beta[start:end].unsqueeze(0),
-                recurrent_state,
+            group_decay = torch.stack(
+                [log_decay[start:end] for start, end, _ in group]
             )
-            gated = self.norm(
-                output.reshape(-1, self.value_head_dim),
-                z[start:end].reshape(-1, self.value_head_dim),
+            group_output = self._prefill_batch(
+                group_qkv,
+                group_z,
+                group_beta,
+                group_decay,
+                group_slots,
             )
-            outputs[start:end] = gated.reshape(end - start, self.local_value_dim)
-            self.state_pool.update(0, slot_tensor, recurrent_state, conv_state)
+            for batch_index, (start, end, _) in enumerate(group):
+                outputs[start:end] = group_output[batch_index, :sequence_length]
 
         projected = self.out_proj(outputs)
         if self.tp_size > 1:

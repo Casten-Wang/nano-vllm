@@ -323,3 +323,35 @@ def test_batched_decode_matches_individual_slot_updates():
 
     torch.testing.assert_close(torch.cat(individual), batched)
     torch.testing.assert_close(layer.state_pool.recurrent, batched_state)
+
+
+def test_equal_length_prefills_batch_without_changing_results():
+    torch.manual_seed(23)
+    layer = make_layer()
+    layer.allocate_state_cache(4, "cpu")
+    for parameter in layer.parameters():
+        parameter.data.normal_(mean=0.0, std=0.2)
+    hidden = torch.randn(6, 4)
+    context = SimpleNamespace(
+        is_mixed=False,
+        is_prefill=True,
+        cu_seqlens_q=torch.tensor([0, 3, 6], dtype=torch.int32),
+        state_slots=torch.tensor([0, 2], dtype=torch.int32),
+        state_reset_mask=torch.tensor([True, True]),
+    )
+    context_module = types.ModuleType("nanovllm.utils.context")
+    context_module.get_context = lambda: context
+
+    with patch.dict(sys.modules, {"nanovllm.utils.context": context_module}):
+        batched = layer(hidden)
+        batched_state = layer.state_pool.recurrent.clone()
+        layer.state_pool.reset(torch.tensor([0, 2]))
+        individual = []
+        for start, slot in ((0, 0), (3, 2)):
+            context.cu_seqlens_q = torch.tensor([0, 3], dtype=torch.int32)
+            context.state_slots = torch.tensor([slot], dtype=torch.int32)
+            context.state_reset_mask = torch.tensor([True])
+            individual.append(layer(hidden[start : start + 3]))
+
+    torch.testing.assert_close(torch.cat(individual), batched)
+    torch.testing.assert_close(layer.state_pool.recurrent, batched_state)
