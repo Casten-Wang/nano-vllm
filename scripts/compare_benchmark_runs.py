@@ -57,6 +57,8 @@ def load_result(path: Path) -> dict:
             *WORKLOAD_FIELDS,
             *ENVIRONMENT_FIELDS,
             "model",
+            "commit",
+            "git_dirty",
             "checkpoint_manifest",
             *OPTIMIZATION_FIELDS,
             "output_throughput_tok_s",
@@ -74,12 +76,26 @@ def load_result(path: Path) -> dict:
         checkpoint_manifest.get("digest"), str
     ):
         raise ValueError(f"{path} has an invalid checkpoint manifest")
+    if result["git_dirty"]:
+        raise ValueError(
+            f"{path} was captured from a dirty worktree and is not reproducible"
+        )
+    if not isinstance(result["commit"], str) or result["commit"] == "unknown":
+        raise ValueError(f"{path} has no reproducible Git commit identity")
     return result
 
 
 def compare_results(results: list[dict], labels: list[str]) -> dict:
     if len(results) < 2 or len(results) != len(labels):
         raise ValueError("at least two results with matching labels are required")
+    dirty_runs = [
+        label for label, result in zip(labels, results) if result.get("git_dirty")
+    ]
+    if dirty_runs:
+        raise ValueError(
+            "benchmark runs are not reproducible because their worktrees "
+            f"were dirty: {', '.join(dirty_runs)}"
+        )
     baseline = results[0]
     baseline_checkpoint = baseline["checkpoint_manifest"]["digest"]
     mismatches = []
@@ -145,6 +161,10 @@ def compare_results(results: list[dict], labels: list[str]) -> dict:
             "checkpoint_manifest_digest": baseline_checkpoint,
             **{field: baseline[field] for field in WORKLOAD_FIELDS},
         },
+        "commits": [result["commit"] for result in results],
+        "checkpoint_identity_strength": baseline["checkpoint_manifest"].get(
+            "strength", "unknown"
+        ),
         "environment": {
             field: baseline[field] for field in ENVIRONMENT_FIELDS
         },

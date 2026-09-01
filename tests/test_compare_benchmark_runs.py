@@ -27,7 +27,12 @@ def result(
 ):
     return {
         "model": "Qwen/Qwen3.5-35B-A3B",
-        "checkpoint_manifest": {"digest": checkpoint_digest},
+        "commit": "0123456789abcdef",
+        "git_dirty": False,
+        "checkpoint_manifest": {
+            "digest": checkpoint_digest,
+            "strength": "content-addressed",
+        },
         "num_seqs": 16,
         "input_len": input_len,
         "output_len": 32,
@@ -83,6 +88,11 @@ def test_comparison_reports_relative_metrics_and_output_parity():
     assert candidate_row["peak_memory_vs_baseline"] == 0.75
     assert comparison["all_output_digests_match"]
     assert comparison["all_execution_paths_valid"]
+    assert comparison["commits"] == [
+        "0123456789abcdef",
+        "0123456789abcdef",
+    ]
+    assert comparison["checkpoint_identity_strength"] == "content-addressed"
 
 
 def test_comparison_allows_explicit_optimization_variables_to_change():
@@ -160,3 +170,34 @@ def test_load_result_rejects_invalid_checkpoint_manifest(tmp_path):
 
     with pytest.raises(ValueError, match="invalid checkpoint manifest"):
         MODULE.load_result(path)
+
+
+def test_load_result_rejects_dirty_worktree(tmp_path):
+    path = tmp_path / "result.json"
+    value = result()
+    value["git_dirty"] = True
+    path.write_text(json.dumps(value))
+
+    with pytest.raises(ValueError, match="dirty worktree"):
+        MODULE.load_result(path)
+
+
+def test_load_result_rejects_unknown_commit(tmp_path):
+    path = tmp_path / "result.json"
+    value = result()
+    value["commit"] = "unknown"
+    path.write_text(json.dumps(value))
+
+    with pytest.raises(ValueError, match="Git commit identity"):
+        MODULE.load_result(path)
+
+
+def test_comparison_rejects_dirty_worktree():
+    candidate = result()
+    candidate["git_dirty"] = True
+
+    with pytest.raises(ValueError, match="candidate"):
+        MODULE.compare_results(
+            [result(), candidate],
+            ["baseline", "candidate"],
+        )
