@@ -14,6 +14,7 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 MATRIX_SCRIPT = ROOT / "scripts" / "benchmark_qwen35_matrix.py"
 KERNEL_SCRIPT = ROOT / "scripts" / "benchmark_qwen35_kernels.py"
+ATTENTION_KERNEL_SCRIPT = ROOT / "scripts" / "benchmark_attention_kernel.py"
 QUALITY_SCRIPT = ROOT / "scripts" / "benchmark_qwen35_quality_matrix.py"
 SUMMARY_SCRIPT = ROOT / "scripts" / "summarize_qwen35_rental.py"
 CUDAGRAPH_PARITY_SCRIPT = ROOT / "scripts" / "verify_cudagraph_parity.py"
@@ -74,6 +75,7 @@ def commands(args: argparse.Namespace) -> list[tuple[str, list[str]]]:
         )
     ]
     for tp_size in args.tp_sizes:
+        local_query_heads = 16 // tp_size
         result.append(
             (
                 f"kernels-tp{tp_size}",
@@ -89,6 +91,30 @@ def commands(args: argparse.Namespace) -> list[tuple[str, list[str]]]:
                 ],
             )
         )
+        for context_name, context_len in (("short", 4096), ("long", 16384)):
+            command = [
+                sys.executable,
+                str(ATTENTION_KERNEL_SCRIPT),
+                "--batch-size",
+                "4",
+                "--context-len",
+                str(context_len),
+                "--num-heads",
+                str(local_query_heads),
+                "--num-kv-heads",
+                "1",
+                "--head-dim",
+                "256",
+                "--result-dir",
+                str(root / "attention" / f"tp{tp_size}"),
+                "--name",
+                context_name,
+            ]
+            if context_name == "long":
+                command.append("--include-partitioned")
+            result.append(
+                (f"attention-{context_name}-tp{tp_size}", command)
+            )
         result.append(
             (
                 f"cudagraph-tp{tp_size}",
@@ -202,6 +228,10 @@ def collect_stage_artifacts(
     elif stage_name.startswith("kernels-tp"):
         required = [root / "kernels" / f"{stage_name.removeprefix('kernels-')}.json"]
         search_root = root / "kernels"
+    elif stage_name.startswith("attention-"):
+        _, context_name, tp_name = stage_name.split("-")
+        search_root = root / "attention" / tp_name
+        required = [search_root / f"{context_name}.json"]
     elif stage_name.startswith("cudagraph-tp"):
         search_root = root / "cudagraph" / stage_name.removeprefix(
             "cudagraph-"
@@ -235,6 +265,7 @@ def collect_stage_artifacts(
         required
         if stage_name in ("preflight", "final-summary")
         or stage_name.startswith("kernels-tp")
+        or stage_name.startswith("attention-")
         or stage_name.startswith("cudagraph-tp")
         else sorted(search_root.rglob("*.json"))
     )

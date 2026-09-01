@@ -18,6 +18,42 @@ def write(path, value):
     path.write_text(json.dumps(value))
 
 
+def write_attention_case(root, name, context_len, *, partitioned):
+    results = {
+        "flash_reference": {
+            "status": "ok",
+            "median_ms": 2.0,
+        },
+        "int8_v3_bt256_w8_s2": {
+            "status": "ok",
+            "median_ms": 1.0,
+            "max_abs_diff_vs_flash_reference": 0.01,
+            "peak_extra_mib": 2.0,
+        },
+    }
+    if partitioned:
+        results["int8_partitioned_ps256"] = {
+            "status": "ok",
+            "median_ms": 0.8,
+            "max_abs_diff_vs_flash_reference": 0.02,
+            "peak_extra_mib": 4.0,
+        }
+    write(
+        root / f"attention/tp4/{name}.json",
+        {
+            "commit": "abc",
+            "git_dirty": False,
+            "cuda_available": True,
+            "batch_size": 4,
+            "context_len": context_len,
+            "num_heads": 4,
+            "num_kv_heads": 1,
+            "head_dim": 256,
+            "results": results,
+        },
+    )
+
+
 def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     run_id = "rental-a"
     write(tmp_path / "preflight/checkpoint_mapping_audit.json", {"valid": True, "complete": True})
@@ -128,6 +164,8 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
             ],
         },
     )
+    write_attention_case(tmp_path, "short", 4096, partitioned=False)
+    write_attention_case(tmp_path, "long", 16384, partitioned=True)
 
     report = MODULE.summarize(tmp_path, run_id)
 
@@ -145,6 +183,11 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     assert runtime["tpot_speedup"] == 2.0
     assert runtime["peak_memory_delta_mib"] == 4
     assert runtime["promotion"]["promote_to_default"]
+    attention = report["int8_attention"]["by_tp"]["tp4"]
+    assert attention["short"]["best_fused"]["speedup_vs_flash_reference"] == 2.0
+    assert attention["long"]["best_partitioned"]["backend"] == (
+        "int8_partitioned_ps256"
+    )
 
 
 def test_runtime_promotion_rejects_unstable_or_regressing_candidate():

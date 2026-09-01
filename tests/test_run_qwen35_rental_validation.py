@@ -37,8 +37,12 @@ def test_commands_are_fail_fast_and_cover_complete_validation_suite():
     assert [name for name, _ in stages] == [
         "preflight",
         "kernels-tp4",
+        "attention-short-tp4",
+        "attention-long-tp4",
         "cudagraph-tp4",
         "kernels-tp8",
+        "attention-short-tp8",
+        "attention-long-tp8",
         "cudagraph-tp8",
         "performance-matrix",
         "quality-matrix",
@@ -46,9 +50,15 @@ def test_commands_are_fail_fast_and_cover_complete_validation_suite():
     ]
     assert "--preflight-only" in stages[0][1]
     assert stages[1][1][stages[1][1].index("--tp-size") + 1] == "4"
-    assert stages[2][1][stages[2][1].index("--tensor-parallel-size") + 1] == "4"
-    assert stages[3][1][stages[3][1].index("--tp-size") + 1] == "8"
-    assert stages[4][1][stages[4][1].index("--tensor-parallel-size") + 1] == "8"
+    assert stages[2][1][stages[2][1].index("--context-len") + 1] == "4096"
+    assert stages[2][1][stages[2][1].index("--num-heads") + 1] == "4"
+    assert "--include-partitioned" not in stages[2][1]
+    assert stages[3][1][stages[3][1].index("--context-len") + 1] == "16384"
+    assert "--include-partitioned" in stages[3][1]
+    assert stages[4][1][stages[4][1].index("--tensor-parallel-size") + 1] == "4"
+    assert stages[5][1][stages[5][1].index("--tp-size") + 1] == "8"
+    assert stages[6][1][stages[6][1].index("--num-heads") + 1] == "2"
+    assert stages[8][1][stages[8][1].index("--tensor-parallel-size") + 1] == "8"
     assert "--no-checkpoint-audit" in stages[-3][1]
     assert "--no-memory-preflight" in stages[-3][1]
     assert "--include-moe-candidate" in stages[-3][1]

@@ -11,6 +11,11 @@ MOE_RUNTIME_MIN_THROUGHPUT_RATIO = 0.99
 MOE_RUNTIME_MIN_TPOT_SPEEDUP = 1.02
 MOE_RUNTIME_MAX_PEAK_EXTRA_MIB = 64.0
 MOE_RUNTIME_MAX_CV = 0.05
+QWEN35_TOTAL_QUERY_HEADS = 16
+QWEN35_KV_HEADS_PER_RANK = 1
+QWEN35_HEAD_DIM = 256
+ATTENTION_SHORT_CONTEXT = 4096
+ATTENTION_LONG_CONTEXT = 16384
 
 
 def load_json(path: Path) -> dict:
@@ -136,6 +141,51 @@ def summarize_moe_runtime(rows: list[dict]) -> dict[str, dict]:
     return comparisons
 
 
+def summarize_attention_case(result: dict, *, partitioned: bool) -> dict:
+    reference = result["results"]["flash_reference"]
+    fused = [
+        (name, item)
+        for name, item in result["results"].items()
+        if name.startswith("int8_")
+        and not name.startswith("int8_partitioned_")
+        and item.get("status") == "ok"
+    ]
+    partitioned_results = [
+        (name, item)
+        for name, item in result["results"].items()
+        if name.startswith("int8_partitioned_") and item.get("status") == "ok"
+    ]
+    if not fused:
+        raise ValueError("attention benchmark has no successful fused INT8 kernel")
+    if partitioned and not partitioned_results:
+        raise ValueError(
+            "long-context attention benchmark has no successful partitioned kernel"
+        )
+
+    def best(items: list[tuple[str, dict]]) -> dict | None:
+        if not items:
+            return None
+        name, item = min(items, key=lambda pair: pair[1]["median_ms"])
+        return {
+            "backend": name,
+            "median_ms": item["median_ms"],
+            "speedup_vs_flash_reference": (
+                reference["median_ms"] / item["median_ms"]
+            ),
+            "max_abs_diff_vs_flash_reference": item[
+                "max_abs_diff_vs_flash_reference"
+            ],
+            "peak_extra_mib": item["peak_extra_mib"],
+        }
+
+    return {
+        "context_len": result["context_len"],
+        "batch_size": result["batch_size"],
+        "best_fused": best(fused),
+        "best_partitioned": best(partitioned_results),
+    }
+
+
 def summarize(run_dir: Path, run_id: str) -> dict:
     audit = load_json(run_dir / "preflight" / "checkpoint_mapping_audit.json")
     memory = load_json(run_dir / "preflight" / "memory_preflight.json")
@@ -179,6 +229,40 @@ def summarize(run_dir: Path, run_id: str) -> dict:
     }
     clean_worktrees = True
     cuda_measurements = True
+    expected_tp_names = {
+        f"tp{row['tensor_parallel_size']}" for row in performance["runs"]
+    }
+    attention = {}
+    attention_valid = True
+    for tp_name in sorted(expected_tp_names):
+        tp_size = int(tp_name.removeprefix("tp"))
+        cases = {}
+        for case_name, context_len, partitioned in (
+            ("short", ATTENTION_SHORT_CONTEXT, False),
+            ("long", ATTENTION_LONG_CONTEXT, True),
+        ):
+            result = load_json(
+                run_dir / "attention" / tp_name / f"{case_name}.json"
+            )
+            dimensions_valid = (
+                result["context_len"] == context_len
+                and result["num_heads"]
+                == QWEN35_TOTAL_QUERY_HEADS // tp_size
+                and result["num_kv_heads"] == QWEN35_KV_HEADS_PER_RANK
+                and result["head_dim"] == QWEN35_HEAD_DIM
+            )
+            attention_valid = (
+                attention_valid
+                and dimensions_valid
+                and result["cuda_available"]
+            )
+            cases[case_name] = {
+                "dimensions_valid": dimensions_valid,
+                **summarize_attention_case(result, partitioned=partitioned),
+            }
+            commits.add(result["commit"])
+            clean_worktrees = clean_worktrees and not result["git_dirty"]
+        attention[tp_name] = cases
     for path in kernel_paths:
         result = load_json(path)
         dispatch_results = result["results"]["expert_dispatch_torch"]
@@ -285,6 +369,9 @@ def summarize(run_dir: Path, run_id: str) -> dict:
                 for item in cudagraph.values()
             )
         ),
+        "attention_kernel_evidence": (
+            set(attention) == expected_tp_names and attention_valid
+        ),
         "quality_reads_stored_kv": all(
             row["kv_sensitive_token_rows"] > 0 for row in quality["cases"]
         ),
@@ -336,6 +423,11 @@ def summarize(run_dir: Path, run_id: str) -> dict:
             ),
             "same_tp_coverage": set(cudagraph) == set(kernels),
             "by_tp": cudagraph,
+        },
+        "int8_attention": {
+            "short_context": ATTENTION_SHORT_CONTEXT,
+            "long_context": ATTENTION_LONG_CONTEXT,
+            "by_tp": attention,
         },
     }
 
