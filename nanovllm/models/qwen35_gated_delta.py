@@ -475,19 +475,58 @@ class Qwen35GatedDeltaNet(nn.Module):
         )
 
     @staticmethod
-    def _sequence_ranges(context, token_count: int) -> list[tuple[int, int]]:
+    def _prefill_ranges(context) -> list[tuple[int, int]]:
         if context.is_mixed:
-            ranges = [(index, index + 1) for index in range(context.decode_token_count)]
             offsets = context.prefill_cu_seqlens_q.tolist()
-            ranges.extend(
+            return [
                 (context.decode_token_count + start, context.decode_token_count + end)
                 for start, end in zip(offsets, offsets[1:])
-            )
-            return ranges
+            ]
         if context.is_prefill:
             offsets = context.cu_seqlens_q.tolist()
             return list(zip(offsets, offsets[1:]))
-        return [(index, index + 1) for index in range(token_count)]
+        return []
+
+    def _decode_batch(
+        self,
+        mixed_qkv: torch.Tensor,
+        z: torch.Tensor,
+        beta: torch.Tensor,
+        log_decay: torch.Tensor,
+        slots: torch.Tensor,
+    ) -> torch.Tensor:
+        assert self.state_pool is not None
+        recurrent_state, conv_state = self.state_pool.get(0, slots)
+        convolved, conv_state = causal_conv1d_scan(
+            mixed_qkv.unsqueeze(1),
+            conv_state,
+            self.conv1d.weight.squeeze(1),
+        )
+        query, key, value = convolved.split(
+            (self.local_key_dim, self.local_key_dim, self.local_value_dim),
+            dim=-1,
+        )
+        batch_size = mixed_qkv.shape[0]
+        query = query.view(batch_size, 1, self.num_k_heads, self.key_head_dim)
+        key = key.view(batch_size, 1, self.num_k_heads, self.key_head_dim)
+        value = value.view(batch_size, 1, self.num_v_heads, self.value_head_dim)
+        repeat_factor = self.num_v_heads // self.num_k_heads
+        if repeat_factor > 1:
+            query = query.repeat_interleave(repeat_factor, dim=2)
+            key = key.repeat_interleave(repeat_factor, dim=2)
+        output, recurrent_state = recurrent_gated_delta_rule(
+            query,
+            key,
+            value,
+            log_decay.unsqueeze(1),
+            beta.unsqueeze(1),
+            recurrent_state,
+        )
+        self.state_pool.update(0, slots, recurrent_state, conv_state)
+        return self.norm(
+            output.reshape(-1, self.value_head_dim),
+            z.reshape(-1, self.value_head_dim),
+        ).reshape(batch_size, self.local_value_dim)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         from nanovllm.utils.context import get_context
@@ -497,9 +536,14 @@ class Qwen35GatedDeltaNet(nn.Module):
         context = get_context()
         if context.state_slots is None:
             raise RuntimeError("Qwen3.5 execution context has no state slots")
-        ranges = self._sequence_ranges(context, hidden_states.shape[0])
+        ranges = self._prefill_ranges(context)
         slots = context.state_slots.tolist()
-        if len(ranges) != len(slots):
+        decode_count = (
+            context.decode_token_count
+            if context.is_mixed
+            else (0 if context.is_prefill else hidden_states.shape[0])
+        )
+        if len(ranges) + decode_count != len(slots):
             raise RuntimeError("sequence ranges and recurrent state slots differ")
         if context.state_reset_mask is not None:
             reset_slots = context.state_slots[context.state_reset_mask]
@@ -516,7 +560,17 @@ class Qwen35GatedDeltaNet(nn.Module):
         outputs = torch.empty_like(z)
         repeat_factor = self.num_v_heads // self.num_k_heads
 
-        for (start, end), slot in zip(ranges, slots):
+        if decode_count:
+            decode_slots = context.state_slots[:decode_count].to(torch.long)
+            outputs[:decode_count] = self._decode_batch(
+                mixed_qkv[:decode_count],
+                z[:decode_count],
+                beta[:decode_count],
+                log_decay[:decode_count],
+                decode_slots,
+            )
+
+        for (start, end), slot in zip(ranges, slots[decode_count:]):
             slot_tensor = context.state_slots.new_tensor([slot], dtype=torch.long)
             recurrent_state, conv_state = self.state_pool.get(0, slot_tensor)
             convolved, conv_state = causal_conv1d_scan(
