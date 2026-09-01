@@ -84,7 +84,33 @@ def test_case_command_is_eager_and_fully_identified():
     assert command[command.index("--recurrent-state-dtype") + 1] == "model"
     assert command[command.index("--kv-cache-dtype") + 1] == "int8"
     assert command[command.index("--name") + 1] == "qwen35_tp8_state-model_kv-int8_r2"
+    assert command[command.index("--require-paths") + 1] == (
+        "prefill_eager,decode_eager,int8_prefill,int8_fused_decode"
+    )
     assert "--enforce-eager" in command
+
+
+def test_float_kv_case_requires_float_attention_paths():
+    paths = MODULE.required_paths(
+        args(),
+        MODULE.BenchmarkCase(4, "float32", "auto"),
+    )
+
+    assert paths == (
+        "prefill_eager",
+        "decode_eager",
+        "float_flash_prefill",
+        "float_flash_decode",
+    )
+
+
+def test_long_context_int8_case_requires_partitioned_decode():
+    paths = MODULE.required_paths(
+        args(input_len=8192),
+        MODULE.BenchmarkCase(8, "model", "int8"),
+    )
+
+    assert paths[-1] == "int8_partitioned_decode"
 
 
 def test_checkpoint_audit_covers_selected_tp_sizes():

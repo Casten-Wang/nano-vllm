@@ -10,6 +10,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 BASELINE_SCRIPT = ROOT / "scripts" / "benchmark_baseline.py"
 AUDIT_SCRIPT = ROOT / "scripts" / "audit_checkpoint_mapping.py"
+INT8_PARTITION_THRESHOLD = 8192
 
 
 @dataclass(frozen=True)
@@ -78,11 +79,30 @@ def command_for_case(
         name,
         "--result-dir",
         args.result_dir,
+        "--require-paths",
+        ",".join(required_paths(args, case)),
         "--enforce-eager",
     ]
     if not args.warmup:
         command.append("--no-warmup")
     return command
+
+
+def required_paths(
+    args: argparse.Namespace,
+    case: BenchmarkCase,
+) -> tuple[str, ...]:
+    paths = ["prefill_eager", "decode_eager"]
+    if case.kv_cache_dtype == "auto":
+        paths.extend(("float_flash_prefill", "float_flash_decode"))
+    else:
+        paths.append("int8_prefill")
+        paths.append(
+            "int8_partitioned_decode"
+            if args.input_len >= INT8_PARTITION_THRESHOLD
+            else "int8_fused_decode"
+        )
+    return tuple(paths)
 
 
 def checkpoint_audit_command(args: argparse.Namespace) -> list[str]:
@@ -127,7 +147,7 @@ def parse_args() -> argparse.Namespace:
         help="Concurrent state slots; defaults to --num-seqs.",
     )
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--repeats", type=int, default=1)
+    parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument("--result-dir", default="benchmark_results/qwen35_matrix")
     parser.add_argument("--warmup", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--dry-run", action="store_true")
