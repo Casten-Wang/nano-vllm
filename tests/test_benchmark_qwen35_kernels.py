@@ -87,3 +87,28 @@ def test_expert_dispatch_sweep_preserves_requested_token_counts(monkeypatch):
     assert calls == [1, 8, 32, 128, 512]
     assert list(result) == ["1", "8", "32", "128", "512"]
     assert result["128"] == {"tokens": 128}
+
+
+def test_single_token_dispatch_reports_general_path_baseline():
+    args = SimpleNamespace(
+        moe_intermediate_size=8,
+        tp_size=1,
+        hidden_size=4,
+        num_experts=4,
+        top_k=2,
+        num_hidden_layers=1,
+        warmup=0,
+        iterations=1,
+        repeats=1,
+    )
+
+    result = MODULE.benchmark_expert_dispatch(
+        args,
+        torch.device("cpu"),
+        torch.float32,
+        1,
+    )
+
+    assert result["single_token_decode_fast_path"]
+    assert result["general_dispatch_baseline"]["median_ms"] > 0
+    assert result["decode_fast_path_speedup"] > 0

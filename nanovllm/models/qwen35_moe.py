@@ -173,6 +173,28 @@ class Qwen35Experts(nn.Module):
         topk_weights: torch.Tensor,
     ) -> torch.Tensor:
         output = torch.zeros_like(hidden_states)
+        if hidden_states.shape[0] == 1:
+            # Decode has only ``top_k`` routes. Preserve the expert-sorted
+            # accumulation order without building the general flattened
+            # token/group metadata used by prefill batches.
+            route_order = torch.argsort(topk_ids[0], stable=True)
+            routes = torch.stack(
+                (topk_ids[0, route_order], route_order), dim=1
+            ).cpu().tolist()
+            for expert_id, route_index in routes:
+                gate_up = F.linear(hidden_states, self.gate_up_proj[expert_id])
+                gate, up = gate_up.chunk(2, dim=-1)
+                expert_output = F.linear(
+                    F.silu(gate) * up,
+                    self.down_proj[expert_id],
+                )
+                output.add_(
+                    expert_output * topk_weights[0, route_index]
+                )
+            if self.tp_size > 1:
+                dist.all_reduce(output)
+            return output
+
         assignments = topk_ids.reshape(-1)
         routing_weights = topk_weights.reshape(-1)
         order = torch.argsort(assignments, stable=True)

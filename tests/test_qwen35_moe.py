@@ -158,6 +158,37 @@ def test_sorted_expert_dispatch_only_groups_active_experts():
     assert torch.isfinite(output).all()
 
 
+def test_single_token_decode_skips_general_expert_grouping():
+    torch.manual_seed(43)
+    experts = make_experts(num_experts=4)
+    experts.gate_up_proj.data.normal_()
+    experts.down_proj.data.normal_()
+    hidden = torch.randn(1, 2)
+    topk_ids = torch.tensor([[3, 0]])
+    topk_weights = torch.tensor([[0.4, 0.6]])
+
+    expected = torch.zeros_like(hidden)
+    for expert_id, route_index in ((0, 1), (3, 0)):
+        gate_up = torch.nn.functional.linear(
+            hidden, experts.gate_up_proj[expert_id]
+        )
+        gate, up = gate_up.chunk(2, dim=-1)
+        expert_output = torch.nn.functional.linear(
+            torch.nn.functional.silu(gate) * up,
+            experts.down_proj[expert_id],
+        )
+        expected.add_(expert_output * topk_weights[0, route_index])
+
+    with patch.object(
+        qwen35_moe.torch,
+        "unique_consecutive",
+        side_effect=AssertionError("decode should skip general grouping"),
+    ):
+        actual = experts(hidden, topk_ids, topk_weights)
+
+    assert torch.equal(actual, expected)
+
+
 def test_tensor_parallel_expert_outputs_sum_to_single_rank_reference():
     torch.manual_seed(13)
     full = make_experts(world_size=1)

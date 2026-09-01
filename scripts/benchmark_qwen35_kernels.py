@@ -183,6 +183,41 @@ def expert_dispatch(
     down_proj: torch.Tensor,
 ) -> torch.Tensor:
     output = torch.zeros_like(hidden_states)
+    if hidden_states.shape[0] == 1:
+        route_order = torch.argsort(topk_ids[0], stable=True)
+        routes = torch.stack(
+            (topk_ids[0, route_order], route_order), dim=1
+        ).cpu().tolist()
+        for expert_id, route_index in routes:
+            gate_up = F.linear(hidden_states, gate_up_proj[expert_id])
+            gate, up = gate_up.chunk(2, dim=-1)
+            expert_output = F.linear(
+                F.silu(gate) * up,
+                down_proj[expert_id],
+            )
+            output.add_(expert_output * topk_weights[0, route_index])
+        return output
+
+    return expert_dispatch_general(
+        hidden_states,
+        topk_ids,
+        topk_weights,
+        gate_up_proj,
+        down_proj,
+    )
+
+
+def expert_dispatch_general(
+    hidden_states: torch.Tensor,
+    topk_ids: torch.Tensor,
+    topk_weights: torch.Tensor,
+    gate_up_proj: torch.Tensor,
+    down_proj: torch.Tensor,
+) -> torch.Tensor:
+    """Previous general sorted dispatch, retained as a benchmark baseline."""
+
+    output = torch.zeros_like(hidden_states)
+
     assignments = topk_ids.reshape(-1)
     routing_weights = topk_weights.reshape(-1)
     order = torch.argsort(assignments, stable=True)
@@ -314,6 +349,7 @@ def benchmark_expert_dispatch(args, device, dtype, token_count: int) -> dict:
     result.update(
         {
             "tokens": token_count,
+            "single_token_decode_fast_path": token_count == 1,
             "routes": token_count * args.top_k,
             "active_experts": torch.unique(topk_ids).numel(),
             "local_intermediate_size": local_intermediate_size,
@@ -322,6 +358,24 @@ def benchmark_expert_dispatch(args, device, dtype, token_count: int) -> dict:
             ),
         }
     )
+    if token_count == 1:
+        general_timing = measure(
+            lambda: expert_dispatch_general(
+                hidden,
+                topk_ids,
+                topk_weights,
+                gate_up_proj,
+                down_proj,
+            ),
+            device=device,
+            warmup=args.warmup,
+            iterations=args.iterations,
+            repeats=args.repeats,
+        )
+        result["general_dispatch_baseline"] = general_timing
+        result["decode_fast_path_speedup"] = (
+            general_timing["median_ms"] / result["candidate"]["median_ms"]
+        )
     return result
 
 
