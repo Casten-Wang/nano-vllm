@@ -15,7 +15,7 @@ from nanovllm.engine.execution import (
 )
 from nanovllm.engine.sequence import Sequence
 from nanovllm.engine.kv_cache_packing import PackedBlockMetadata, build_packed_block_metadata
-from nanovllm.models.qwen3 import Qwen3ForCausalLM
+from nanovllm.models.registry import create_model
 from nanovllm.layers.sampler import Sampler
 from nanovllm.utils.context import set_context, get_context, reset_context
 from nanovllm.utils.loader import load_model
@@ -74,7 +74,10 @@ class ModelRunner:
         ),
     ):
         self.config = config
-        hf_config = config.hf_config
+        hf_config = config.model_config
+        model_spec = config.model_spec
+        if hf_config is None or model_spec is None:
+            raise RuntimeError("model configuration was not initialized")
         self.block_size = config.kvcache_block_size
         self.enforce_eager = config.enforce_eager
         self.world_size = config.tensor_parallel_size
@@ -103,7 +106,7 @@ class ModelRunner:
         default_dtype = torch.get_default_dtype()
         torch.set_default_dtype(hf_config.dtype)
         torch.set_default_device("cuda")
-        self.model = Qwen3ForCausalLM(hf_config)
+        self.model = create_model(model_spec.architecture, hf_config)
         load_model(self.model, config.model)
         self.sampler = Sampler()
         self.warmup_model()
@@ -419,19 +422,23 @@ class ModelRunner:
 
     def allocate_float_kv_cache(self):
         config = self.config
-        hf_config = config.hf_config
+        hf_config = config.model_config
+        model_spec = config.model_spec
+        if hf_config is None or model_spec is None:
+            raise RuntimeError("model configuration was not initialized")
         free, total = torch.cuda.mem_get_info()
         used = total - free
         peak = torch.cuda.memory_stats()["allocated_bytes.all.peak"]
         current = torch.cuda.memory_stats()["allocated_bytes.all.current"]
         num_kv_heads = hf_config.num_key_value_heads // self.world_size
         head_dim = getattr(hf_config, "head_dim", hf_config.hidden_size // hf_config.num_attention_heads)
-        block_bytes = 2 * hf_config.num_hidden_layers * self.block_size * num_kv_heads * head_dim * dtype_nbytes(hf_config.dtype)
+        num_kv_layers = model_spec.num_kv_cache_layers
+        block_bytes = 2 * num_kv_layers * self.block_size * num_kv_heads * head_dim * dtype_nbytes(hf_config.dtype)
         local_num_blocks = int(
             total * config.gpu_memory_utilization - used - peak + current
         ) // block_bytes
         config.num_kvcache_blocks = self._synchronize_kv_block_count(local_num_blocks)
-        self.kv_cache = torch.empty(2, hf_config.num_hidden_layers, config.num_kvcache_blocks, self.block_size, num_kv_heads, head_dim)
+        self.kv_cache = torch.empty(2, num_kv_layers, config.num_kvcache_blocks, self.block_size, num_kv_heads, head_dim)
         self.kv_scale = None
         layer_id = 0
         for module in self.model.modules():
@@ -444,20 +451,23 @@ class ModelRunner:
                 module.int8_partitioned_decode_threshold = config.int8_partitioned_decode_threshold
                 module.int8_partitioned_decode_partition_size = config.int8_partitioned_decode_partition_size
                 layer_id += 1
-        if layer_id != hf_config.num_hidden_layers:
+        if layer_id != num_kv_layers:
             raise RuntimeError(
                 f"attached {layer_id} KV cache layers, expected "
-                f"{hf_config.num_hidden_layers}"
+                f"{num_kv_layers}"
             )
 
     def allocate_int8_kv_cache(self):
         config = self.config
-        hf_config = config.hf_config
+        hf_config = config.model_config
+        model_spec = config.model_spec
+        if hf_config is None or model_spec is None:
+            raise RuntimeError("model configuration was not initialized")
         free, total = torch.cuda.mem_get_info()
         used = total - free
         peak = torch.cuda.memory_stats()["allocated_bytes.all.peak"]
         current = torch.cuda.memory_stats()["allocated_bytes.all.current"]
-        num_layers = hf_config.num_hidden_layers
+        num_layers = model_spec.num_kv_cache_layers
         num_kv_heads = hf_config.num_key_value_heads // self.world_size
         head_dim = getattr(hf_config, "head_dim", hf_config.hidden_size // hf_config.num_attention_heads)
         kv_data_bytes = 2 * num_layers * self.block_size * num_kv_heads * head_dim * dtype_nbytes(torch.int8)
@@ -863,7 +873,9 @@ class ModelRunner:
     @torch.inference_mode()
     def capture_cudagraph(self):
         config = self.config
-        hf_config = config.hf_config
+        hf_config = config.model_config
+        if hf_config is None:
+            raise RuntimeError("model configuration was not initialized")
         max_bs = min(self.config.max_num_seqs, 512)
         max_num_blocks = (config.max_model_len + self.block_size - 1) // self.block_size
         input_ids = torch.zeros(max_bs, dtype=torch.int64)

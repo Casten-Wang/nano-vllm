@@ -3,6 +3,8 @@ from dataclasses import dataclass
 import torch
 from transformers import AutoConfig
 
+from nanovllm.models.model_spec import ModelSpec, resolve_model_spec
+
 
 @dataclass(slots=True)
 class Config:
@@ -14,6 +16,8 @@ class Config:
     tensor_parallel_size: int = 1
     enforce_eager: bool = False
     hf_config: AutoConfig | None = None
+    model_config: object | None = None
+    model_spec: ModelSpec | None = None
     eos: int = -1
     kvcache_block_size: int = 256
     num_kvcache_blocks: int = -1
@@ -58,11 +62,15 @@ class Config:
         if self.shared_memory_name is not None and not self.shared_memory_name:
             raise ValueError("shared_memory_name must not be empty")
         self.hf_config = AutoConfig.from_pretrained(self.model)
-        if not hasattr(self.hf_config, "dtype"):
-            torch_dtype = getattr(self.hf_config, "torch_dtype", None)
-            self.hf_config.dtype = torch_dtype if isinstance(torch_dtype, torch.dtype) else torch.bfloat16
+        self.model_spec = resolve_model_spec(self.hf_config)
+        self.model_config = self.model_spec.text_config
+        if not hasattr(self.model_config, "dtype"):
+            torch_dtype = getattr(self.model_config, "torch_dtype", None)
+            self.model_config.dtype = (
+                torch_dtype if isinstance(torch_dtype, torch.dtype) else torch.bfloat16
+            )
         max_position_embeddings = getattr(
-            self.hf_config,
+            self.model_config,
             "max_position_embeddings",
             self.max_model_len,
         )
