@@ -396,8 +396,26 @@ def test_mixed_decode_and_prefill_matches_transformers(tmp_path):
     )
 
 
-def test_multi_request_mixed_batch_matches_transformers(tmp_path):
-    reference, local = make_models(tmp_path, 71, state_slots=4)
+@pytest.mark.parametrize(
+    ("recurrent_dtype", "rtol", "atol"),
+    [
+        (torch.float32, 2e-4, 2e-4),
+        (torch.bfloat16, 2e-3, 2e-3),
+        (torch.float16, 2e-3, 2e-3),
+    ],
+)
+def test_multi_request_mixed_batch_matches_transformers(
+    tmp_path,
+    recurrent_dtype,
+    rtol,
+    atol,
+):
+    reference, local = make_models(
+        tmp_path,
+        71,
+        recurrent_dtype=recurrent_dtype,
+        state_slots=4,
+    )
     decode_tokens = (
         torch.tensor([[1, 5, 7, 2]]),
         torch.tensor([[4, 8, 3]]),
@@ -460,12 +478,12 @@ def test_multi_request_mixed_batch_matches_transformers(tmp_path):
         actual_logits = local.compute_logits(actual)
         expected_logits = reference.lm_head(expected_sampled)
 
-    torch.testing.assert_close(actual, expected, rtol=2e-4, atol=2e-4)
+    torch.testing.assert_close(actual, expected, rtol=rtol, atol=atol)
     torch.testing.assert_close(
         actual_logits,
         expected_logits,
-        rtol=2e-4,
-        atol=2e-4,
+        rtol=rtol,
+        atol=atol,
     )
 
 
