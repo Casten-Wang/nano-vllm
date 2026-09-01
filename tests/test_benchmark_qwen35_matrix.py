@@ -30,6 +30,7 @@ def args(**overrides):
         "repeats": 3,
         "tp_sizes": (4, 8),
         "checkpoint_audit": True,
+        "run_id": "test-run",
     }
     values.update(overrides)
     return Namespace(**values)
@@ -73,6 +74,11 @@ def test_explicit_sequence_capacity_is_preserved():
 def test_non_positive_repeat_count_is_rejected():
     with pytest.raises(ValueError, match="repeats must be positive"):
         MODULE.normalize_args(args(repeats=0))
+
+
+def test_unsafe_run_id_is_rejected():
+    with pytest.raises(ValueError, match="run-id"):
+        MODULE.normalize_args(args(run_id="../outside"))
 
 
 def test_case_command_is_eager_and_fully_identified():
@@ -131,6 +137,28 @@ def test_no_warmup_is_forwarded():
     )
 
     assert "--no-warmup" in command
+
+
+def test_matrix_uses_deterministic_result_stem():
+    case = MODULE.BenchmarkCase(4, "model", "auto")
+    command = MODULE.command_for_case(args(), case, repeat=2, run_id="rental-a")
+
+    assert command[command.index("--output-stem") + 1] == (
+        "rental-a_qwen35_tp4_state-model_kv-bf16_r2"
+    )
+
+
+def test_summary_uses_every_repeat_and_requires_output_parity():
+    case = MODULE.BenchmarkCase(8, "float32", "int8")
+    command = MODULE.summary_command(args(), case, "rental-a")
+
+    result_paths = [item for item in command if item.endswith(".json")]
+    assert len(result_paths) == 4
+    assert result_paths[0].endswith("rental-a_qwen35_tp8_state-float32_kv-int8_r1.json")
+    assert result_paths[2].endswith("rental-a_qwen35_tp8_state-float32_kv-int8_r3.json")
+    assert result_paths[3].endswith("rental-a_qwen35_tp8_state-float32_kv-int8_summary.json")
+    assert "--summarize-repeats" in command
+    assert "--require-output-parity" in command
 
 
 @pytest.mark.parametrize("value", ["", "0", "4,-1", "four"])

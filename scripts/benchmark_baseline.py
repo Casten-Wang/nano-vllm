@@ -126,6 +126,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sliding-window-size", type=int, default=None)
     parser.add_argument("--enable-dynamic-chunked-prefill", action="store_true")
     parser.add_argument("--name", default=None, help="Result file prefix. Defaults to a prefix derived from enabled features.")
+    parser.add_argument(
+        "--output-stem",
+        default=None,
+        help="Exact result filename stem; intended for orchestrated benchmark runs.",
+    )
     parser.add_argument("--result-dir", default="benchmark_results")
     parser.add_argument("--warmup", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument(
@@ -288,7 +293,9 @@ def main() -> None:
         "generation_validation": generation_validation,
     }
 
-    name = make_result_name(args.name or default_result_prefix(args))
+    name = args.output_stem or make_result_name(
+        args.name or default_result_prefix(args)
+    )
     json_path = result_dir / f"{name}.json"
     md_path = result_dir / f"{name}.md"
     json_path.write_text(json.dumps(result, indent=2, ensure_ascii=False) + "\n")
