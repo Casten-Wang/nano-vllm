@@ -43,3 +43,11 @@ def test_expert_dispatch_matches_naive_route_accumulation():
             expected[token] += value * topk_weights[token, route]
 
     torch.testing.assert_close(actual, expected)
+    reference = MODULE.expert_dispatch_reference(
+        hidden,
+        topk_ids,
+        topk_weights,
+        gate_up,
+        down,
+    )
+    torch.testing.assert_close(actual, reference)

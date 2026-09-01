@@ -207,6 +207,39 @@ def expert_dispatch(
     return output
 
 
+def expert_dispatch_reference(
+    hidden_states: torch.Tensor,
+    topk_ids: torch.Tensor,
+    topk_weights: torch.Tensor,
+    gate_up_proj: torch.Tensor,
+    down_proj: torch.Tensor,
+) -> torch.Tensor:
+    """Match the Transformers one-hot expert dispatch implementation."""
+
+    output = torch.zeros_like(hidden_states)
+    with torch.no_grad():
+        expert_mask = F.one_hot(
+            topk_ids,
+            num_classes=gate_up_proj.shape[0],
+        ).permute(2, 1, 0)
+        active_experts = torch.greater(
+            expert_mask.sum(dim=(-1, -2)),
+            0,
+        ).nonzero()
+    for expert_index in active_experts:
+        expert_id = expert_index[0]
+        route_index, token_index = torch.where(expert_mask[expert_id])
+        gate_up = F.linear(hidden_states[token_index], gate_up_proj[expert_id])
+        gate, up = gate_up.chunk(2, dim=-1)
+        expert_output = F.linear(F.silu(gate) * up, down_proj[expert_id])
+        output.index_add_(
+            0,
+            token_index,
+            expert_output * topk_weights[token_index, route_index, None],
+        )
+    return output
+
+
 def benchmark_expert_dispatch(args, device, dtype) -> dict:
     local_intermediate_size = args.moe_intermediate_size // args.tp_size
     hidden = torch.randn(
@@ -242,34 +275,51 @@ def benchmark_expert_dispatch(args, device, dtype) -> dict:
         dtype=dtype,
     )
 
-    def run():
-        return expert_dispatch(
-            hidden,
-            topk_ids,
-            topk_weights,
-            gate_up_proj,
-            down_proj,
+    def reference():
+        return (
+            expert_dispatch_reference(
+                hidden,
+                topk_ids,
+                topk_weights,
+                gate_up_proj,
+                down_proj,
+            ),
         )
 
-    output = run()
+    def candidate():
+        return (
+            expert_dispatch(
+                hidden,
+                topk_ids,
+                topk_weights,
+                gate_up_proj,
+                down_proj,
+            ),
+        )
+
+    output = candidate()[0]
     if not torch.isfinite(output).all():
         raise RuntimeError("expert dispatch produced non-finite output")
-    timing = measure(
-        run,
+    result = compare(
+        reference,
+        candidate,
         device=device,
         warmup=args.warmup,
         iterations=args.iterations,
         repeats=args.repeats,
     )
-    return {
-        "timing": timing,
-        "tokens": args.expert_tokens,
-        "routes": args.expert_tokens * args.top_k,
-        "active_experts": torch.unique(topk_ids).numel(),
-        "local_intermediate_size": local_intermediate_size,
-        "estimated_model_moe_ms": timing["median_ms"] * args.num_hidden_layers,
-    }
-
+    result.update(
+        {
+            "tokens": args.expert_tokens,
+            "routes": args.expert_tokens * args.top_k,
+            "active_experts": torch.unique(topk_ids).numel(),
+            "local_intermediate_size": local_intermediate_size,
+            "estimated_model_moe_ms": (
+                result["candidate"]["median_ms"] * args.num_hidden_layers
+            ),
+        }
+    )
+    return result
 
 def benchmark_rmsnorm(args, device, dtype) -> dict:
     x = torch.randn(
