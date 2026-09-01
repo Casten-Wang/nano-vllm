@@ -17,6 +17,7 @@ WORKLOAD_FIELDS = (
     "max_model_len",
     "max_num_batched_tokens",
     "max_num_seqs",
+    "gpu_memory_utilization",
     "warmup",
 )
 

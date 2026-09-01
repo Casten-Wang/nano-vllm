@@ -23,6 +23,7 @@ def args(**overrides):
         "output_len": 32,
         "max_model_len": 4096,
         "max_num_batched_tokens": 8192,
+        "gpu_memory_utilization": 0.9,
         "max_num_seqs": 64,
         "seed": 7,
         "result_dir": "benchmark_results/matrix",
@@ -88,6 +89,11 @@ def test_negative_memory_headroom_is_rejected():
         MODULE.normalize_args(args(memory_headroom_gib=-1))
 
 
+def test_invalid_gpu_memory_utilization_is_rejected():
+    with pytest.raises(ValueError, match="gpu-memory-utilization"):
+        MODULE.normalize_args(args(gpu_memory_utilization=1.1))
+
+
 def test_workload_longer_than_context_is_rejected_before_gpu_use():
     with pytest.raises(ValueError, match="cannot exceed max_model_len"):
         MODULE.normalize_args(args(input_len=4000, output_len=128))
@@ -113,11 +119,12 @@ def test_memory_preflight_covers_each_tp_rank():
     result = MODULE.validate_memory_capacity(
         report,
         (4, 8),
-        [20 * gib] * 8,
+        [{"free": 20 * gib, "total": 20 * gib}] * 8,
         2 * gib,
         64,
         64,
         640,
+        1.0,
     )
 
     assert result["valid"]
@@ -128,7 +135,7 @@ def test_memory_preflight_covers_each_tp_rank():
     assert result["results"]["tp4"]["required_free_bytes_per_rank"] == (
         18 * gib + 8 * 64 + 64 * 3 * 256 * 1024
     )
-    assert len(result["results"]["tp8"]["free_bytes_by_rank"]) == 8
+    assert len(result["results"]["tp8"]["memory_by_rank"]) == 8
 
 
 def test_memory_preflight_rejects_insufficient_rank():
@@ -147,11 +154,42 @@ def test_memory_preflight_rejects_insufficient_rank():
         MODULE.validate_memory_capacity(
             report,
             (4,),
-            [20 * gib, 20 * gib, 17 * gib, 20 * gib],
+            [
+                {"free": 20 * gib, "total": 20 * gib},
+                {"free": 20 * gib, "total": 20 * gib},
+                {"free": 17 * gib, "total": 20 * gib},
+                {"free": 20 * gib, "total": 20 * gib},
+            ],
             2 * gib,
             64,
             64,
             640,
+            1.0,
+        )
+
+
+def test_memory_preflight_respects_runtime_utilization_limit():
+    gib = 1024**3
+    report = {
+        "results": {
+            "tp1": {
+                "local_parameter_bytes": 17 * gib,
+                "kv_bytes_per_token": 1,
+                "state_bytes_per_sequence": {"float32": 0, "model": 0},
+            }
+        }
+    }
+
+    with pytest.raises(ValueError, match="TP=1 ranks 0"):
+        MODULE.validate_memory_capacity(
+            report,
+            (1,),
+            [{"free": 20 * gib, "total": 20 * gib}],
+            gib,
+            1,
+            1,
+            1,
+            0.8,
         )
 
 
@@ -161,6 +199,7 @@ def test_case_command_is_eager_and_fully_identified():
 
     assert command[1].endswith("scripts/benchmark_baseline.py")
     assert command[command.index("--tensor-parallel-size") + 1] == "8"
+    assert command[command.index("--gpu-memory-utilization") + 1] == "0.9"
     assert command[command.index("--recurrent-state-dtype") + 1] == "model"
     assert command[command.index("--kv-cache-dtype") + 1] == "int8"
     assert command[command.index("--name") + 1] == "qwen35_tp8_state-model_kv-int8_r2"

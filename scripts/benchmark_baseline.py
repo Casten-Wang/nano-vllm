@@ -54,6 +54,7 @@ def write_markdown(path: Path, result: dict) -> None:
         f"- max_model_len: `{result['max_model_len']}`",
         f"- max_num_batched_tokens: `{result['max_num_batched_tokens']}`",
         f"- max_num_seqs: `{result['max_num_seqs']}`",
+        f"- gpu_memory_utilization: `{result['gpu_memory_utilization']}`",
         f"- tensor_parallel_size: `{result['tensor_parallel_size']}`",
         f"- recurrent_state_dtype: `{result['recurrent_state_dtype']}`",
         f"- kv_cache_dtype: `{result['kv_cache_dtype']}`",
@@ -111,6 +112,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-num-batched-tokens", type=int, default=16384)
     parser.add_argument("--max-num-seqs", type=int, default=512)
     parser.add_argument("--tensor-parallel-size", type=int, default=1)
+    parser.add_argument("--gpu-memory-utilization", type=float, default=0.9)
     parser.add_argument(
         "--recurrent-state-dtype",
         choices=("float32", "model"),
@@ -172,6 +174,7 @@ def main() -> None:
         max_num_batched_tokens=args.max_num_batched_tokens,
         max_num_seqs=args.max_num_seqs,
         tensor_parallel_size=args.tensor_parallel_size,
+        gpu_memory_utilization=args.gpu_memory_utilization,
         recurrent_state_dtype=args.recurrent_state_dtype,
         kv_cache_dtype=args.kv_cache_dtype,
         kv_dequant_backend=args.kv_dequant_backend,
@@ -251,6 +254,7 @@ def main() -> None:
         "max_num_batched_tokens": args.max_num_batched_tokens,
         "max_num_seqs": args.max_num_seqs,
         "tensor_parallel_size": args.tensor_parallel_size,
+        "gpu_memory_utilization": args.gpu_memory_utilization,
         "recurrent_state_dtype": args.recurrent_state_dtype,
         "kv_cache_dtype": args.kv_cache_dtype,
         "kv_dequant_backend": args.kv_dequant_backend,

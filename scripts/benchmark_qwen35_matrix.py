@@ -62,6 +62,8 @@ def command_for_case(
         args.model,
         "--tensor-parallel-size",
         str(case.tensor_parallel_size),
+        "--gpu-memory-utilization",
+        str(args.gpu_memory_utilization),
         "--recurrent-state-dtype",
         case.recurrent_state_dtype,
         "--kv-cache-dtype",
@@ -180,23 +182,25 @@ def visible_gpu_count() -> int:
     return torch.cuda.device_count()
 
 
-def gpu_free_memory_bytes() -> list[int]:
+def gpu_memory_info_bytes() -> list[dict[str, int]]:
     import torch
 
     return [
-        int(torch.cuda.mem_get_info(device)[0])
+        {"free": int(free), "total": int(total)}
         for device in range(torch.cuda.device_count())
+        for free, total in (torch.cuda.mem_get_info(device),)
     ]
 
 
 def validate_memory_capacity(
     audit_report: dict,
     tp_sizes: tuple[int, ...],
-    free_bytes_by_device: list[int],
+    memory_by_device: list[dict[str, int]],
     headroom_bytes: int,
     max_num_seqs: int,
     num_seqs: int,
     sequence_length: int,
+    gpu_memory_utilization: float,
 ) -> dict:
     if headroom_bytes < 0:
         raise ValueError("memory headroom must be non-negative")
@@ -204,9 +208,11 @@ def validate_memory_capacity(
         raise ValueError("max_num_seqs must be positive")
     if num_seqs <= 0 or sequence_length <= 0:
         raise ValueError("workload dimensions must be positive")
+    if not 0 < gpu_memory_utilization <= 1:
+        raise ValueError("gpu_memory_utilization must be in (0, 1]")
     results = {}
     for tp_size in tp_sizes:
-        if len(free_bytes_by_device) < tp_size:
+        if len(memory_by_device) < tp_size:
             raise ValueError(f"TP={tp_size} requires {tp_size} visible GPUs")
         audit = audit_report.get("results", {}).get(f"tp{tp_size}", {})
         parameter_bytes = audit.get("local_parameter_bytes")
@@ -239,9 +245,17 @@ def validate_memory_capacity(
         required_bytes = (
             parameter_bytes + state_bytes + kv_bytes + headroom_bytes
         )
-        free_bytes = free_bytes_by_device[:tp_size]
+        memory = memory_by_device[:tp_size]
+        available_budgets = [
+            max(
+                int(item["total"] * gpu_memory_utilization)
+                - (item["total"] - item["free"]),
+                0,
+            )
+            for item in memory
+        ]
         insufficient = [
-            rank for rank, available in enumerate(free_bytes)
+            rank for rank, available in enumerate(available_budgets)
             if available < required_bytes
         ]
         results[f"tp{tp_size}"] = {
@@ -251,7 +265,9 @@ def validate_memory_capacity(
             "max_num_seqs": max_num_seqs,
             "headroom_bytes": headroom_bytes,
             "required_free_bytes_per_rank": required_bytes,
-            "free_bytes_by_rank": free_bytes,
+            "gpu_memory_utilization": gpu_memory_utilization,
+            "memory_by_rank": memory,
+            "available_budget_bytes_by_rank": available_budgets,
             "valid": not insufficient,
         }
         if insufficient:
@@ -274,6 +290,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-len", type=int, default=128)
     parser.add_argument("--max-model-len", type=int, default=4096)
     parser.add_argument("--max-num-batched-tokens", type=int, default=16384)
+    parser.add_argument("--gpu-memory-utilization", type=float, default=0.9)
     parser.add_argument(
         "--max-num-seqs",
         type=int,
@@ -317,6 +334,8 @@ def normalize_args(args: argparse.Namespace) -> argparse.Namespace:
         raise ValueError("input_len plus output_len cannot exceed max_model_len")
     if args.memory_headroom_gib < 0:
         raise ValueError("--memory-headroom-gib must be non-negative")
+    if not 0 < args.gpu_memory_utilization <= 1:
+        raise ValueError("--gpu-memory-utilization must be in (0, 1]")
     if args.run_id is not None and (
         not args.run_id
         or any(character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-" for character in args.run_id)
@@ -356,11 +375,12 @@ def main() -> None:
                 memory_report = validate_memory_capacity(
                     audit_report,
                     args.tp_sizes,
-                    gpu_free_memory_bytes(),
+                    gpu_memory_info_bytes(),
                     int(args.memory_headroom_gib * 1024**3),
                     args.max_num_seqs,
                     args.num_seqs,
                     args.input_len + args.output_len,
+                    args.gpu_memory_utilization,
                 )
                 memory_path = Path(args.result_dir) / "memory_preflight.json"
                 memory_path.write_text(json.dumps(memory_report, indent=2) + "\n")

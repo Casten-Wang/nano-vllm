@@ -41,6 +41,7 @@ def result(
         "max_model_len": 4096,
         "max_num_batched_tokens": 8192,
         "max_num_seqs": 64,
+        "gpu_memory_utilization": 0.9,
         "warmup": True,
         "device": device,
         "device_capability": [9, 0],
