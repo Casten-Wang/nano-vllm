@@ -23,6 +23,7 @@ class VocabParallelEmbedding(nn.Module):
         self.vocab_end_idx = self.vocab_start_idx + self.num_embeddings_per_partition
         self.weight = nn.Parameter(torch.empty(self.num_embeddings_per_partition, embedding_dim))
         self.weight.weight_loader = self.weight_loader
+        self.weight.safetensors_loader = self.safetensors_loader
 
     def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor):
         param_data = param.data
@@ -30,6 +31,18 @@ class VocabParallelEmbedding(nn.Module):
         start_idx = self.tp_rank * shard_size
         loaded_weight = loaded_weight.narrow(0, start_idx, shard_size)
         param_data.copy_(loaded_weight)
+
+    def safetensors_loader(self, param: nn.Parameter, loaded_weight):
+        shape = tuple(loaded_weight.get_shape())
+        expected_shape = (self.num_embeddings, param.shape[1])
+        if shape != expected_shape:
+            raise ValueError(
+                f"invalid vocabulary weight shape: {shape}; "
+                f"expected {expected_shape}"
+            )
+        param.data.copy_(
+            loaded_weight[self.vocab_start_idx : self.vocab_end_idx, :]
+        )
 
     def forward(self, x: torch.Tensor):
         if self.tp_size > 1:
