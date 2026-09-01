@@ -476,16 +476,7 @@ class Qwen35GatedDeltaNet(nn.Module):
 
     @staticmethod
     def _prefill_ranges(context) -> list[tuple[int, int]]:
-        if context.is_mixed:
-            offsets = context.prefill_cu_seqlens_q.tolist()
-            return [
-                (context.decode_token_count + start, context.decode_token_count + end)
-                for start, end in zip(offsets, offsets[1:])
-            ]
-        if context.is_prefill:
-            offsets = context.cu_seqlens_q.tolist()
-            return list(zip(offsets, offsets[1:]))
-        return []
+        return list(context.state_token_ranges)
 
     def _decode_batch(
         self,
@@ -584,13 +575,12 @@ class Qwen35GatedDeltaNet(nn.Module):
         if context.state_slots is None:
             raise RuntimeError("Qwen3.5 execution context has no state slots")
         ranges = self._prefill_ranges(context)
-        slots = context.state_slots.tolist()
         decode_count = (
             context.decode_token_count
             if context.is_mixed
             else (0 if context.is_prefill else hidden_states.shape[0])
         )
-        if len(ranges) + decode_count != len(slots):
+        if len(ranges) + decode_count != context.state_slots.numel():
             raise RuntimeError("sequence ranges and recurrent state slots differ")
         if context.state_reset_mask is not None:
             reset_slots = context.state_slots[context.state_reset_mask]
@@ -616,13 +606,15 @@ class Qwen35GatedDeltaNet(nn.Module):
             )
 
         ranges_by_length: dict[int, list[tuple[int, int, int]]] = {}
-        for (start, end), slot in zip(ranges, slots[decode_count:]):
-            ranges_by_length.setdefault(end - start, []).append((start, end, slot))
-        for sequence_length, group in ranges_by_length.items():
-            group_slots = context.state_slots.new_tensor(
-                [slot for _, _, slot in group],
-                dtype=torch.long,
+        for range_index, (start, end) in enumerate(ranges):
+            ranges_by_length.setdefault(end - start, []).append(
+                (start, end, decode_count + range_index)
             )
+        for sequence_length, group in ranges_by_length.items():
+            slot_indices = context.state_slots.new_tensor(
+                [slot_index for _, _, slot_index in group], dtype=torch.long
+            )
+            group_slots = context.state_slots.index_select(0, slot_indices).to(torch.long)
             group_qkv = torch.stack(
                 [mixed_qkv[start:end] for start, end, _ in group]
             )

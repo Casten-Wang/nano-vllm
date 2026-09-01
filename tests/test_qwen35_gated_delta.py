@@ -223,6 +223,7 @@ def test_gated_delta_layer_chunked_prefill_matches_one_shot():
         is_mixed=False,
         is_prefill=True,
         cu_seqlens_q=torch.tensor([0, 5], dtype=torch.int32),
+        state_token_ranges=((0, 5),),
         state_slots=torch.tensor([1], dtype=torch.int32),
         state_reset_mask=torch.tensor([True]),
     )
@@ -235,8 +236,10 @@ def test_gated_delta_layer_chunked_prefill_matches_one_shot():
         expected_convolution = layer.state_pool.convolution[:, 1].clone()
         layer.state_pool.reset(torch.tensor([1]))
         current_context.cu_seqlens_q = torch.tensor([0, 3], dtype=torch.int32)
+        current_context.state_token_ranges = ((0, 3),)
         first = layer(hidden_states[:3])
         current_context.cu_seqlens_q = torch.tensor([0, 2], dtype=torch.int32)
+        current_context.state_token_ranges = ((0, 2),)
         current_context.state_reset_mask = torch.tensor([False])
         second = layer(hidden_states[3:])
 
@@ -279,6 +282,7 @@ def test_tensor_parallel_layers_sum_to_single_rank_reference():
         is_mixed=False,
         is_prefill=True,
         cu_seqlens_q=torch.tensor([0, 4], dtype=torch.int32),
+        state_token_ranges=((0, 4),),
         state_slots=torch.tensor([0], dtype=torch.int32),
         state_reset_mask=torch.tensor([True]),
     )
@@ -307,6 +311,7 @@ def test_batched_decode_matches_individual_slot_updates():
         is_prefill=False,
         state_slots=torch.tensor([0, 2, 3], dtype=torch.int32),
         state_reset_mask=torch.tensor([True, True, True]),
+        state_token_ranges=(),
     )
     context_module = types.ModuleType("nanovllm.utils.context")
     context_module.get_context = lambda: context
@@ -336,6 +341,7 @@ def test_equal_length_prefills_batch_without_changing_results():
         is_mixed=False,
         is_prefill=True,
         cu_seqlens_q=torch.tensor([0, 3, 6], dtype=torch.int32),
+        state_token_ranges=((0, 3), (3, 6)),
         state_slots=torch.tensor([0, 2], dtype=torch.int32),
         state_reset_mask=torch.tensor([True, True]),
     )
@@ -349,6 +355,7 @@ def test_equal_length_prefills_batch_without_changing_results():
         individual = []
         for start, slot in ((0, 0), (3, 2)):
             context.cu_seqlens_q = torch.tensor([0, 3], dtype=torch.int32)
+            context.state_token_ranges = ((0, 3),)
             context.state_slots = torch.tensor([slot], dtype=torch.int32)
             context.state_reset_mask = torch.tensor([True])
             individual.append(layer(hidden[start : start + 3]))

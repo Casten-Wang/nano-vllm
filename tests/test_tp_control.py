@@ -303,6 +303,7 @@ class HybridStateContextTest(unittest.TestCase):
             "dequant_block_tables": None,
             "state_slots": FakeTensor([8, 9]),
             "state_reset_mask": FakeTensor([False, False]),
+            "state_token_ranges": (),
         }
         runner.build_prefill_inputs = lambda seqs: {
             "input_ids": [3, 4],
@@ -317,6 +318,7 @@ class HybridStateContextTest(unittest.TestCase):
             "dequant_block_tables": None,
             "state_slots": FakeTensor([3]),
             "state_reset_mask": FakeTensor([True]),
+            "state_token_ranges": ((0, 2),),
         }
         captured = {}
         original = model_runner_module.set_context
@@ -331,6 +333,7 @@ class HybridStateContextTest(unittest.TestCase):
             captured["state_reset_mask"].values,
             [False, False, True],
         )
+        self.assertEqual(captured["state_token_ranges"], ((2, 4),))
 
     def test_hybrid_model_disables_cuda_graph(self):
         runner = self.make_hybrid_runner()

@@ -671,6 +671,7 @@ class ModelRunner:
                     query_start_lens=query_start_lens,
                 )
                 dequant_block_ids, dequant_block_tables = self.prepare_packed_block_metadata(metadata)
+        state_token_ranges = tuple(zip(cu_seqlens_q[:-1], cu_seqlens_q[1:]))
         input_ids = torch.tensor(input_ids, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
         positions = torch.tensor(positions, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
         cu_seqlens_q = torch.tensor(cu_seqlens_q, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
@@ -690,6 +691,7 @@ class ModelRunner:
             self.config.sliding_window_size,
             state_slots=self.prepare_state_slots(seqs),
             state_reset_mask=self.prepare_state_reset_mask(seqs),
+            state_token_ranges=state_token_ranges,
         )
         return input_ids, positions
 
@@ -754,6 +756,7 @@ class ModelRunner:
             dequant_block_tables=dequant_block_tables,
             state_slots=self.prepare_state_slots(seqs),
             state_reset_mask=self.prepare_state_reset_mask(seqs),
+            state_token_ranges=tuple(zip(cu_seqlens_q[:-1], cu_seqlens_q[1:])),
         )
 
     def build_decode_inputs(self, seqs: list[Sequence]):
@@ -787,6 +790,7 @@ class ModelRunner:
             max_context_len=max(context_lens) if context_lens else 0,
             state_slots=self.prepare_state_slots(seqs),
             state_reset_mask=self.prepare_state_reset_mask(seqs),
+            state_token_ranges=(),
         )
 
     def prepare_decode(self, seqs: list[Sequence]):
@@ -825,6 +829,7 @@ class ModelRunner:
             max_context_len=max_context_len,
             state_slots=self.prepare_state_slots(seqs),
             state_reset_mask=self.prepare_state_reset_mask(seqs),
+            state_token_ranges=(),
         )
         return input_ids, positions
 
@@ -871,6 +876,13 @@ class ModelRunner:
             )
             if decode["state_reset_mask"] is not None
             else None,
+            state_token_ranges=tuple(
+                (
+                    len(decode_seqs) + start,
+                    len(decode_seqs) + end,
+                )
+                for start, end in prefill["state_token_ranges"]
+            ),
         )
         return input_ids, positions
 
