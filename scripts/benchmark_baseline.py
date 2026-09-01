@@ -79,6 +79,7 @@ def write_markdown(path: Path, result: dict) -> None:
         f"| kv_storage_local_rank_mib | {result['kv_cache_storage']['total_mib']:.2f} |",
         f"| kv_storage_estimated_all_ranks_mib | {result['kv_cache_storage']['estimated_all_ranks_mib']:.2f} |",
         f"| recurrent_state_local_rank_mib | {result['recurrent_state_storage']['total_bytes_local_rank'] / 1024 / 1024:.2f} |",
+        f"| recurrent_state_all_ranks_mib | {result['recurrent_state_total_all_ranks_bytes'] / 1024 / 1024:.2f} |",
         f"| num_kvcache_blocks | {result['num_kvcache_blocks']} |",
         f"| final_used_kvcache_blocks | {result['final_used_kvcache_blocks']} |",
         f"| final_free_kvcache_blocks | {result['final_free_kvcache_blocks']} |",
@@ -210,6 +211,9 @@ def main() -> None:
     shape_trace = llm.model_runner.call("get_shape_trace")
     cudagraph_capture_stats = llm.model_runner.call("get_cudagraph_capture_stats")
     cuda_memory_by_rank = llm.model_runner.call("get_cuda_memory_stats")
+    recurrent_state_by_rank = llm.model_runner.call(
+        "get_recurrent_state_stats_by_rank"
+    )
     peak_allocated_bytes = max(
         item["peak_allocated_bytes"] for item in cuda_memory_by_rank
     )
@@ -255,8 +259,10 @@ def main() -> None:
         "cuda_memory_by_rank": cuda_memory_by_rank,
         "num_kvcache_blocks": llm.model_runner.config.num_kvcache_blocks,
         "kv_cache_storage": kv_cache_storage_metadata(llm.model_runner),
-        "recurrent_state_storage": llm.model_runner.call(
-            "get_recurrent_state_stats"
+        "recurrent_state_storage": recurrent_state_by_rank[0],
+        "recurrent_state_storage_by_rank": recurrent_state_by_rank,
+        "recurrent_state_total_all_ranks_bytes": sum(
+            item["total_bytes_local_rank"] for item in recurrent_state_by_rank
         ),
         "model_config": model_config_metadata(llm.model_runner.config.hf_config),
         "final_used_kvcache_blocks": block_manager.num_used_blocks,

@@ -249,6 +249,14 @@ class ModelRunner:
             "convolution_dtypes": sorted(convolution_dtypes),
         }
 
+    def get_recurrent_state_stats_by_rank(self):
+        local = {"rank": self.rank, **self.get_recurrent_state_stats()}
+        if self.world_size == 1:
+            return [local]
+        gathered = [None] * self.world_size
+        dist.all_gather_object(gathered, local)
+        return gathered
+
     def _record_execution(
         self,
         *,

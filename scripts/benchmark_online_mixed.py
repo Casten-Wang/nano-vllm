@@ -194,6 +194,9 @@ def main() -> None:
     shape_trace = llm.model_runner.call("get_shape_trace")
     cudagraph_capture_stats = llm.model_runner.call("get_cudagraph_capture_stats")
     cuda_memory_by_rank = llm.model_runner.call("get_cuda_memory_stats")
+    recurrent_state_by_rank = llm.model_runner.call(
+        "get_recurrent_state_stats_by_rank"
+    )
     peak_allocated_bytes = max(
         item["peak_allocated_bytes"] for item in cuda_memory_by_rank
     )
@@ -247,6 +250,10 @@ def main() -> None:
         "peak_torch_allocated_mib": peak_allocated_bytes / 1024 / 1024,
         "peak_torch_reserved_mib": peak_reserved_bytes / 1024 / 1024,
         "cuda_memory_by_rank": cuda_memory_by_rank,
+        "recurrent_state_storage_by_rank": recurrent_state_by_rank,
+        "recurrent_state_total_all_ranks_bytes": sum(
+            item["total_bytes_local_rank"] for item in recurrent_state_by_rank
+        ),
         "step_count": step_count,
         "initial_decode_gap_count": len(initial_gaps),
         "injected_decode_gap_count": len(injected_gaps),

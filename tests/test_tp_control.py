@@ -232,6 +232,30 @@ class TPControlTest(unittest.TestCase):
             150,
         )
 
+    def test_multi_rank_recurrent_state_stats_are_gathered(self):
+        runner = object.__new__(ModelRunner)
+        runner.rank = 0
+        runner.world_size = 2
+        runner.get_recurrent_state_stats = lambda: {
+            "total_bytes_local_rank": 100,
+        }
+        original_gather = getattr(model_runner_module.dist, "all_gather_object", None)
+
+        def gather(output, local):
+            output[:] = [local, {"rank": 1, "total_bytes_local_rank": 120}]
+
+        model_runner_module.dist.all_gather_object = gather
+        try:
+            stats = runner.get_recurrent_state_stats_by_rank()
+        finally:
+            if original_gather is None:
+                del model_runner_module.dist.all_gather_object
+            else:
+                model_runner_module.dist.all_gather_object = original_gather
+
+        self.assertEqual(stats[0], {"rank": 0, "total_bytes_local_rank": 100})
+        self.assertEqual(stats[1], {"rank": 1, "total_bytes_local_rank": 120})
+
     def test_worker_success_status_round_trip(self):
         status_buffer = bytearray(CONTROL_STATUS_SIZE)
         runner = make_runner(1, (FakeEvent(), FakeEvent(), status_buffer))
