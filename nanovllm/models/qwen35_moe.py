@@ -9,6 +9,7 @@ from torch import nn
 
 from nanovllm.layers.activation import SiluAndMul
 from nanovllm.layers.linear import MergedColumnParallelLinear, RowParallelLinear, divide
+from nanovllm.models.moe_dispatch import batched_expert_dispatch
 
 
 class Qwen35RMSNorm(nn.Module):
@@ -186,33 +187,14 @@ class Qwen35Experts(nn.Module):
         if is_decode is None:
             is_decode = hidden_states.shape[0] == 1
         if is_decode and self.decode_backend == "batched":
-            chunks = []
-            top_k = topk_ids.shape[1]
-            for start in range(0, hidden_states.shape[0], self.decode_chunk_size):
-                end = min(start + self.decode_chunk_size, hidden_states.shape[0])
-                expert_ids = topk_ids[start:end].reshape(-1)
-                selected_gate_up = self.gate_up_proj.index_select(0, expert_ids)
-                route_hidden = (
-                    hidden_states[start:end]
-                    .unsqueeze(1)
-                    .expand(-1, top_k, -1)
-                    .reshape(expert_ids.numel(), -1, 1)
-                )
-                gate_up = torch.bmm(selected_gate_up, route_hidden).squeeze(-1)
-                del selected_gate_up, route_hidden
-                gate, up = gate_up.chunk(2, dim=-1)
-                selected_down = self.down_proj.index_select(0, expert_ids)
-                expert_output = torch.bmm(
-                    selected_down,
-                    (F.silu(gate) * up).unsqueeze(-1),
-                ).squeeze(-1)
-                chunks.append(
-                    (
-                        expert_output.reshape(end - start, top_k, -1)
-                        * topk_weights[start:end].unsqueeze(-1)
-                    ).sum(dim=1)
-                )
-            output = torch.cat(chunks, dim=0)
+            output = batched_expert_dispatch(
+                hidden_states,
+                topk_ids,
+                topk_weights,
+                self.gate_up_proj,
+                self.down_proj,
+                self.decode_chunk_size,
+            )
             if self.tp_size > 1:
                 dist.all_reduce(output)
             return output

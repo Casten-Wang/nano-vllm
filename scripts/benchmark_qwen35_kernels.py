@@ -35,6 +35,10 @@ METADATA = load_source_module(
     "qwen35_benchmark_metadata",
     "nanovllm/benchmark_metadata.py",
 )
+MOE_DISPATCH = load_source_module(
+    "qwen35_moe_dispatch_benchmark",
+    "nanovllm/models/moe_dispatch.py",
+)
 
 
 def synchronize(device: torch.device) -> None:
@@ -253,42 +257,14 @@ def expert_dispatch_batched_decode(
     down_proj: torch.Tensor,
     chunk_size: int = 8,
 ) -> torch.Tensor:
-    """Graph-safe decode candidate using bounded batched expert matmuls.
-
-    This removes device-to-host routing synchronization at the cost of
-    gathering selected expert weights. Token chunking bounds that temporary
-    storage for realistic continuous-batching decode sizes.
-    """
-
-    if chunk_size <= 0:
-        raise ValueError("decode chunk size must be positive")
-    top_k = topk_ids.shape[1]
-    chunks = []
-    for start in range(0, hidden_states.shape[0], chunk_size):
-        end = min(start + chunk_size, hidden_states.shape[0])
-        expert_ids = topk_ids[start:end].reshape(-1)
-        selected_gate_up = gate_up_proj.index_select(0, expert_ids)
-        route_hidden = (
-            hidden_states[start:end]
-            .unsqueeze(1)
-            .expand(-1, top_k, -1)
-            .reshape(expert_ids.numel(), -1, 1)
-        )
-        gate_up = torch.bmm(selected_gate_up, route_hidden).squeeze(-1)
-        del selected_gate_up, route_hidden
-        gate, up = gate_up.chunk(2, dim=-1)
-        selected_down = down_proj.index_select(0, expert_ids)
-        expert_output = torch.bmm(
-            selected_down,
-            (F.silu(gate) * up).unsqueeze(-1),
-        ).squeeze(-1)
-        chunks.append(
-            (
-                expert_output.reshape(end - start, top_k, -1)
-                * topk_weights[start:end].unsqueeze(-1)
-            ).sum(dim=1)
-        )
-    return torch.cat(chunks, dim=0)
+    return MOE_DISPATCH.batched_expert_dispatch(
+        hidden_states,
+        topk_ids,
+        topk_weights,
+        gate_up_proj,
+        down_proj,
+        chunk_size,
+    )
 
 
 def evaluate_graph_safe_moe_candidate(

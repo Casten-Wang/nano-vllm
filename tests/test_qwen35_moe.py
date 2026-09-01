@@ -22,10 +22,13 @@ def load_module(name: str, relative_path: str):
 
 nanovllm_package = types.ModuleType("nanovllm")
 layers_package = types.ModuleType("nanovllm.layers")
+models_package = types.ModuleType("nanovllm.models")
 sys.modules.setdefault("nanovllm", nanovllm_package)
 sys.modules.setdefault("nanovllm.layers", layers_package)
+sys.modules.setdefault("nanovllm.models", models_package)
 load_module("nanovllm.layers.activation", "nanovllm/layers/activation.py")
 linear = load_module("nanovllm.layers.linear", "nanovllm/layers/linear.py")
+load_module("nanovllm.models.moe_dispatch", "nanovllm/models/moe_dispatch.py")
 qwen35_moe = load_module("qwen35_moe_under_test", "nanovllm/models/qwen35_moe.py")
 
 
