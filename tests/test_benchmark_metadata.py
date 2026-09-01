@@ -11,6 +11,23 @@ SPEC.loader.exec_module(module)
 
 
 class BenchmarkMetadataTest(unittest.TestCase):
+    def test_token_digest_is_deterministic_and_length_aware(self):
+        outputs = [
+            {"token_ids": [1, 2, 3]},
+            {"token_ids": [9]},
+        ]
+
+        first = module.token_ids_digest(outputs)
+        second = module.token_ids_digest(outputs)
+        changed = module.token_ids_digest(
+            [{"token_ids": [1, 2, 4]}, {"token_ids": [9]}]
+        )
+
+        self.assertEqual(first, second)
+        self.assertNotEqual(first["digest"], changed["digest"])
+        self.assertEqual(first["algorithm"], "sha256")
+        self.assertEqual(first["sequence_lengths"], [3, 1])
+
     def test_model_config_metadata_converts_non_json_values(self):
         class FakeConfig:
             def to_dict(self):

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import importlib
+import hashlib
+import json
 import os
 import platform
 import subprocess
@@ -11,6 +13,21 @@ from datetime import datetime
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def token_ids_digest(outputs: list[dict]) -> dict:
+    """Return a compact, deterministic fingerprint of generated token IDs."""
+
+    token_ids = [
+        [int(token_id) for token_id in output["token_ids"]]
+        for output in outputs
+    ]
+    encoded = json.dumps(token_ids, separators=(",", ":")).encode("ascii")
+    return {
+        "algorithm": "sha256",
+        "digest": hashlib.sha256(encoded).hexdigest(),
+        "sequence_lengths": [len(sequence) for sequence in token_ids],
+    }
 
 
 def git_value(args: list[str]) -> str:

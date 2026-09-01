@@ -18,6 +18,7 @@ from nanovllm.benchmark_metadata import (
     collect_benchmark_metadata,
     kv_cache_storage_metadata,
     model_config_metadata,
+    token_ids_digest,
     validate_execution_stats,
 )
 
@@ -68,6 +69,7 @@ def write_markdown(path: Path, result: dict) -> None:
         f"| total_time_s | {result['total_time_s']:.4f} |",
         f"| input_tokens | {result['input_tokens']} |",
         f"| output_tokens | {result['output_tokens']} |",
+        f"| generated_token_sha256 | `{result['generated_token_ids']['digest']}` |",
         f"| output_throughput_tok_s | {result['output_throughput_tok_s']:.4f} |",
         f"| peak_torch_allocated_mib | {result['peak_torch_allocated_mib']:.2f} |",
         f"| peak_torch_reserved_mib | {result['peak_torch_reserved_mib']:.2f} |",
@@ -170,6 +172,11 @@ def main() -> None:
     if args.warmup:
         llm.generate([[0]], SamplingParams(max_tokens=1, ignore_eos=True), use_tqdm=False)
 
+    # Warmup consumes sampler RNG. Reset immediately before the measured run
+    # so --warmup and repeated benchmark invocations generate comparable IDs.
+    torch.manual_seed(args.seed)
+    torch.cuda.manual_seed_all(args.seed)
+
     block_manager = llm.scheduler.block_manager
     block_manager.reset_cache_stats()
     llm.model_runner.call("reset_execution_stats")
@@ -222,6 +229,7 @@ def main() -> None:
         "warmup": args.warmup,
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
+        "generated_token_ids": token_ids_digest(outputs),
         "total_time_s": total_time,
         "gpu_elapsed_s": gpu_elapsed_s,
         "cpu_submit_time_s": submit_time_s,
