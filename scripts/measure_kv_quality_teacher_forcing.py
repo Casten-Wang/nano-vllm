@@ -68,6 +68,16 @@ CORPUS = [
 ]
 
 
+def iter_full_attention_modules(layers):
+    """Yield cache-backed attention modules, skipping recurrent GDN layers."""
+
+    for layer_id, layer in enumerate(layers):
+        self_attn = getattr(layer, "self_attn", None)
+        attention = getattr(self_attn, "attn", None)
+        if attention is not None:
+            yield layer_id, attention
+
+
 def tensor_metadata(name: str, tensor: torch.Tensor) -> dict[str, Any]:
     return {
         "name": name,
@@ -197,11 +207,11 @@ class KVMetricCollector:
     def attach(self, runner) -> None:
         if self.mode != "int8":
             return
-        for layer_id, layer in enumerate(runner.model.model.layers):
+        for layer_id, attention in iter_full_attention_modules(
+            runner.model.model.layers
+        ):
             self.hooks.append(
-                layer.self_attn.attn.register_forward_hook(
-                    self._make_hook(layer_id)
-                )
+                attention.register_forward_hook(self._make_hook(layer_id))
             )
 
     def _make_hook(self, layer_id: int):
@@ -316,6 +326,7 @@ def run_worker(args: argparse.Namespace) -> None:
 
     llm = LLM(
         model,
+        tensor_parallel_size=args.tensor_parallel_size,
         enforce_eager=True,
         max_model_len=args.max_model_len,
         max_num_batched_tokens=args.max_num_batched_tokens,
@@ -404,6 +415,7 @@ def run_worker(args: argparse.Namespace) -> None:
         shape_trace = runner.call("get_shape_trace")
         result = {
             "mode": mode,
+            "tensor_parallel_size": args.tensor_parallel_size,
             "cases": cases,
             "target_matrix": target_matrix.tolist(),
             "forced_steps": state["step"],
@@ -555,6 +567,8 @@ def run_worker_process(
         str(output_path),
         "--model",
         args.model,
+        "--tensor-parallel-size",
+        str(args.tensor_parallel_size),
         "--max-model-len",
         str(args.max_model_len),
         "--max-num-batched-tokens",
@@ -569,6 +583,7 @@ def main() -> None:
         description="Teacher-forced BF16-KV versus INT8-KV quality measurement."
     )
     parser.add_argument("--model", required=True)
+    parser.add_argument("--tensor-parallel-size", type=int, default=1)
     parser.add_argument(
         "--cases-file",
         default=None,
@@ -675,6 +690,7 @@ def main() -> None:
     result: dict[str, Any] = {
         **collect_benchmark_metadata(torch),
         "configuration": {
+            "tensor_parallel_size": args.tensor_parallel_size,
             "prompt_lengths": actual_prompt_lengths,
             "cases_per_length": args.cases_per_length,
             "continuation_len": args.continuation_len,

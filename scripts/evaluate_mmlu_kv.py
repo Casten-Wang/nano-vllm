@@ -58,6 +58,42 @@ def format_prompt(item: dict[str, Any]) -> str:
     )
 
 
+def build_worker_command(
+    args: argparse.Namespace,
+    *,
+    mode: str,
+    prompts_file: Path,
+    output_file: Path,
+    result_dir: Path,
+) -> list[str]:
+    return [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        "--model",
+        args.model,
+        "--tensor-parallel-size",
+        str(args.tensor_parallel_size),
+        "--data-dir",
+        args.data_dir,
+        "--subjects",
+        args.subjects,
+        "--limit-per-subject",
+        str(args.limit_per_subject),
+        "--max-model-len",
+        str(args.max_model_len),
+        "--batch-size",
+        str(args.batch_size),
+        "--result-dir",
+        str(result_dir),
+        "--worker-mode",
+        mode,
+        "--prompts-file",
+        str(prompts_file),
+        "--worker-output-file",
+        str(output_file),
+        "--trace-max-events",
+        str(args.trace_max_events),
+    ]
 def run_worker(
     *,
     model: str,
@@ -67,6 +103,7 @@ def run_worker(
     max_model_len: int,
     max_num_seqs: int,
     trace_max_events: int,
+    tensor_parallel_size: int,
 ) -> None:
     prompts = json.loads(prompts_file.read_text())
     from transformers import AutoTokenizer
@@ -86,6 +123,7 @@ def run_worker(
 
     llm = LLM(
         model,
+        tensor_parallel_size=tensor_parallel_size,
         enforce_eager=True,
         max_model_len=max_model_len,
         max_num_batched_tokens=max_model_len * max_num_seqs,
@@ -128,6 +166,7 @@ def run_worker(
         torch.save(
             {
                 "mode": mode,
+                "tensor_parallel_size": tensor_parallel_size,
                 "logits": prefill_logits,
                 "prompt_lengths": [len(ids) for ids in prompt_ids],
                 "option_ids": option_ids,
@@ -162,6 +201,7 @@ def score_worker(
         row["accuracy"] = row["correct"] / row["count"]
     return {
         "mode": worker["mode"],
+        "tensor_parallel_size": worker["tensor_parallel_size"],
         "count": len(questions),
         "accuracy": sum(p == g for p, g in zip(predicted, gold)) / len(gold),
         "predicted_labels": ["ABCD"[p] for p in predicted],
@@ -177,6 +217,7 @@ def score_worker(
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", required=True)
+    parser.add_argument("--tensor-parallel-size", type=int, default=1)
     parser.add_argument("--data-dir", required=True)
     parser.add_argument("--subjects", required=True)
     parser.add_argument("--limit-per-subject", type=int, default=100)
@@ -204,6 +245,7 @@ def main() -> None:
             max_model_len=args.max_model_len,
             max_num_seqs=args.batch_size,
             trace_max_events=args.trace_max_events,
+            tensor_parallel_size=args.tensor_parallel_size,
         )
         return
 
@@ -227,37 +269,19 @@ def main() -> None:
     workers = {}
     for mode in ("auto", "int8"):
         output_file = result_dir / f"{mode}.pt"
-        command = [
-            sys.executable,
-            str(Path(__file__).resolve()),
-            "--model",
-            args.model,
-            "--data-dir",
-            args.data_dir,
-            "--subjects",
-            args.subjects,
-            "--limit-per-subject",
-            str(args.limit_per_subject),
-            "--max-model-len",
-            str(args.max_model_len),
-            "--batch-size",
-            str(args.batch_size),
-            "--result-dir",
-            str(result_dir),
-            "--worker-mode",
-            mode,
-            "--prompts-file",
-            str(prompts_file),
-            "--worker-output-file",
-            str(output_file),
-            "--trace-max-events",
-            str(args.trace_max_events),
-        ]
+        command = build_worker_command(
+            args,
+            mode=mode,
+            prompts_file=prompts_file,
+            output_file=output_file,
+            result_dir=result_dir,
+        )
         subprocess.run(command, check=True)
         workers[mode] = torch.load(output_file, map_location="cpu", weights_only=False)
     summary = {
         **collect_benchmark_metadata(torch),
         "subjects": subjects,
+        "tensor_parallel_size": args.tensor_parallel_size,
         "limit_per_subject": args.limit_per_subject,
         "count": len(questions),
         "template": (

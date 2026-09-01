@@ -53,6 +53,8 @@ def run_in_worker_process(
         batch_name,
         "--model",
         args.model,
+        "--tensor-parallel-size",
+        str(args.tensor_parallel_size),
         "--output-len",
         str(args.output_len),
         "--max-model-len",
@@ -106,6 +108,16 @@ def topk_summary(logits: torch.Tensor, k: int = 5) -> dict:
     }
 
 
+def iter_full_attention_modules(layers):
+    """Yield only cache-backed attention modules in a hybrid model."""
+
+    for layer_id, layer in enumerate(layers):
+        self_attn = getattr(layer, "self_attn", None)
+        attention = getattr(self_attn, "attn", None)
+        if attention is not None:
+            yield layer_id, attention
+
+
 def run_one_mode(
     *,
     model: str,
@@ -122,6 +134,7 @@ def run_one_mode(
     )
     llm = LLM(
         model,
+        tensor_parallel_size=args.tensor_parallel_size,
         enforce_eager=True,
         max_model_len=args.max_model_len,
         max_num_batched_tokens=args.max_num_batched_tokens,
@@ -191,8 +204,12 @@ def run_one_mode(
         return hook
 
     try:
-        for layer_id, layer in enumerate(runner.model.model.layers):
-            hooks.append(layer.self_attn.attn.register_forward_hook(make_hook(layer_id)))
+        attention_layer_ids = []
+        for layer_id, attention in iter_full_attention_modules(
+            runner.model.model.layers
+        ):
+            attention_layer_ids.append(layer_id)
+            hooks.append(attention.register_forward_hook(make_hook(layer_id)))
         outputs = llm.generate(
             prompts,
             params,
@@ -202,6 +219,8 @@ def run_one_mode(
         shape_trace = runner.call("get_shape_trace")
         result = {
             "kv_cache_dtype": kv_cache_dtype,
+            "tensor_parallel_size": args.tensor_parallel_size,
+            "captured_attention_layer_ids": attention_layer_ids,
             "outputs": [item["token_ids"] for item in outputs],
             "logits_records": state["logits_records"],
             "attention_records": state["attention_records"],
@@ -415,6 +434,7 @@ def main() -> None:
         description="Compare BF16-KV and INT8-KV greedy model quality."
     )
     parser.add_argument("--model", required=True)
+    parser.add_argument("--tensor-parallel-size", type=int, default=1)
     parser.add_argument("--output-len", type=int, default=128)
     parser.add_argument("--max-model-len", type=int, default=4096)
     parser.add_argument("--max-num-batched-tokens", type=int, default=16384)
@@ -521,6 +541,7 @@ def main() -> None:
     result = {
         **collect_benchmark_metadata(torch),
         "configuration": {
+            "tensor_parallel_size": args.tensor_parallel_size,
             "output_len": args.output_len,
             "max_model_len": args.max_model_len,
             "max_num_batched_tokens": args.max_num_batched_tokens,
