@@ -396,8 +396,16 @@ def test_mixed_decode_and_prefill_matches_transformers(tmp_path):
     )
 
 
-def test_bf16_recurrent_storage_remains_close_over_multi_step_decode(tmp_path):
-    reference, local = make_models(tmp_path, 61, recurrent_dtype=torch.bfloat16)
+@pytest.mark.parametrize("recurrent_dtype", [torch.bfloat16, torch.float16])
+def test_compressed_recurrent_storage_remains_close_over_multi_step_decode(
+    tmp_path,
+    recurrent_dtype,
+):
+    reference, local = make_models(
+        tmp_path,
+        61,
+        recurrent_dtype=recurrent_dtype,
+    )
     tokens = torch.tensor(
         [[1, 5, 7, 2, 9, 4, 6, 3, 8, 11, 13, 10, 12, 15, 14, 17, 16, 19]]
     )
