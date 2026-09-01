@@ -28,6 +28,7 @@ causal_conv1d_scan = qwen35_gated_delta.causal_conv1d_scan
 causal_conv1d_prefill = qwen35_gated_delta.causal_conv1d_prefill
 chunk_gated_delta_rule = qwen35_gated_delta.chunk_gated_delta_rule
 recurrent_gated_delta_rule = qwen35_gated_delta.recurrent_gated_delta_rule
+recurrent_gated_delta_step = qwen35_gated_delta.recurrent_gated_delta_step
 
 
 def inputs(seed=0):
@@ -100,6 +101,37 @@ def test_single_token_decode_matches_last_prefill_token():
 
     torch.testing.assert_close(torch.cat((prefix, decoded), dim=1), expected)
     torch.testing.assert_close(state, expected_state)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_specialized_decode_step_matches_recurrent_oracle(dtype):
+    torch.manual_seed(41)
+    query = torch.randn(5, 3, 4, dtype=dtype)
+    key = torch.randn(5, 3, 4, dtype=dtype)
+    value = torch.randn(5, 3, 6, dtype=dtype)
+    decay = -torch.rand(5, 3)
+    beta = torch.rand(5, 3, dtype=dtype)
+    state = torch.randn(5, 3, 4, 6, dtype=dtype)
+
+    expected, expected_state = recurrent_gated_delta_rule(
+        query.unsqueeze(1),
+        key.unsqueeze(1),
+        value.unsqueeze(1),
+        decay.unsqueeze(1),
+        beta.unsqueeze(1),
+        state,
+    )
+    actual, actual_state = recurrent_gated_delta_step(
+        query,
+        key,
+        value,
+        decay,
+        beta,
+        state,
+    )
+
+    torch.testing.assert_close(actual, expected.squeeze(1))
+    torch.testing.assert_close(actual_state, expected_state)
 
 
 @pytest.mark.parametrize("sequence_length", [1, 5, 17, 64, 65])

@@ -157,6 +157,42 @@ def recurrent_gated_delta_rule(
     return output, state
 
 
+def recurrent_gated_delta_step(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    log_decay: torch.Tensor,
+    beta: torch.Tensor,
+    state: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Apply one batched Delta Rule decode step without scan overhead."""
+
+    if query.shape != key.shape or query.ndim != 3 or value.ndim != 3:
+        raise ValueError("query, key, and value shapes are inconsistent")
+    if query.shape[:2] != value.shape[:2]:
+        raise ValueError("query/key and value batch and heads must match")
+    if log_decay.shape != query.shape[:2] or beta.shape != query.shape[:2]:
+        raise ValueError("decay and beta must have shape [batch, heads]")
+    expected_state_shape = (*query.shape, value.shape[-1])
+    if tuple(state.shape) != expected_state_shape:
+        raise ValueError(
+            f"invalid recurrent state shape: {tuple(state.shape)}; "
+            f"expected {expected_state_shape}"
+        )
+
+    normalized_query = l2_normalize(query.float()) / (query.shape[-1] ** 0.5)
+    normalized_key = l2_normalize(key.float())
+    next_state = state.float() * log_decay.float().exp()[..., None, None]
+    prediction = (next_state * normalized_key.unsqueeze(-1)).sum(dim=-2)
+    correction = (value.float() - prediction) * beta.float().unsqueeze(-1)
+    next_state = (
+        next_state
+        + normalized_key.unsqueeze(-1) * correction.unsqueeze(-2)
+    )
+    output = (next_state * normalized_query.unsqueeze(-1)).sum(dim=-2)
+    return output.to(value.dtype), next_state
+
+
 def chunk_gated_delta_rule(
     query: torch.Tensor,
     key: torch.Tensor,
@@ -539,12 +575,12 @@ class Qwen35GatedDeltaNet(nn.Module):
         if repeat_factor > 1:
             query = query.repeat_interleave(repeat_factor, dim=2)
             key = key.repeat_interleave(repeat_factor, dim=2)
-        output, recurrent_state = recurrent_gated_delta_rule(
-            query,
-            key,
-            value,
-            log_decay.unsqueeze(1),
-            beta.unsqueeze(1),
+        output, recurrent_state = recurrent_gated_delta_step(
+            query.squeeze(1),
+            key.squeeze(1),
+            value.squeeze(1),
+            log_decay,
+            beta,
             recurrent_state,
         )
         self.state_pool.update(0, slots, recurrent_state, conv_state)
