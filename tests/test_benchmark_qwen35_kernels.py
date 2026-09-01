@@ -15,6 +15,20 @@ MODULE = module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
 
 
+def test_measure_preserves_every_raw_repeat():
+    result = MODULE.measure(
+        lambda: None,
+        device=torch.device("cpu"),
+        warmup=1,
+        iterations=1,
+        repeats=3,
+    )
+
+    assert len(result["samples_ms"]) == 3
+    assert result["peak_extra_mib_samples"] == []
+    assert result["median_ms"] == sorted(result["samples_ms"])[1]
+
+
 def test_expert_dispatch_matches_naive_route_accumulation():
     torch.manual_seed(101)
     hidden = torch.randn(4, 3)

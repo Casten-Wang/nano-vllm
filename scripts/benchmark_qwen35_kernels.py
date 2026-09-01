@@ -73,10 +73,14 @@ def measure(
             )
 
     return {
+        "samples_ms": samples,
         "median_ms": statistics.median(samples),
         "min_ms": min(samples),
         "max_ms": max(samples),
         "stdev_ms": statistics.pstdev(samples),
+        "peak_extra_mib_samples": [
+            value / 1024 / 1024 for value in peak_extra_bytes
+        ],
         "peak_extra_mib": (
             max(peak_extra_bytes) / 1024 / 1024 if peak_extra_bytes else 0.0
         ),
