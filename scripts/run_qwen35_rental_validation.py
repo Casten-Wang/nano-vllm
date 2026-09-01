@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime, timezone
+import hashlib
 import json
 from pathlib import Path
 import subprocess
@@ -141,6 +142,86 @@ def write_manifest(path: Path, manifest: dict) -> None:
     temporary.replace(path)
 
 
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def collect_stage_artifacts(
+    args: argparse.Namespace,
+    stage_name: str,
+) -> list[Path]:
+    root = Path(args.result_dir) / args.run_id
+    if stage_name == "preflight":
+        required = [
+            root / "preflight" / "checkpoint_mapping_audit.json",
+            root / "preflight" / "memory_preflight.json",
+        ]
+        search_root = root / "preflight"
+    elif stage_name.startswith("kernels-tp"):
+        required = [root / "kernels" / f"{stage_name.removeprefix('kernels-')}.json"]
+        search_root = root / "kernels"
+    elif stage_name == "performance-matrix":
+        search_root = root / "performance"
+        required = (
+            [search_root / f"{args.run_id}_matrix_summary.json"]
+            if args.repeats > 1
+            else []
+        )
+    elif stage_name == "quality-matrix":
+        search_root = root / "quality"
+        required = [search_root / f"{args.run_id}_summary.json"]
+    else:
+        raise ValueError(f"unknown validation stage: {stage_name}")
+    missing = [path for path in required if not path.is_file()]
+    if missing:
+        raise RuntimeError(
+            f"stage {stage_name} did not produce required artifact: {missing[0]}"
+        )
+    artifacts = (
+        required
+        if stage_name == "preflight" or stage_name.startswith("kernels-tp")
+        else sorted(search_root.rglob("*.json"))
+    )
+    if not artifacts:
+        raise RuntimeError(f"stage {stage_name} produced no JSON artifacts")
+    return artifacts
+
+
+def artifact_records(paths: list[Path], root: Path) -> list[dict]:
+    return [
+        {
+            "path": str(path.relative_to(root)),
+            "size": path.stat().st_size,
+            "sha256": file_sha256(path),
+        }
+        for path in paths
+    ]
+
+
+def validate_completed_artifacts(path: Path, manifest: dict) -> None:
+    records_by_stage = manifest.get("completed_stage_artifacts")
+    if not isinstance(records_by_stage, dict):
+        raise ValueError("resume manifest has no artifact integrity records")
+    for stage_name in manifest.get("completed_stages", []):
+        records = records_by_stage.get(stage_name)
+        if not isinstance(records, list) or not records:
+            raise ValueError(f"resume stage has no artifacts: {stage_name}")
+        for record in records:
+            artifact = path.parent / record["path"]
+            if (
+                not artifact.is_file()
+                or artifact.stat().st_size != record["size"]
+                or file_sha256(artifact) != record["sha256"]
+            ):
+                raise ValueError(
+                    f"resume artifact is missing or changed: {artifact}"
+                )
+
+
 def prepare_manifest(
     path: Path,
     plan: dict,
@@ -160,20 +241,34 @@ def prepare_manifest(
         completed = manifest.get("completed_stages", [])
         if not isinstance(completed, list):
             raise ValueError("resume manifest has invalid completed stages")
+        validate_completed_artifacts(path, manifest)
         return manifest
     if path.exists():
         raise ValueError(
             f"run manifest already exists: {path}; use --resume or a new run id"
         )
-    manifest = {**plan, "completed_stages": []}
+    manifest = {
+        **plan,
+        "completed_stages": [],
+        "completed_stage_artifacts": {},
+    }
     write_manifest(path, manifest)
     return manifest
 
 
-def mark_stage_completed(path: Path, manifest: dict, stage_name: str) -> None:
+def mark_stage_completed(
+    path: Path,
+    manifest: dict,
+    stage_name: str,
+    artifacts: list[Path],
+) -> None:
     completed = manifest["completed_stages"]
     if stage_name not in completed:
         completed.append(stage_name)
+    manifest["completed_stage_artifacts"][stage_name] = artifact_records(
+        artifacts,
+        path.parent,
+    )
     write_manifest(path, manifest)
 
 
@@ -238,7 +333,8 @@ def main() -> None:
         print(subprocess.list2cmdline(command), flush=True)
         if not args.dry_run:
             subprocess.run(command, cwd=ROOT, check=True)
-            mark_stage_completed(manifest_path, manifest, name)
+            artifacts = collect_stage_artifacts(args, name)
+            mark_stage_completed(manifest_path, manifest, name, artifacts)
 
 
 if __name__ == "__main__":

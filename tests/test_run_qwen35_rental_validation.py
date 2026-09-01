@@ -66,11 +66,41 @@ def test_manifest_resumes_only_identical_run(tmp_path):
     plan = MODULE.manifest_plan(arguments, stages)
     path = tmp_path / "manifest.json"
     manifest = MODULE.prepare_manifest(path, plan, resume=False)
-    MODULE.mark_stage_completed(path, manifest, "preflight")
+    artifact = tmp_path / "result.json"
+    artifact.write_text('{"valid": true}\n')
+    MODULE.mark_stage_completed(path, manifest, "preflight", [artifact])
 
     resumed = MODULE.prepare_manifest(path, plan, resume=True)
 
     assert resumed["completed_stages"] == ["preflight"]
+
+
+def test_manifest_rejects_changed_completed_artifact(tmp_path):
+    arguments = args()
+    plan = MODULE.manifest_plan(arguments, MODULE.commands(arguments))
+    path = tmp_path / "manifest.json"
+    manifest = MODULE.prepare_manifest(path, plan, resume=False)
+    artifact = tmp_path / "result.json"
+    artifact.write_text('{"valid": true}\n')
+    MODULE.mark_stage_completed(path, manifest, "preflight", [artifact])
+    artifact.write_text('{"valid": false}\n')
+
+    with pytest.raises(ValueError, match="missing or changed"):
+        MODULE.prepare_manifest(path, plan, resume=True)
+
+
+def test_manifest_rejects_missing_completed_artifact(tmp_path):
+    arguments = args()
+    plan = MODULE.manifest_plan(arguments, MODULE.commands(arguments))
+    path = tmp_path / "manifest.json"
+    manifest = MODULE.prepare_manifest(path, plan, resume=False)
+    artifact = tmp_path / "result.json"
+    artifact.write_text('{"valid": true}\n')
+    MODULE.mark_stage_completed(path, manifest, "preflight", [artifact])
+    artifact.unlink()
+
+    with pytest.raises(ValueError, match="missing or changed"):
+        MODULE.prepare_manifest(path, plan, resume=True)
 
 
 def test_manifest_rejects_changed_resume_commands(tmp_path):
