@@ -222,6 +222,9 @@ def summarize(run_dir: Path, run_id: str) -> dict:
                 }
                 for batch, item in candidates_by_batch.items()
             },
+            "chunk_recommendation": result["results"].get(
+                "moe_decode_chunk_recommendation"
+            ),
         }
         commits.add(result["commit"])
         clean_worktrees = clean_worktrees and not result["git_dirty"]

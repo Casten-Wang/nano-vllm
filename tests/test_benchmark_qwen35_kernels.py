@@ -155,6 +155,8 @@ def test_single_token_dispatch_reports_general_path_baseline():
         iterations=1,
         repeats=1,
         moe_decode_chunk_size=2,
+        moe_decode_chunk_sizes=(1, 2),
+        max_decode_tokens=64,
         moe_graph_safe_min_speedup=1.05,
         moe_graph_safe_max_peak_extra_mib=64.0,
         moe_graph_safe_max_abs_error=0.05,
@@ -176,6 +178,37 @@ def test_single_token_dispatch_reports_general_path_baseline():
     assert graph_safe["errors_vs_current"]["max_abs_error"] < 1e-5
     assert not graph_safe["promotion"]["promote_to_runtime"]
     assert not graph_safe["promotion"]["checks"]["cuda_measurement"]
+    assert set(result["graph_safe_chunk_sweep"]["candidates"]) == {"1", "2"}
+
+
+def test_chunk_recommendation_uses_worst_decode_batch_speedup():
+    def candidate(speedup, promoted=True):
+        return {
+            "promotion": {"promote_to_runtime": promoted},
+            "speedup_vs_current": speedup,
+            "peak_extra_mib": 4.0,
+            "median_ms": 1.0 / speedup,
+        }
+
+    results = {
+        "1": {"graph_safe_chunk_sweep": {"candidates": {
+            "4": candidate(1.3),
+            "8": candidate(1.2),
+            "16": candidate(1.4, promoted=False),
+        }}},
+        "64": {"graph_safe_chunk_sweep": {"candidates": {
+            "4": candidate(1.1),
+            "8": candidate(1.15),
+            "16": candidate(1.5),
+        }}},
+        "128": {"tokens": 128},
+    }
+
+    recommendation = MODULE.recommend_moe_decode_chunk_size(results, 64)
+
+    assert recommendation["measured_decode_batches"] == [1, 64]
+    assert recommendation["recommended_chunk_size"] == 8
+    assert not recommendation["candidates"]["16"]["all_batches_promoted"]
 
 
 def test_graph_safe_candidate_requires_every_promotion_gate():

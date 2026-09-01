@@ -449,58 +449,85 @@ def benchmark_expert_dispatch(args, device, dtype, token_count: int) -> dict:
         result["decode_fast_path_speedup"] = (
             general_timing["median_ms"] / result["candidate"]["median_ms"]
         )
-    graph_safe_output = expert_dispatch_batched_decode(
-        hidden,
-        topk_ids,
-        topk_weights,
-        gate_up_proj,
-        down_proj,
-        args.moe_decode_chunk_size,
-    )
-    graph_safe_timing = measure(
-        lambda: expert_dispatch_batched_decode(
-            hidden,
-            topk_ids,
-            topk_weights,
-            gate_up_proj,
-            down_proj,
-            args.moe_decode_chunk_size,
-        ),
-        device=device,
-        warmup=args.warmup,
-        iterations=args.iterations,
-        repeats=args.repeats,
-    )
-    graph_safe_timing.update(
-        {
-            "chunk_size": args.moe_decode_chunk_size,
-            "speedup_vs_current": (
-                result["candidate"]["median_ms"]
-                / graph_safe_timing["median_ms"]
-            ),
-            "errors_vs_current": error(graph_safe_output, output),
-            "estimated_selected_weight_mib": (
-                min(token_count, args.moe_decode_chunk_size)
-                * args.top_k
-                * 2
-                * local_intermediate_size
-                * args.hidden_size
-                * hidden.element_size()
-                / 1024
-                / 1024
+    if token_count <= args.max_decode_tokens:
+        chunk_sizes = tuple(
+            sorted(
+                set(args.moe_decode_chunk_sizes)
+                | {args.moe_decode_chunk_size}
+            )
+        )
+        graph_safe_candidates = {}
+        for chunk_size in chunk_sizes:
+            graph_safe_output = expert_dispatch_batched_decode(
+                hidden,
+                topk_ids,
+                topk_weights,
+                gate_up_proj,
+                down_proj,
+                chunk_size,
+            )
+            graph_safe_timing = measure(
+                lambda chunk_size=chunk_size: expert_dispatch_batched_decode(
+                    hidden,
+                    topk_ids,
+                    topk_weights,
+                    gate_up_proj,
+                    down_proj,
+                    chunk_size,
+                ),
+                device=device,
+                warmup=args.warmup,
+                iterations=args.iterations,
+                repeats=args.repeats,
+            )
+            graph_safe_timing.update(
+                {
+                    "chunk_size": chunk_size,
+                    "speedup_vs_current": (
+                        result["candidate"]["median_ms"]
+                        / graph_safe_timing["median_ms"]
+                    ),
+                    "errors_vs_current": error(graph_safe_output, output),
+                    "estimated_selected_weight_mib": (
+                        min(token_count, chunk_size)
+                        * args.top_k
+                        * 2
+                        * local_intermediate_size
+                        * args.hidden_size
+                        * hidden.element_size()
+                        / 1024
+                        / 1024
+                    ),
+                }
+            )
+            graph_safe_timing["promotion"] = evaluate_graph_safe_moe_candidate(
+                device_type=device.type,
+                speedup=graph_safe_timing["speedup_vs_current"],
+                peak_extra_mib=graph_safe_timing["peak_extra_mib"],
+                max_abs_error=graph_safe_timing["errors_vs_current"][
+                    "max_abs_error"
+                ],
+                min_speedup=args.moe_graph_safe_min_speedup,
+                max_peak_extra_mib=args.moe_graph_safe_max_peak_extra_mib,
+                max_allowed_abs_error=args.moe_graph_safe_max_abs_error,
+            )
+            graph_safe_candidates[str(chunk_size)] = graph_safe_timing
+        promoted = [
+            item
+            for item in graph_safe_candidates.values()
+            if item["promotion"]["promote_to_runtime"]
+        ]
+        result["graph_safe_chunk_sweep"] = {
+            "candidates": graph_safe_candidates,
+            "recommended_chunk_size": (
+                min(promoted, key=lambda item: item["median_ms"])["chunk_size"]
+                if promoted
+                else None
             ),
         }
-    )
-    graph_safe_timing["promotion"] = evaluate_graph_safe_moe_candidate(
-        device_type=device.type,
-        speedup=graph_safe_timing["speedup_vs_current"],
-        peak_extra_mib=graph_safe_timing["peak_extra_mib"],
-        max_abs_error=graph_safe_timing["errors_vs_current"]["max_abs_error"],
-        min_speedup=args.moe_graph_safe_min_speedup,
-        max_peak_extra_mib=args.moe_graph_safe_max_peak_extra_mib,
-        max_allowed_abs_error=args.moe_graph_safe_max_abs_error,
-    )
-    result["graph_safe_batched_candidate"] = graph_safe_timing
+        result["graph_safe_batched_candidate"] = graph_safe_candidates[
+            str(args.moe_decode_chunk_size)
+        ]
     return result
 
 
@@ -515,6 +542,65 @@ def benchmark_expert_dispatch_sweep(args, device, dtype) -> dict[str, dict]:
             token_count,
         )
         for token_count in args.expert_token_counts
+    }
+
+
+def recommend_moe_decode_chunk_size(
+    dispatch_results: dict[str, dict],
+    max_decode_tokens: int,
+) -> dict:
+    measured = {
+        batch: result
+        for batch, result in dispatch_results.items()
+        if int(batch) <= max_decode_tokens and "graph_safe_chunk_sweep" in result
+    }
+    if not measured:
+        raise ValueError("no graph-safe decode batches were measured")
+    common_chunks = set.intersection(
+        *(
+            set(result["graph_safe_chunk_sweep"]["candidates"])
+            for result in measured.values()
+        )
+    )
+    candidates = {}
+    for chunk in sorted(common_chunks, key=int):
+        measurements = [
+            result["graph_safe_chunk_sweep"]["candidates"][chunk]
+            for result in measured.values()
+        ]
+        candidates[chunk] = {
+            "all_batches_promoted": all(
+                item["promotion"]["promote_to_runtime"]
+                for item in measurements
+            ),
+            "worst_speedup": min(
+                item["speedup_vs_current"] for item in measurements
+            ),
+            "max_peak_extra_mib": max(
+                item["peak_extra_mib"] for item in measurements
+            ),
+            "total_median_ms": sum(item["median_ms"] for item in measurements),
+        }
+    eligible = [
+        (int(chunk), item)
+        for chunk, item in candidates.items()
+        if item["all_batches_promoted"]
+    ]
+    recommended = (
+        max(
+            eligible,
+            key=lambda pair: (
+                pair[1]["worst_speedup"],
+                -pair[1]["total_median_ms"],
+            ),
+        )[0]
+        if eligible
+        else None
+    )
+    return {
+        "measured_decode_batches": sorted(map(int, measured)),
+        "recommended_chunk_size": recommended,
+        "candidates": candidates,
     }
 
 
@@ -892,6 +978,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--iterations", type=int, default=50)
     parser.add_argument("--repeats", type=int, default=5)
     parser.add_argument("--moe-decode-chunk-size", type=int, default=8)
+    parser.add_argument(
+        "--moe-decode-chunk-sizes",
+        type=int,
+        nargs="+",
+        default=(4, 8, 16),
+    )
+    parser.add_argument("--max-decode-tokens", type=int, default=64)
     parser.add_argument("--moe-graph-safe-min-speedup", type=float, default=1.05)
     parser.add_argument(
         "--moe-graph-safe-max-peak-extra-mib",
@@ -926,6 +1019,7 @@ def main() -> None:
         "drift_steps": args.drift_steps,
         "warmup": args.warmup,
         "moe_decode_chunk_size": args.moe_decode_chunk_size,
+        "max_decode_tokens": args.max_decode_tokens,
         "iterations": args.iterations,
         "repeats": args.repeats,
         "moe_graph_safe_min_speedup": args.moe_graph_safe_min_speedup,
@@ -933,6 +1027,8 @@ def main() -> None:
     invalid = [name for name, value in positive_values.items() if value <= 0]
     if any(value <= 0 for value in args.expert_token_counts):
         invalid.append("expert_token_counts")
+    if any(value <= 0 for value in args.moe_decode_chunk_sizes):
+        invalid.append("moe_decode_chunk_sizes")
     if invalid:
         raise ValueError(f"benchmark values must be positive: {', '.join(invalid)}")
     if args.moe_graph_safe_max_peak_extra_mib < 0:
@@ -960,6 +1056,7 @@ def main() -> None:
     )
 
     torch.manual_seed(args.seed)
+    expert_dispatch = benchmark_expert_dispatch_sweep(args, device, dtype)
     result = {
         **METADATA.collect_benchmark_metadata(torch),
         "configuration": {
@@ -972,10 +1069,10 @@ def main() -> None:
         },
         "results": {
             "router_topk_first": benchmark_router(args, device, dtype),
-            "expert_dispatch_torch": benchmark_expert_dispatch_sweep(
-                args,
-                device,
-                dtype,
+            "expert_dispatch_torch": expert_dispatch,
+            "moe_decode_chunk_recommendation": recommend_moe_decode_chunk_size(
+                expert_dispatch,
+                args.max_decode_tokens,
             ),
             "rmsnorm_fp32_reuse": benchmark_rmsnorm(args, device, dtype),
             "vectorized_prefill_convolution": benchmark_convolution(
