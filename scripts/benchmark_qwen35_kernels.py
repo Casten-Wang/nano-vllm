@@ -277,6 +277,33 @@ def expert_dispatch_batched_decode(
     )
 
 
+def evaluate_graph_safe_moe_candidate(
+    *,
+    device_type: str,
+    speedup: float,
+    peak_extra_mib: float,
+    max_abs_error: float,
+    min_speedup: float,
+    max_peak_extra_mib: float,
+    max_allowed_abs_error: float,
+) -> dict:
+    checks = {
+        "cuda_measurement": device_type == "cuda",
+        "speedup": speedup >= min_speedup,
+        "peak_memory": peak_extra_mib <= max_peak_extra_mib,
+        "accuracy": max_abs_error <= max_allowed_abs_error,
+    }
+    return {
+        "promote_to_runtime": all(checks.values()),
+        "checks": checks,
+        "thresholds": {
+            "min_speedup": min_speedup,
+            "max_peak_extra_mib": max_peak_extra_mib,
+            "max_abs_error": max_allowed_abs_error,
+        },
+    }
+
+
 def expert_dispatch_reference(
     hidden_states: torch.Tensor,
     topk_ids: torch.Tensor,
@@ -445,6 +472,17 @@ def benchmark_expert_dispatch(args, device, dtype, token_count: int) -> dict:
                     / 1024
                 ),
             }
+        )
+        graph_safe_timing["promotion"] = evaluate_graph_safe_moe_candidate(
+            device_type=device.type,
+            speedup=graph_safe_timing["speedup_vs_current"],
+            peak_extra_mib=graph_safe_timing["peak_extra_mib"],
+            max_abs_error=graph_safe_timing["errors_vs_current"][
+                "max_abs_error"
+            ],
+            min_speedup=args.moe_graph_safe_min_speedup,
+            max_peak_extra_mib=args.moe_graph_safe_max_peak_extra_mib,
+            max_allowed_abs_error=args.moe_graph_safe_max_abs_error,
         )
         result["graph_safe_batched_candidate"] = graph_safe_timing
     return result
@@ -837,6 +875,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--warmup", type=int, default=10)
     parser.add_argument("--iterations", type=int, default=50)
     parser.add_argument("--repeats", type=int, default=5)
+    parser.add_argument("--moe-graph-safe-min-speedup", type=float, default=1.05)
+    parser.add_argument(
+        "--moe-graph-safe-max-peak-extra-mib",
+        type=float,
+        default=64.0,
+    )
+    parser.add_argument(
+        "--moe-graph-safe-max-abs-error",
+        type=float,
+        default=0.05,
+    )
     parser.add_argument(
         "--output",
         type=Path,
@@ -861,12 +910,17 @@ def main() -> None:
         "warmup": args.warmup,
         "iterations": args.iterations,
         "repeats": args.repeats,
+        "moe_graph_safe_min_speedup": args.moe_graph_safe_min_speedup,
     }
     invalid = [name for name, value in positive_values.items() if value <= 0]
     if any(value <= 0 for value in args.expert_token_counts):
         invalid.append("expert_token_counts")
     if invalid:
         raise ValueError(f"benchmark values must be positive: {', '.join(invalid)}")
+    if args.moe_graph_safe_max_peak_extra_mib < 0:
+        raise ValueError("MoE graph-safe peak-memory limit must be non-negative")
+    if args.moe_graph_safe_max_abs_error < 0:
+        raise ValueError("MoE graph-safe error limit must be non-negative")
     if args.top_k > args.num_experts:
         raise ValueError("top_k cannot exceed num_experts")
     if args.moe_intermediate_size % args.tp_size:

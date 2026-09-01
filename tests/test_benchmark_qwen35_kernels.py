@@ -126,6 +126,9 @@ def test_single_token_dispatch_reports_general_path_baseline():
         warmup=0,
         iterations=1,
         repeats=1,
+        moe_graph_safe_min_speedup=1.05,
+        moe_graph_safe_max_peak_extra_mib=64.0,
+        moe_graph_safe_max_abs_error=0.05,
     )
 
     result = MODULE.benchmark_expert_dispatch(
@@ -142,3 +145,30 @@ def test_single_token_dispatch_reports_general_path_baseline():
     assert graph_safe["speedup_vs_current"] > 0
     assert graph_safe["estimated_selected_weight_mib"] > 0
     assert graph_safe["errors_vs_current"]["max_abs_error"] < 1e-5
+    assert not graph_safe["promotion"]["promote_to_runtime"]
+    assert not graph_safe["promotion"]["checks"]["cuda_measurement"]
+
+
+def test_graph_safe_candidate_requires_every_promotion_gate():
+    promoted = MODULE.evaluate_graph_safe_moe_candidate(
+        device_type="cuda",
+        speedup=1.2,
+        peak_extra_mib=32.0,
+        max_abs_error=0.01,
+        min_speedup=1.05,
+        max_peak_extra_mib=64.0,
+        max_allowed_abs_error=0.05,
+    )
+    too_slow = MODULE.evaluate_graph_safe_moe_candidate(
+        device_type="cuda",
+        speedup=1.0,
+        peak_extra_mib=32.0,
+        max_abs_error=0.01,
+        min_speedup=1.05,
+        max_peak_extra_mib=64.0,
+        max_allowed_abs_error=0.05,
+    )
+
+    assert promoted["promote_to_runtime"]
+    assert not too_slow["promote_to_runtime"]
+    assert not too_slow["checks"]["speedup"]
