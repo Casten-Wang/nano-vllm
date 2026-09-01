@@ -262,3 +262,43 @@ def validate_execution_stats(
         "dropped_execution_signature_steps": dropped_signature_steps,
         "reason": reason,
     }
+
+
+def validate_generation_completion(
+    output_lengths: list[int],
+    *,
+    expected_num_seqs: int,
+    expected_output_len: int,
+    waiting_queue_len: int,
+    running_queue_len: int,
+) -> dict:
+    errors = []
+    if len(output_lengths) != expected_num_seqs:
+        errors.append(
+            f"completed {len(output_lengths)} requests, expected {expected_num_seqs}"
+        )
+    invalid_lengths = [
+        length for length in output_lengths if length != expected_output_len
+    ]
+    if invalid_lengths:
+        errors.append(
+            f"{len(invalid_lengths)} outputs did not contain "
+            f"{expected_output_len} tokens"
+        )
+    if waiting_queue_len or running_queue_len:
+        errors.append(
+            "scheduler queues are not empty: "
+            f"waiting={waiting_queue_len}, running={running_queue_len}"
+        )
+    return {
+        "valid": not errors,
+        "errors": errors,
+        "expected_num_seqs": expected_num_seqs,
+        "actual_num_seqs": len(output_lengths),
+        "expected_output_len": expected_output_len,
+        "actual_output_tokens": sum(output_lengths),
+        "output_length_min": min(output_lengths) if output_lengths else 0,
+        "output_length_max": max(output_lengths) if output_lengths else 0,
+        "waiting_queue_len": waiting_queue_len,
+        "running_queue_len": running_queue_len,
+    }

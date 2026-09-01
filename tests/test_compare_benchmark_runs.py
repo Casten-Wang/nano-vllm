@@ -67,6 +67,7 @@ def result(
         "peak_torch_allocated_mib": memory,
         "generated_token_ids": {"digest": digest},
         "execution_validation": {"valid": True},
+        "generation_validation": {"valid": True},
         "metrics": {
             "avg_ttft_s": 2.0,
             "avg_tpot_s": 0.05,
@@ -89,6 +90,7 @@ def test_comparison_reports_relative_metrics_and_output_parity():
     assert candidate_row["peak_memory_vs_baseline"] == 0.75
     assert comparison["all_output_digests_match"]
     assert comparison["all_execution_paths_valid"]
+    assert comparison["all_generation_valid"]
     assert comparison["commits"] == [
         "0123456789abcdef",
         "0123456789abcdef",
@@ -127,6 +129,19 @@ def test_comparison_surfaces_generation_drift():
 
     assert not comparison["all_output_digests_match"]
     assert not comparison["runs"][1]["output_digest_matches_baseline"]
+
+
+def test_comparison_surfaces_incomplete_generation():
+    candidate = result()
+    candidate["generation_validation"] = {"valid": False}
+
+    comparison = MODULE.compare_results(
+        [result(), candidate],
+        ["baseline", "candidate"],
+    )
+
+    assert not comparison["all_generation_valid"]
+    assert not comparison["runs"][1]["generation_valid"]
 
 
 def test_comparison_rejects_different_checkpoint_manifest():

@@ -20,6 +20,7 @@ from nanovllm.benchmark_metadata import (
     kv_cache_storage_metadata,
     model_config_metadata,
     validate_execution_stats,
+    validate_generation_completion,
 )
 
 
@@ -108,6 +109,7 @@ def main() -> None:
     decode_steps_before_injection = 0
     token_times: dict[int, list[float]] = {}
     finished_request_ids: set[int] = set()
+    finished_output_lengths: dict[int, int] = {}
     groups: dict[int, str] = {seq_id: "initial" for seq_id in initial_ids}
     torch.cuda.synchronize()
     llm.model_runner.call("reset_cuda_peak_memory_stats")
@@ -142,6 +144,7 @@ def main() -> None:
 
         for seq_id, token_ids in output:
             finished_request_ids.add(seq_id)
+            finished_output_lengths[seq_id] = len(token_ids)
             # step() returns complete outputs only when a request finishes. For
             # gap metrics we need per-token timestamps, so collect them from
             # live sequence objects below as well.
@@ -206,14 +209,18 @@ def main() -> None:
     required_paths = [item.strip() for item in args.require_paths.split(",") if item.strip()]
     execution_validation = validate_execution_stats(execution_stats, required_paths)
     expected_requests = args.initial_seqs + args.injected_seqs
+    generation_validation = validate_generation_completion(
+        list(finished_output_lengths.values()),
+        expected_num_seqs=expected_requests,
+        expected_output_len=args.output_len,
+        waiting_queue_len=llm.scheduler.num_waiting,
+        running_queue_len=llm.scheduler.num_running,
+    )
     scenario_errors = []
     if not injected:
         scenario_errors.append("injected requests were never submitted")
-    if len(finished_request_ids) != expected_requests:
-        scenario_errors.append(
-            "finished request count "
-            f"{len(finished_request_ids)} does not match expected {expected_requests}"
-        )
+    if not generation_validation["valid"]:
+        scenario_errors.extend(generation_validation["errors"])
     if scenario_errors:
         execution_validation["valid"] = False
         execution_validation["reason"] = "; ".join(
@@ -274,6 +281,7 @@ def main() -> None:
         "shape_trace": shape_trace,
         "cudagraph_capture_stats": cudagraph_capture_stats,
         "execution_validation": execution_validation,
+        "generation_validation": generation_validation,
     }
 
     prefix = args.name
@@ -288,7 +296,7 @@ def main() -> None:
     json_path.write_text(json.dumps(result, indent=2, ensure_ascii=False) + "\n")
     print(json.dumps(result, indent=2, ensure_ascii=False))
     print(f"Wrote {json_path}")
-    if not execution_validation["valid"]:
+    if not execution_validation["valid"] or not generation_validation["valid"]:
         raise SystemExit(2)
 
 

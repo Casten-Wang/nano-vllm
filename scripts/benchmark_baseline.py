@@ -21,6 +21,7 @@ from nanovllm.benchmark_metadata import (
     model_config_metadata,
     token_ids_digest,
     validate_execution_stats,
+    validate_generation_completion,
 )
 
 
@@ -62,6 +63,7 @@ def write_markdown(path: Path, result: dict) -> None:
         f"- sliding_window_size: `{result['sliding_window_size']}`",
         f"- enable_dynamic_chunked_prefill: `{result['enable_dynamic_chunked_prefill']}`",
         f"- execution_valid: `{result['execution_validation']['valid']}`",
+        f"- generation_valid: `{result['generation_validation']['valid']}`",
         f"- execution_paths: `{','.join(result['execution_validation']['observed_paths'])}`",
         f"- dropped_execution_signature_steps: `{result['execution_validation']['dropped_execution_signature_steps']}`",
         "",
@@ -222,6 +224,13 @@ def main() -> None:
     )
     required_paths = [item.strip() for item in args.require_paths.split(",") if item.strip()]
     execution_validation = validate_execution_stats(execution_stats, required_paths)
+    generation_validation = validate_generation_completion(
+        [len(output["token_ids"]) for output in outputs],
+        expected_num_seqs=args.num_seqs,
+        expected_output_len=args.output_len,
+        waiting_queue_len=llm.scheduler.num_waiting,
+        running_queue_len=llm.scheduler.num_running,
+    )
 
     result = {
         **collect_benchmark_metadata(),
@@ -276,6 +285,7 @@ def main() -> None:
         "shape_trace": shape_trace,
         "cudagraph_capture_stats": cudagraph_capture_stats,
         "execution_validation": execution_validation,
+        "generation_validation": generation_validation,
     }
 
     name = make_result_name(args.name or default_result_prefix(args))
@@ -287,7 +297,7 @@ def main() -> None:
     print(json.dumps(result, indent=2, ensure_ascii=False))
     print(f"Wrote {json_path}")
     print(f"Wrote {md_path}")
-    if not execution_validation["valid"]:
+    if not execution_validation["valid"] or not generation_validation["valid"]:
         raise SystemExit(2)
 
 

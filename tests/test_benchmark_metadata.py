@@ -208,6 +208,32 @@ class BenchmarkMetadataTest(unittest.TestCase):
         self.assertEqual(result["dropped_execution_signature_steps"], 2)
         self.assertIn("capacity was exceeded", result["reason"])
 
+    def test_generation_completion_accepts_exact_finished_workload(self):
+        result = module.validate_generation_completion(
+            [32, 32, 32],
+            expected_num_seqs=3,
+            expected_output_len=32,
+            waiting_queue_len=0,
+            running_queue_len=0,
+        )
+
+        self.assertTrue(result["valid"])
+        self.assertEqual(result["actual_output_tokens"], 96)
+
+    def test_generation_completion_reports_incomplete_workload(self):
+        result = module.validate_generation_completion(
+            [32, 7],
+            expected_num_seqs=3,
+            expected_output_len=32,
+            waiting_queue_len=1,
+            running_queue_len=2,
+        )
+
+        self.assertFalse(result["valid"])
+        self.assertEqual(len(result["errors"]), 3)
+        self.assertEqual(result["output_length_min"], 7)
+        self.assertEqual(result["output_length_max"], 32)
+
 
 if __name__ == "__main__":
     unittest.main()

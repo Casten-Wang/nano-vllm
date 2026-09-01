@@ -80,6 +80,7 @@ def load_result(path: Path) -> dict:
             "peak_torch_allocated_mib",
             "generated_token_ids",
             "execution_validation",
+            "generation_validation",
             "metrics",
         )
         if field not in result
@@ -167,6 +168,7 @@ def compare_results(results: list[dict], labels: list[str]) -> dict:
                     result["generated_token_ids"]["digest"] == baseline_digest
                 ),
                 "execution_valid": result["execution_validation"]["valid"],
+                "generation_valid": result["generation_validation"]["valid"],
             }
         )
     return {
@@ -187,6 +189,7 @@ def compare_results(results: list[dict], labels: list[str]) -> dict:
             row["output_digest_matches_baseline"] for row in rows
         ),
         "all_execution_paths_valid": all(row["execution_valid"] for row in rows),
+        "all_generation_valid": all(row["generation_valid"] for row in rows),
         "runs": rows,
     }
 
@@ -230,6 +233,7 @@ def summarize_repeats(results: list[dict], labels: list[str]) -> dict:
         ],
         "all_output_digests_match": comparison["all_output_digests_match"],
         "all_execution_paths_valid": comparison["all_execution_paths_valid"],
+        "all_generation_valid": comparison["all_generation_valid"],
         "statistics": {
             name: distribution(values) for name, values in metrics.items()
         },
@@ -264,7 +268,10 @@ def main() -> None:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(rendered)
     print(rendered, end="")
-    if not comparison["all_execution_paths_valid"]:
+    if (
+        not comparison["all_execution_paths_valid"]
+        or not comparison["all_generation_valid"]
+    ):
         raise SystemExit(2)
     if args.require_output_parity and not comparison["all_output_digests_match"]:
         raise SystemExit(3)
