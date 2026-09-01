@@ -67,6 +67,23 @@ def test_moe_candidate_adds_one_targeted_case_per_tp_size():
     } == {(4, "model", "auto"), (8, "model", "auto")}
 
 
+def test_moe_candidate_runs_cuda_graph_and_requires_observed_path():
+    arguments = args()
+    candidate = MODULE.BenchmarkCase(
+        4,
+        "model",
+        "auto",
+        moe_decode_backend="batched",
+    )
+
+    command = MODULE.command_for_case(arguments, candidate)
+
+    assert "--enforce-eager" not in command
+    required = command[command.index("--require-paths") + 1].split(",")
+    assert "decode_cuda_graph" in required
+    assert "decode_eager" not in required
+
+
 def test_default_sequence_capacity_tracks_workload(monkeypatch):
     monkeypatch.setattr(
         MODULE.sys,

@@ -114,8 +114,9 @@ def command_for_case(
         args.result_dir,
         "--require-paths",
         ",".join(required_paths(args, case)),
-        "--enforce-eager",
     ]
+    if case.moe_decode_backend == "sorted":
+        command.append("--enforce-eager")
     if not args.warmup:
         command.append("--no-warmup")
     if run_id is not None:
@@ -171,7 +172,14 @@ def required_paths(
     args: argparse.Namespace,
     case: BenchmarkCase,
 ) -> tuple[str, ...]:
-    paths = ["prefill_eager", "decode_eager"]
+    paths = [
+        "prefill_eager",
+        (
+            "decode_cuda_graph"
+            if case.moe_decode_backend == "batched"
+            else "decode_eager"
+        ),
+    ]
     if case.kv_cache_dtype == "auto":
         paths.extend(("float_flash_prefill", "float_flash_decode"))
     else:
