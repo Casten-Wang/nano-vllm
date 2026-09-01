@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import argparse
 from glob import glob
+from importlib.util import find_spec
 import json
 from pathlib import Path
 import sys
+import types
 from unittest.mock import patch
 
 import torch
@@ -66,9 +68,26 @@ def validate_weight_shape(model, checkpoint, source_name, target_name, packed):
 
 
 def audit_checkpoint_mapping(model: torch.nn.Module, model_path: str | Path) -> dict:
-    files = sorted(glob(str(Path(model_path) / "*.safetensors")))
-    if not files:
-        raise ValueError(f"no safetensors checkpoint files found in {model_path}")
+    files = sorted(
+        filename
+        for filename in glob(str(Path(model_path) / "*.safetensors"))
+        if Path(filename).is_file()
+    )
+    index_path = Path(model_path) / "model.safetensors.index.json"
+    index_names = None
+    if index_path.is_file():
+        index = json.loads(index_path.read_text())
+        index_names = list(index["weight_map"])
+        expected_files = {
+            str(filename) for filename in index["weight_map"].values()
+        }
+        present_files = {Path(filename).name for filename in files}
+        if not expected_files <= present_files:
+            files = []
+    if not files and index_names is None:
+        raise ValueError(
+            f"no safetensors checkpoint files or index found in {model_path}"
+        )
 
     expected = {
         name for name, _ in model.named_parameters(remove_duplicate=False)
@@ -81,46 +100,61 @@ def audit_checkpoint_mapping(model: torch.nn.Module, model_path: str | Path) -> 
     shape_errors = []
     source_count = 0
 
-    for filename in files:
-        with safe_open(filename, framework="pt", device="cpu") as checkpoint:
-            for source_name in checkpoint.keys():
-                source_count += 1
-                mapped_name = map_weight_name(source_name)
-                if mapped_name is None:
-                    skipped.append(source_name)
-                    continue
-                packed = resolve_packed_parameter(
-                    mapped_name,
-                    packed_modules_mapping,
+    def record_source(source_name, checkpoint=None):
+        nonlocal source_count
+        source_count += 1
+        mapped_name = map_weight_name(source_name)
+        if mapped_name is None:
+            skipped.append(source_name)
+            return
+        packed = resolve_packed_parameter(
+            mapped_name,
+            packed_modules_mapping,
+        )
+        target_name = packed[0] if packed is not None else mapped_name
+        if target_name not in expected:
+            unexpected.append(
+                {"source": source_name, "mapped": target_name}
+            )
+            return
+        if checkpoint is not None:
+            try:
+                validate_weight_shape(
+                    model,
+                    checkpoint,
+                    source_name,
+                    target_name,
+                    packed,
                 )
-                target_name = packed[0] if packed is not None else mapped_name
-                if target_name not in expected:
-                    unexpected.append(
-                        {"source": source_name, "mapped": target_name}
-                    )
-                    continue
-                try:
-                    validate_weight_shape(
-                        model,
-                        checkpoint,
-                        source_name,
-                        target_name,
-                        packed,
-                    )
-                except (AssertionError, IndexError, RuntimeError, ValueError) as error:
-                    shape_errors.append(
-                        {
-                            "source": source_name,
-                            "mapped": target_name,
-                            "error": str(error),
-                        }
-                    )
-                    continue
-                loaded.add(target_name)
+            except (AssertionError, IndexError, RuntimeError, ValueError) as error:
+                shape_errors.append(
+                    {
+                        "source": source_name,
+                        "mapped": target_name,
+                        "error": str(error),
+                    }
+                )
+                return
+        loaded.add(target_name)
+
+    if files:
+        for filename in files:
+            with safe_open(filename, framework="pt", device="cpu") as checkpoint:
+                for source_name in checkpoint.keys():
+                    record_source(source_name, checkpoint)
+    else:
+        for source_name in index_names or ():
+            record_source(source_name)
 
     missing = sorted(expected - loaded)
     return {
-        "scope": "parameter names from safetensors headers; tensor values are not read",
+        "scope": (
+            "parameter names and shapes from safetensors headers; tensor values are not read"
+            if files
+            else "parameter names from safetensors index; tensor shapes and values are not read"
+        ),
+        "validation_level": "names_and_shapes" if files else "names_only",
+        "shape_validation_complete": bool(files),
         "shard_count": len(files),
         "source_tensor_count": source_count,
         "expected_parameter_count": len(expected),
@@ -181,9 +215,25 @@ def instantiate_meta_model(model_path: str, tp_size: int) -> torch.nn.Module:
     try:
         torch.set_default_device("meta")
         torch.set_default_dtype(model_config.dtype)
+        audit_modules = {}
+        if find_spec("flash_attn") is None:
+            class AuditOnlyAttention(torch.nn.Module):
+                """Parameter-free stand-in for shape-only model audits."""
+
+                def __init__(self, *args, **kwargs) -> None:
+                    super().__init__()
+
+                def forward(self, *args, **kwargs):
+                    raise RuntimeError("audit-only attention cannot execute")
+
+            attention_module = types.ModuleType("nanovllm.layers.attention")
+            attention_module.Attention = AuditOnlyAttention
+            audit_modules["nanovllm.layers.attention"] = attention_module
         with (
             patch("torch.distributed.get_world_size", return_value=tp_size),
             patch("torch.distributed.get_rank", return_value=0),
+            patch.object(torch, "compile", lambda function: function),
+            patch.dict(sys.modules, audit_modules),
         ):
             return create_model(model_spec.architecture, model_config)
     finally:
@@ -203,6 +253,14 @@ def main() -> None:
     parser.add_argument("--model", required=True)
     parser.add_argument("--tp-sizes", type=parse_tp_sizes, default=(4, 8))
     parser.add_argument(
+        "--require-shards",
+        action="store_true",
+        help=(
+            "Require every indexed shard and complete shape validation. "
+            "Without this flag, an index-only name audit is allowed."
+        ),
+    )
+    parser.add_argument(
         "--output",
         type=Path,
         default=Path("benchmark_results/checkpoint_mapping_audit.json"),
@@ -218,7 +276,10 @@ def main() -> None:
     if not isinstance(model_dtype, torch.dtype):
         model_dtype = torch.bfloat16
     model_dtype_bytes = torch.empty((), dtype=model_dtype).element_size()
-    checkpoint_manifest = checkpoint_manifest_metadata(args.model)
+    checkpoint_manifest = checkpoint_manifest_metadata(
+        args.model,
+        require_shards=args.require_shards,
+    )
     results = {}
     for tp_size in args.tp_sizes:
         model = instantiate_meta_model(args.model, tp_size)
@@ -227,7 +288,10 @@ def main() -> None:
         result.update(cache_storage_metadata(model_spec, tp_size, model_dtype_bytes))
         results[f"tp{tp_size}"] = result
         del model
-    final_checkpoint_manifest = checkpoint_manifest_metadata(args.model)
+    final_checkpoint_manifest = checkpoint_manifest_metadata(
+        args.model,
+        require_shards=args.require_shards,
+    )
     if final_checkpoint_manifest["digest"] != checkpoint_manifest["digest"]:
         raise RuntimeError("checkpoint files changed during the mapping audit")
 
@@ -236,6 +300,9 @@ def main() -> None:
         "checkpoint_manifest": checkpoint_manifest,
         "tensor_parallel_sizes": list(args.tp_sizes),
         "results": results,
+        "complete": all(
+            result["shape_validation_complete"] for result in results.values()
+        ),
         "valid": all(result["valid"] for result in results.values()),
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)

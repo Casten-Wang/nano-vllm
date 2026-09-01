@@ -1,6 +1,8 @@
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 from types import SimpleNamespace
+import types
+from unittest.mock import patch
 
 import torch
 
@@ -59,3 +61,29 @@ def test_cache_storage_metadata_uses_tp_and_model_dtype():
             "convolution": 128,
         },
     }
+
+
+def test_meta_model_falls_back_when_only_flash_attention_is_missing(monkeypatch):
+    config = SimpleNamespace(
+        dtype=torch.bfloat16,
+        torch_dtype=torch.bfloat16,
+    )
+    spec = SimpleNamespace(architecture="Demo", text_config=config)
+    calls = []
+
+    monkeypatch.setattr(MODULE.AutoConfig, "from_pretrained", lambda _: config)
+    monkeypatch.setattr(MODULE, "resolve_model_spec", lambda _: spec)
+    monkeypatch.setattr(MODULE, "find_spec", lambda _: None)
+
+    def fake_create_model(_architecture, _config):
+        calls.append(MODULE.sys.modules.get("nanovllm.layers.attention"))
+        module = calls[0]
+        assert isinstance(module, types.ModuleType)
+        return module.Attention(1, 1, 1.0, 1)
+
+    monkeypatch.setattr(MODULE, "create_model", fake_create_model)
+
+    model = MODULE.instantiate_meta_model("/model", 4)
+
+    assert isinstance(model, torch.nn.Module)
+    assert len(calls) == 1

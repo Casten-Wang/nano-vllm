@@ -64,6 +64,24 @@ class BenchmarkMetadataTest(unittest.TestCase):
         self.assertNotEqual(first["config_sha256"], second["config_sha256"])
         self.assertNotEqual(first["digest"], second["digest"])
 
+    def test_checkpoint_manifest_can_describe_index_without_local_shards(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "config.json").write_text('{"model_type":"test"}')
+            (root / "model.safetensors.index.json").write_text(
+                json.dumps({"weight_map": {"weight": "model-00001.safetensors"}})
+            )
+
+            result = module.checkpoint_manifest_metadata(
+                root,
+                require_shards=False,
+            )
+
+        self.assertEqual(result["strength"], "index-only")
+        self.assertEqual(result["present_shard_count"], 0)
+        self.assertEqual(result["missing_shards"], ["model-00001.safetensors"])
+        self.assertEqual(result["total_size_bytes"], 0)
+
     def test_token_digest_is_deterministic_and_length_aware(self):
         outputs = [
             {"token_ids": [1, 2, 3]},

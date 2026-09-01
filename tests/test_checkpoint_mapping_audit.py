@@ -103,6 +103,27 @@ def test_audit_rejects_directory_without_safetensors(tmp_path):
         MODULE.audit_checkpoint_mapping(TinyMappedModel(), tmp_path)
 
 
+def test_audit_uses_index_names_when_shards_are_not_local(tmp_path):
+    (tmp_path / "model.safetensors.index.json").write_text(
+        __import__("json").dumps(
+            {
+                "weight_map": {
+                    "external.text.weight": "model-00001.safetensors",
+                    "visual.weight": "model-00002.safetensors",
+                }
+            }
+        )
+    )
+
+    result = MODULE.audit_checkpoint_mapping(TinyMappedModel(), tmp_path)
+
+    assert result["valid"]
+    assert result["validation_level"] == "names_only"
+    assert not result["shape_validation_complete"]
+    assert result["source_tensor_count"] == 2
+    assert result["mapped_parameter_count"] == 1
+
+
 @pytest.mark.parametrize("value", ["", "0", "4,-1", "four"])
 def test_invalid_tp_sizes_are_rejected(value):
     with pytest.raises((ValueError, MODULE.argparse.ArgumentTypeError)):

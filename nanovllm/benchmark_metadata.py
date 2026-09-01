@@ -19,7 +19,11 @@ def _sha256_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
 
-def checkpoint_manifest_metadata(model_path: str | Path) -> dict:
+def checkpoint_manifest_metadata(
+    model_path: str | Path,
+    *,
+    require_shards: bool = True,
+) -> dict:
     """Fingerprint checkpoint identity without reading tensor payloads."""
 
     root = Path(model_path).expanduser().resolve()
@@ -41,10 +45,24 @@ def checkpoint_manifest_metadata(model_path: str | Path) -> dict:
 
     files = []
     all_content_addressed = True
+    missing_shards = []
     for filename in filenames:
         path = root / filename
         if not path.is_file():
-            raise ValueError(f"checkpoint shard is missing: {path}")
+            if require_shards:
+                raise ValueError(f"checkpoint shard is missing: {path}")
+            missing_shards.append(filename)
+            files.append(
+                {
+                    "name": filename,
+                    "size_bytes": None,
+                    "mtime_ns": None,
+                    "content_id": None,
+                    "present": False,
+                }
+            )
+            all_content_addressed = False
+            continue
         stat = path.stat()
         resolved_name = path.resolve().name
         content_id = (
@@ -60,6 +78,7 @@ def checkpoint_manifest_metadata(model_path: str | Path) -> dict:
                 "size_bytes": stat.st_size,
                 "mtime_ns": stat.st_mtime_ns,
                 "content_id": content_id,
+                "present": True,
             }
         )
     identity_files = (
@@ -71,7 +90,7 @@ def checkpoint_manifest_metadata(model_path: str | Path) -> dict:
             }
             for item in files
         ]
-        if all_content_addressed
+        if all_content_addressed and not missing_shards
         else files
     )
     identity = {
@@ -83,11 +102,19 @@ def checkpoint_manifest_metadata(model_path: str | Path) -> dict:
     return {
         "algorithm": "sha256",
         "digest": _sha256_bytes(encoded),
-        "strength": "content-addressed" if all_content_addressed else "metadata-only",
+        "strength": (
+            "index-only"
+            if missing_shards
+            else "content-addressed" if all_content_addressed else "metadata-only"
+        ),
         "config_sha256": config_sha256,
         "index_sha256": index_sha256,
         "shard_count": len(files),
-        "total_size_bytes": sum(item["size_bytes"] for item in files),
+        "present_shard_count": len(files) - len(missing_shards),
+        "missing_shards": missing_shards,
+        "total_size_bytes": sum(
+            item["size_bytes"] or 0 for item in files
+        ),
         "files": files,
     }
 
