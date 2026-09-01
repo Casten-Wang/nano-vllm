@@ -44,22 +44,30 @@ def inputs(seed=0):
 @pytest.mark.parametrize("batch_size", [1, 3])
 @pytest.mark.parametrize("sequence_length", [1, 2, 7, 16])
 @pytest.mark.parametrize("kernel_size", [1, 2, 4])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 def test_vectorized_causal_convolution_matches_scan(
     batch_size,
     sequence_length,
     kernel_size,
+    dtype,
 ):
     torch.manual_seed(37)
     channels = 9
-    x = torch.randn(batch_size, sequence_length, channels)
-    state = torch.randn(batch_size, channels, kernel_size)
-    weight = torch.randn(channels, kernel_size)
-    bias = torch.randn(channels)
+    x = torch.randn(batch_size, sequence_length, channels, dtype=dtype)
+    state = torch.randn(batch_size, channels, kernel_size, dtype=dtype)
+    weight = torch.randn(channels, kernel_size, dtype=dtype)
+    bias = torch.randn(channels, dtype=dtype)
 
     expected, expected_state = causal_conv1d_scan(x, state, weight, bias)
     actual, actual_state = causal_conv1d_prefill(x, state, weight, bias)
 
-    torch.testing.assert_close(actual, expected, rtol=2e-5, atol=2e-5)
+    tolerance = 2e-2 if dtype == torch.bfloat16 else 2e-5
+    torch.testing.assert_close(
+        actual,
+        expected,
+        rtol=tolerance,
+        atol=tolerance,
+    )
     torch.testing.assert_close(actual_state, expected_state)
 
 
