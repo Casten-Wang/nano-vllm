@@ -261,3 +261,35 @@ def test_worker_comparison_reports_decode_only_quality_scope():
     assert result["aggregate"]["logits_max_abs"] == 100.0
     assert result["decode_aggregate"]["logits_max_abs"] == 0.0
     assert result["decode_ppl"]["token_count"] == 1
+
+
+def test_quality_summary_weights_metrics_across_different_batch_sizes():
+    def row(stage, count, error, nll):
+        return {
+            "step": 0,
+            "stage": stage,
+            "row_count": count,
+            "logits_max_abs": error,
+            "logits_mean_abs": error,
+            "logits_rmse": error,
+            "target_nll_bf16": nll,
+            "target_nll_int8": nll + 0.1,
+        }
+
+    comparisons = [
+        {"rows": [row("prefill", 1, 99.0, 9.0), row("decode", 1, 1.0, 1.0)]},
+        {"rows": [row("prefill", 3, 99.0, 9.0), row("decode", 3, 3.0, 3.0)]},
+    ]
+
+    summary = TEACHER_FORCING.summarize_batch_comparisons(comparisons)
+
+    assert summary["batch_count"] == 2
+    assert summary["kv_sensitive_steps_compared"] == 2
+    assert summary["kv_sensitive_token_rows_compared"] == 4
+    assert summary["decode_aggregate"]["logits_max_abs"] == 3.0
+    assert summary["decode_aggregate"]["logits_mean_abs"] == 2.5
+    assert summary["decode_aggregate"]["logits_rmse"] == pytest.approx(
+        ((1.0**2 + 3 * 3.0**2) / 4) ** 0.5
+    )
+    assert summary["decode_ppl"]["token_count"] == 4
+    assert summary["decode_ppl"]["bf16"] == pytest.approx(__import__("math").exp(2.5))

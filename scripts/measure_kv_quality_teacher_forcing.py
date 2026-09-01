@@ -540,6 +540,14 @@ def aggregate_metric_rows(rows: list[dict[str, Any]]) -> dict[str, float]:
         values = [float(row[name]) for row in rows]
         if name.endswith("_max_abs"):
             result[name] = max(values)
+        elif name.endswith("_rmse"):
+            result[name] = math.sqrt(
+                sum(
+                    value * value * int(row["row_count"])
+                    for value, row in zip(values, rows)
+                )
+                / total_rows
+            )
         else:
             result[name] = sum(
                 value * int(row["row_count"])
@@ -567,6 +575,30 @@ def perplexity_summary(rows: list[dict[str, Any]]) -> dict[str, float | int]:
         "bf16": bf16,
         "int8": int8,
         "relative_change": int8 / bf16 - 1.0,
+    }
+
+
+def summarize_batch_comparisons(
+    comparisons: list[dict[str, Any]],
+) -> dict[str, Any]:
+    if not comparisons:
+        raise ValueError("cannot summarize an empty quality run")
+    rows = [row for comparison in comparisons for row in comparison["rows"]]
+    decode_rows = [row for row in rows if row["stage"] == "decode"]
+    if not decode_rows:
+        raise ValueError("quality run contains no KV-sensitive decode rows")
+    return {
+        "batch_count": len(comparisons),
+        "steps_compared": len(rows),
+        "kv_sensitive_steps_compared": len(decode_rows),
+        "token_rows_compared": sum(int(row["row_count"]) for row in rows),
+        "kv_sensitive_token_rows_compared": sum(
+            int(row["row_count"]) for row in decode_rows
+        ),
+        "aggregate": aggregate_metric_rows(rows),
+        "decode_aggregate": aggregate_metric_rows(decode_rows),
+        "ppl": perplexity_summary(rows),
+        "decode_ppl": perplexity_summary(decode_rows),
     }
 
 
@@ -834,6 +866,7 @@ def main() -> None:
         comparison["batch_name"] = batch_name
         comparison["cases_file"] = str(cases_file)
         result["batches"].append(comparison)
+    result["summary"] = summarize_batch_comparisons(result["batches"])
     result_path = result_dir / f"{args.name}.json"
     result_path.write_text(json.dumps(result, indent=2, ensure_ascii=False) + "\n")
     print(json.dumps(result, indent=2, ensure_ascii=False))
