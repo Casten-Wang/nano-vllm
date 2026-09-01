@@ -521,11 +521,12 @@ class Qwen35GatedDeltaNet(nn.Module):
     ) -> torch.Tensor:
         assert self.state_pool is not None
         recurrent_state, conv_state = self.state_pool.get(0, slots)
-        convolved, conv_state = causal_conv1d_scan(
-            mixed_qkv.unsqueeze(1),
+        convolved, conv_state = causal_conv1d_step(
+            mixed_qkv,
             conv_state,
             self.conv1d.weight.squeeze(1),
         )
+        convolved = convolved.unsqueeze(1)
         query, key, value = convolved.split(
             (self.local_key_dim, self.local_key_dim, self.local_value_dim),
             dim=-1,
