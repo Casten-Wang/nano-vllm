@@ -132,6 +132,13 @@ def audit_checkpoint_mapping(model: torch.nn.Module, model_path: str | Path) -> 
     }
 
 
+def parameter_storage_bytes(model: torch.nn.Module) -> int:
+    return sum(
+        parameter.numel() * parameter.element_size()
+        for parameter in model.parameters()
+    )
+
+
 def instantiate_meta_model(model_path: str, tp_size: int) -> torch.nn.Module:
     config = AutoConfig.from_pretrained(model_path)
     model_spec = resolve_model_spec(config)
@@ -178,7 +185,9 @@ def main() -> None:
     results = {}
     for tp_size in args.tp_sizes:
         model = instantiate_meta_model(args.model, tp_size)
-        results[f"tp{tp_size}"] = audit_checkpoint_mapping(model, args.model)
+        result = audit_checkpoint_mapping(model, args.model)
+        result["local_parameter_bytes"] = parameter_storage_bytes(model)
+        results[f"tp{tp_size}"] = result
         del model
     final_checkpoint_manifest = checkpoint_manifest_metadata(args.model)
     if final_checkpoint_manifest["digest"] != checkpoint_manifest["digest"]:

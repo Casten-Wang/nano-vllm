@@ -1,5 +1,6 @@
 import argparse
 import itertools
+import json
 import os
 import subprocess
 import sys
@@ -178,6 +179,53 @@ def visible_gpu_count() -> int:
     return torch.cuda.device_count()
 
 
+def gpu_free_memory_bytes() -> list[int]:
+    import torch
+
+    return [
+        int(torch.cuda.mem_get_info(device)[0])
+        for device in range(torch.cuda.device_count())
+    ]
+
+
+def validate_memory_capacity(
+    audit_report: dict,
+    tp_sizes: tuple[int, ...],
+    free_bytes_by_device: list[int],
+    headroom_bytes: int,
+) -> dict:
+    if headroom_bytes < 0:
+        raise ValueError("memory headroom must be non-negative")
+    results = {}
+    for tp_size in tp_sizes:
+        if len(free_bytes_by_device) < tp_size:
+            raise ValueError(f"TP={tp_size} requires {tp_size} visible GPUs")
+        audit = audit_report.get("results", {}).get(f"tp{tp_size}", {})
+        parameter_bytes = audit.get("local_parameter_bytes")
+        if not isinstance(parameter_bytes, int) or parameter_bytes <= 0:
+            raise ValueError(f"checkpoint audit has no TP={tp_size} parameter size")
+        required_bytes = parameter_bytes + headroom_bytes
+        free_bytes = free_bytes_by_device[:tp_size]
+        insufficient = [
+            rank for rank, available in enumerate(free_bytes)
+            if available < required_bytes
+        ]
+        results[f"tp{tp_size}"] = {
+            "local_parameter_bytes": parameter_bytes,
+            "headroom_bytes": headroom_bytes,
+            "required_free_bytes_per_rank": required_bytes,
+            "free_bytes_by_rank": free_bytes,
+            "valid": not insufficient,
+        }
+        if insufficient:
+            ranks = ", ".join(str(rank) for rank in insufficient)
+            raise ValueError(
+                f"TP={tp_size} ranks {ranks} lack free memory for model "
+                "parameters plus configured headroom"
+            )
+    return {"valid": True, "results": results}
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run the reproducible Qwen3.5 TP4/TP8 benchmark matrix."
@@ -211,6 +259,13 @@ def parse_args() -> argparse.Namespace:
         default=True,
         help="Validate checkpoint name mappings before allocating GPU weights.",
     )
+    parser.add_argument(
+        "--memory-preflight",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Reject GPUs that cannot fit local parameters plus headroom.",
+    )
+    parser.add_argument("--memory-headroom-gib", type=float, default=2.0)
     return parser.parse_args()
 
 
@@ -219,6 +274,8 @@ def normalize_args(args: argparse.Namespace) -> argparse.Namespace:
         args.max_num_seqs = args.num_seqs
     if args.repeats <= 0:
         raise ValueError("--repeats must be positive")
+    if args.memory_headroom_gib < 0:
+        raise ValueError("--memory-headroom-gib must be non-negative")
     if args.run_id is not None and (
         not args.run_id
         or any(character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-" for character in args.run_id)
@@ -252,6 +309,18 @@ def main() -> None:
             print(subprocess.list2cmdline(command))
         else:
             subprocess.run(command, cwd=ROOT, check=True)
+            if args.memory_preflight:
+                audit_path = Path(args.result_dir) / "checkpoint_mapping_audit.json"
+                audit_report = json.loads(audit_path.read_text())
+                memory_report = validate_memory_capacity(
+                    audit_report,
+                    args.tp_sizes,
+                    gpu_free_memory_bytes(),
+                    int(args.memory_headroom_gib * 1024**3),
+                )
+                memory_path = Path(args.result_dir) / "memory_preflight.json"
+                memory_path.write_text(json.dumps(memory_report, indent=2) + "\n")
+                print(f"[preflight] wrote {memory_path}", flush=True)
 
     total_runs = len(cases) * args.repeats
     run_index = 0

@@ -31,6 +31,8 @@ def args(**overrides):
         "tp_sizes": (4, 8),
         "checkpoint_audit": True,
         "run_id": "test-run",
+        "memory_preflight": True,
+        "memory_headroom_gib": 2.0,
     }
     values.update(overrides)
     return Namespace(**values)
@@ -79,6 +81,45 @@ def test_non_positive_repeat_count_is_rejected():
 def test_unsafe_run_id_is_rejected():
     with pytest.raises(ValueError, match="run-id"):
         MODULE.normalize_args(args(run_id="../outside"))
+
+
+def test_negative_memory_headroom_is_rejected():
+    with pytest.raises(ValueError, match="memory-headroom"):
+        MODULE.normalize_args(args(memory_headroom_gib=-1))
+
+
+def test_memory_preflight_covers_each_tp_rank():
+    gib = 1024**3
+    report = {
+        "results": {
+            "tp4": {"local_parameter_bytes": 16 * gib},
+            "tp8": {"local_parameter_bytes": 8 * gib},
+        }
+    }
+
+    result = MODULE.validate_memory_capacity(
+        report,
+        (4, 8),
+        [20 * gib] * 8,
+        2 * gib,
+    )
+
+    assert result["valid"]
+    assert result["results"]["tp4"]["required_free_bytes_per_rank"] == 18 * gib
+    assert len(result["results"]["tp8"]["free_bytes_by_rank"]) == 8
+
+
+def test_memory_preflight_rejects_insufficient_rank():
+    gib = 1024**3
+    report = {"results": {"tp4": {"local_parameter_bytes": 16 * gib}}}
+
+    with pytest.raises(ValueError, match="ranks 2"):
+        MODULE.validate_memory_capacity(
+            report,
+            (4,),
+            [20 * gib, 20 * gib, 17 * gib, 20 * gib],
+            2 * gib,
+        )
 
 
 def test_case_command_is_eager_and_fully_identified():
