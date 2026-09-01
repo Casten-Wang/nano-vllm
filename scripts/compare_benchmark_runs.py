@@ -29,6 +29,7 @@ def load_result(path: Path) -> dict:
         for field in (
             *WORKLOAD_FIELDS,
             "model",
+            "checkpoint_manifest",
             "tensor_parallel_size",
             "recurrent_state_dtype",
             "output_throughput_tok_s",
@@ -41,6 +42,11 @@ def load_result(path: Path) -> dict:
     ]
     if missing:
         raise ValueError(f"{path} is missing fields: {', '.join(missing)}")
+    checkpoint_manifest = result["checkpoint_manifest"]
+    if not isinstance(checkpoint_manifest, dict) or not isinstance(
+        checkpoint_manifest.get("digest"), str
+    ):
+        raise ValueError(f"{path} has an invalid checkpoint manifest")
     return result
 
 
@@ -48,6 +54,7 @@ def compare_results(results: list[dict], labels: list[str]) -> dict:
     if len(results) < 2 or len(results) != len(labels):
         raise ValueError("at least two results with matching labels are required")
     baseline = results[0]
+    baseline_checkpoint = baseline["checkpoint_manifest"]["digest"]
     mismatches = []
     for label, result in zip(labels[1:], results[1:]):
         for field in ("model", *WORKLOAD_FIELDS):
@@ -60,6 +67,15 @@ def compare_results(results: list[dict], labels: list[str]) -> dict:
                         "actual": result[field],
                     }
                 )
+        if result["checkpoint_manifest"]["digest"] != baseline_checkpoint:
+            mismatches.append(
+                {
+                    "run": label,
+                    "field": "checkpoint_manifest.digest",
+                    "baseline": baseline_checkpoint,
+                    "actual": result["checkpoint_manifest"]["digest"],
+                }
+            )
     if mismatches:
         fields = ", ".join(
             f"{item['run']}.{item['field']}" for item in mismatches
@@ -100,6 +116,7 @@ def compare_results(results: list[dict], labels: list[str]) -> dict:
         "baseline": labels[0],
         "workload": {
             "model": baseline["model"],
+            "checkpoint_manifest_digest": baseline_checkpoint,
             **{field: baseline[field] for field in WORKLOAD_FIELDS},
         },
         "all_output_digests_match": all(

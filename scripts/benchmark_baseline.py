@@ -15,6 +15,7 @@ import torch
 
 from nanovllm import LLM, SamplingParams
 from nanovllm.benchmark_metadata import (
+    checkpoint_manifest_metadata,
     collect_benchmark_metadata,
     kv_cache_storage_metadata,
     model_config_metadata,
@@ -42,6 +43,8 @@ def write_markdown(path: Path, result: dict) -> None:
         f"- commit: `{result['commit']}`",
         f"- branch: `{result['branch']}`",
         f"- model: `{result['model']}`",
+        f"- checkpoint_digest: `{result['checkpoint_manifest']['digest']}`",
+        f"- checkpoint_identity_strength: `{result['checkpoint_manifest']['strength']}`",
         f"- num_seqs: `{result['num_seqs']}`",
         f"- input_len: `{result['input_len']}`",
         f"- output_len: `{result['output_len']}`",
@@ -208,6 +211,7 @@ def main() -> None:
     result = {
         **collect_benchmark_metadata(),
         "model": args.model,
+        "checkpoint_manifest": checkpoint_manifest_metadata(args.model),
         "num_seqs": args.num_seqs,
         "input_len": args.input_len,
         "output_len": args.output_len,

@@ -15,6 +15,77 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
+def _sha256_bytes(value: bytes) -> str:
+    return hashlib.sha256(value).hexdigest()
+
+
+def checkpoint_manifest_metadata(model_path: str | Path) -> dict:
+    """Fingerprint checkpoint identity without reading tensor payloads."""
+
+    root = Path(model_path).expanduser().resolve()
+    index_path = root / "model.safetensors.index.json"
+    index_sha256 = None
+    if index_path.is_file():
+        index_bytes = index_path.read_bytes()
+        index_sha256 = _sha256_bytes(index_bytes)
+        weight_map = json.loads(index_bytes)["weight_map"]
+        filenames = sorted(set(weight_map.values()))
+    else:
+        filenames = sorted(path.name for path in root.glob("*.safetensors"))
+    if not filenames:
+        raise ValueError(f"no safetensors checkpoint files found in {root}")
+
+    files = []
+    all_content_addressed = True
+    for filename in filenames:
+        path = root / filename
+        if not path.is_file():
+            raise ValueError(f"checkpoint shard is missing: {path}")
+        stat = path.stat()
+        resolved_name = path.resolve().name
+        content_id = (
+            resolved_name.lower()
+            if len(resolved_name) in (40, 64)
+            and all(character in "0123456789abcdefABCDEF" for character in resolved_name)
+            else None
+        )
+        all_content_addressed &= content_id is not None
+        files.append(
+            {
+                "name": filename,
+                "size_bytes": stat.st_size,
+                "mtime_ns": stat.st_mtime_ns,
+                "content_id": content_id,
+            }
+        )
+    identity_files = (
+        [
+            {
+                "name": item["name"],
+                "size_bytes": item["size_bytes"],
+                "content_id": item["content_id"],
+            }
+            for item in files
+        ]
+        if all_content_addressed
+        else files
+    )
+    identity = {
+        "index_sha256": index_sha256,
+        "files": identity_files,
+    }
+    encoded = json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
+    return {
+        "algorithm": "sha256",
+        "digest": _sha256_bytes(encoded),
+        "strength": "content-addressed" if all_content_addressed else "metadata-only",
+        "index_sha256": index_sha256,
+        "shard_count": len(files),
+        "total_size_bytes": sum(item["size_bytes"] for item in files),
+        "files": files,
+    }
+
+
 def token_ids_digest(outputs: list[dict]) -> dict:
     """Return a compact, deterministic fingerprint of generated token IDs."""
 

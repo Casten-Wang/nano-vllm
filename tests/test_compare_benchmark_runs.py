@@ -1,4 +1,5 @@
 from importlib.util import module_from_spec, spec_from_file_location
+import json
 from pathlib import Path
 
 import pytest
@@ -14,9 +15,17 @@ MODULE = module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
 
 
-def result(*, throughput=100.0, memory=1000.0, digest="same", input_len=128):
+def result(
+    *,
+    throughput=100.0,
+    memory=1000.0,
+    digest="same",
+    input_len=128,
+    checkpoint_digest="checkpoint",
+):
     return {
         "model": "Qwen/Qwen3.5-35B-A3B",
+        "checkpoint_manifest": {"digest": checkpoint_digest},
         "num_seqs": 16,
         "input_len": input_len,
         "output_len": 32,
@@ -68,3 +77,21 @@ def test_comparison_surfaces_generation_drift():
 
     assert not comparison["all_output_digests_match"]
     assert not comparison["runs"][1]["output_digest_matches_baseline"]
+
+
+def test_comparison_rejects_different_checkpoint_manifest():
+    with pytest.raises(ValueError, match="checkpoint_manifest.digest"):
+        MODULE.compare_results(
+            [result(), result(checkpoint_digest="different")],
+            ["baseline", "candidate"],
+        )
+
+
+def test_load_result_rejects_invalid_checkpoint_manifest(tmp_path):
+    path = tmp_path / "result.json"
+    value = result()
+    value["checkpoint_manifest"] = {}
+    path.write_text(json.dumps(value))
+
+    with pytest.raises(ValueError, match="invalid checkpoint manifest"):
+        MODULE.load_result(path)

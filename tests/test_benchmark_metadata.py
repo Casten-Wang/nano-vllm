@@ -1,4 +1,7 @@
 import importlib.util
+import json
+import os
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -11,6 +14,41 @@ SPEC.loader.exec_module(module)
 
 
 class BenchmarkMetadataTest(unittest.TestCase):
+    def test_checkpoint_manifest_detects_shard_replacement(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            shard = root / "model-00001-of-00001.safetensors"
+            shard.write_bytes(b"first")
+            (root / "model.safetensors.index.json").write_text(
+                json.dumps({"weight_map": {"weight": shard.name}})
+            )
+            first = module.checkpoint_manifest_metadata(root)
+            shard.write_bytes(b"other")
+            stat = shard.stat()
+            os.utime(shard, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1))
+            second = module.checkpoint_manifest_metadata(root)
+
+        self.assertEqual(first["shard_count"], 1)
+        self.assertEqual(first["strength"], "metadata-only")
+        self.assertNotEqual(first["digest"], second["digest"])
+
+    def test_checkpoint_manifest_uses_content_addressed_symlink(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            blob = root / ("a" * 64)
+            blob.write_bytes(b"weights")
+            shard = root / "model.safetensors"
+            shard.symlink_to(blob)
+
+            result = module.checkpoint_manifest_metadata(root)
+            stat = blob.stat()
+            os.utime(blob, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1))
+            after_mtime_change = module.checkpoint_manifest_metadata(root)
+
+        self.assertEqual(result["strength"], "content-addressed")
+        self.assertEqual(result["files"][0]["content_id"], "a" * 64)
+        self.assertEqual(result["digest"], after_mtime_change["digest"])
+
     def test_token_digest_is_deterministic_and_length_aware(self):
         outputs = [
             {"token_ids": [1, 2, 3]},
