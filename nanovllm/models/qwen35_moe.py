@@ -170,7 +170,7 @@ class Qwen35SparseMoeBlock(nn.Module):
     def __init__(self, config) -> None:
         super().__init__()
         self.hidden_size = int(config.hidden_size)
-        self.router = Qwen35TopKRouter(
+        self.gate = Qwen35TopKRouter(
             self.hidden_size,
             int(config.num_experts),
             int(config.num_experts_per_tok),
@@ -189,7 +189,7 @@ class Qwen35SparseMoeBlock(nn.Module):
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         original_shape = hidden_states.shape
         flat_states = hidden_states.reshape(-1, self.hidden_size)
-        topk_weights, topk_ids = self.router(flat_states)
+        topk_weights, topk_ids = self.gate(flat_states)
         routed = self.experts(flat_states, topk_ids, topk_weights)
         shared = self.shared_expert(flat_states)
         shared = torch.sigmoid(self.shared_expert_gate(flat_states)) * shared
