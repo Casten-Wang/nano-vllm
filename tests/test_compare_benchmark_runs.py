@@ -190,6 +190,47 @@ def test_repeat_summary_reports_distribution_and_stability():
     assert throughput["population_stdev"] == pytest.approx(8.1649658)
     assert throughput["coefficient_of_variation"] == pytest.approx(0.081649658)
     assert summary["all_output_digests_match"]
+    assert summary["generated_token_ids_digest"] == "same"
+
+
+def test_matrix_summary_compares_configuration_medians_and_quality():
+    first = MODULE.summarize_repeats(
+        [result(throughput=90.0), result(throughput=110.0)],
+        ["a1", "a2"],
+    )
+    candidate_results = [
+        result(throughput=120.0, memory=750.0, digest="changed"),
+        result(throughput=130.0, memory=750.0, digest="changed"),
+    ]
+    for item in candidate_results:
+        item["kv_cache_dtype"] = "int8"
+    second = MODULE.summarize_repeats(candidate_results, ["b1", "b2"])
+
+    comparison = MODULE.compare_repeat_summaries(
+        [first, second],
+        ["float", "int8"],
+    )
+
+    assert comparison["runs"][0]["median"]["output_throughput_tok_s"] == 100.0
+    assert comparison["runs"][1]["median"]["peak_torch_allocated_mib"] == 750.0
+    assert comparison["all_repeat_output_digests_match"]
+    assert not comparison["all_output_digests_match"]
+    assert comparison["all_execution_paths_valid"]
+    assert comparison["all_generation_valid"]
+
+
+def test_matrix_summary_rejects_different_workloads():
+    first = MODULE.summarize_repeats([result(), result()], ["a1", "a2"])
+    second = MODULE.summarize_repeats(
+        [result(input_len=256), result(input_len=256)],
+        ["b1", "b2"],
+    )
+
+    with pytest.raises(ValueError, match="candidate.workload"):
+        MODULE.compare_repeat_summaries(
+            [first, second],
+            ["baseline", "candidate"],
+        )
 
 
 def test_repeat_summary_rejects_different_optimization_configuration():

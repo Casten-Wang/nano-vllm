@@ -161,6 +161,16 @@ def test_summary_uses_every_repeat_and_requires_output_parity():
     assert "--require-output-parity" in command
 
 
+def test_matrix_summary_uses_all_configuration_summaries():
+    cases = MODULE.build_cases((4, 8))
+    command = MODULE.matrix_summary_command(args(), cases, "rental-a")
+
+    summary_paths = [item for item in command if item.endswith("_summary.json")]
+    assert len(summary_paths) == len(cases) + 1
+    assert "--compare-repeat-summaries" in command
+    assert command[-1].endswith("rental-a_matrix_summary.json")
+
+
 @pytest.mark.parametrize("value", ["", "0", "4,-1", "four"])
 def test_invalid_tp_sizes_are_rejected(value):
     with pytest.raises((ValueError, MODULE.argparse.ArgumentTypeError)):

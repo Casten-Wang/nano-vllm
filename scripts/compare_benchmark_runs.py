@@ -231,12 +231,81 @@ def summarize_repeats(results: list[dict], labels: list[str]) -> dict:
         "checkpoint_identity_strength": comparison[
             "checkpoint_identity_strength"
         ],
+        "generated_token_ids_digest": baseline["generated_token_ids"]["digest"],
         "all_output_digests_match": comparison["all_output_digests_match"],
         "all_execution_paths_valid": comparison["all_execution_paths_valid"],
         "all_generation_valid": comparison["all_generation_valid"],
         "statistics": {
             name: distribution(values) for name, values in metrics.items()
         },
+    }
+
+
+def compare_repeat_summaries(summaries: list[dict], labels: list[str]) -> dict:
+    if len(summaries) < 2 or len(summaries) != len(labels):
+        raise ValueError("at least two summaries with matching labels are required")
+    baseline = summaries[0]
+    mismatches = []
+    for label, summary in zip(labels[1:], summaries[1:]):
+        for field in ("workload", "environment"):
+            if summary.get(field) != baseline.get(field):
+                mismatches.append(f"{label}.{field}")
+    if mismatches:
+        raise ValueError(
+            "benchmark summaries are not comparable: " + ", ".join(mismatches)
+        )
+
+    metric_names = (
+        "output_throughput_tok_s",
+        "avg_ttft_s",
+        "avg_tpot_s",
+        "avg_request_latency_s",
+        "peak_torch_allocated_mib",
+    )
+    rows = []
+    for label, summary in zip(labels, summaries):
+        statistics_by_name = summary["statistics"]
+        rows.append(
+            {
+                "label": label,
+                **summary["configuration"],
+                "commit": summary["commit"],
+                "generated_token_ids_digest": summary[
+                    "generated_token_ids_digest"
+                ],
+                "repeat_output_digests_match": summary[
+                    "all_output_digests_match"
+                ],
+                "execution_paths_valid": summary[
+                    "all_execution_paths_valid"
+                ],
+                "generation_valid": summary["all_generation_valid"],
+                "median": {
+                    name: statistics_by_name[name]["median"]
+                    for name in metric_names
+                },
+                "coefficient_of_variation": {
+                    name: statistics_by_name[name]["coefficient_of_variation"]
+                    for name in metric_names
+                },
+            }
+        )
+    digests = {row["generated_token_ids_digest"] for row in rows}
+    return {
+        "workload": baseline["workload"],
+        "environment": baseline["environment"],
+        "checkpoint_identity_strength": baseline[
+            "checkpoint_identity_strength"
+        ],
+        "all_output_digests_match": len(digests) == 1,
+        "all_repeat_output_digests_match": all(
+            row["repeat_output_digests_match"] for row in rows
+        ),
+        "all_execution_paths_valid": all(
+            row["execution_paths_valid"] for row in rows
+        ),
+        "all_generation_valid": all(row["generation_valid"] for row in rows),
+        "runs": rows,
     }
 
 
@@ -255,14 +324,25 @@ def main() -> None:
         action="store_true",
         help="Require one identical implementation and summarize repeated runs.",
     )
+    parser.add_argument(
+        "--compare-repeat-summaries",
+        action="store_true",
+        help="Compare per-configuration repeat summaries from one matrix.",
+    )
     args = parser.parse_args()
     labels = [path.stem for path in args.results]
-    results = [load_result(path) for path in args.results]
-    comparison = (
-        summarize_repeats(results, labels)
-        if args.summarize_repeats
-        else compare_results(results, labels)
-    )
+    if args.summarize_repeats and args.compare_repeat_summaries:
+        raise SystemExit("summary modes are mutually exclusive")
+    if args.compare_repeat_summaries:
+        summaries = [json.loads(path.read_text()) for path in args.results]
+        comparison = compare_repeat_summaries(summaries, labels)
+    else:
+        results = [load_result(path) for path in args.results]
+        comparison = (
+            summarize_repeats(results, labels)
+            if args.summarize_repeats
+            else compare_results(results, labels)
+        )
     rendered = json.dumps(comparison, indent=2, ensure_ascii=False) + "\n"
     if args.output is not None:
         args.output.parent.mkdir(parents=True, exist_ok=True)

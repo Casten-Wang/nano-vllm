@@ -118,6 +118,25 @@ def summary_command(
     ]
 
 
+def matrix_summary_command(
+    args: argparse.Namespace,
+    cases: list[BenchmarkCase],
+    run_id: str,
+) -> list[str]:
+    result_dir = Path(args.result_dir)
+    summaries = [
+        result_dir / f"{run_id}_{case.name}_summary.json" for case in cases
+    ]
+    return [
+        sys.executable,
+        str(COMPARE_SCRIPT),
+        *(str(path) for path in summaries),
+        "--compare-repeat-summaries",
+        "--output",
+        str(result_dir / f"{run_id}_matrix_summary.json"),
+    ]
+
+
 def required_paths(
     args: argparse.Namespace,
     case: BenchmarkCase,
@@ -255,6 +274,13 @@ def main() -> None:
                 print(subprocess.list2cmdline(command))
             else:
                 subprocess.run(command, cwd=ROOT, check=True)
+    if args.repeats > 1 and len(cases) > 1:
+        command = matrix_summary_command(args, cases, run_id)
+        print("[summary] complete matrix", flush=True)
+        if args.dry_run:
+            print(subprocess.list2cmdline(command))
+        else:
+            subprocess.run(command, cwd=ROOT, check=True)
 
 
 if __name__ == "__main__":
