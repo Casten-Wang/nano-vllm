@@ -40,13 +40,15 @@ def test_commands_are_fail_fast_and_cover_complete_validation_suite():
         "kernels-tp8",
         "performance-matrix",
         "quality-matrix",
+        "final-summary",
     ]
     assert "--preflight-only" in stages[0][1]
     assert stages[1][1][stages[1][1].index("--tp-size") + 1] == "4"
     assert stages[2][1][stages[2][1].index("--tp-size") + 1] == "8"
+    assert "--no-checkpoint-audit" in stages[-3][1]
+    assert "--no-memory-preflight" in stages[-3][1]
     assert "--no-checkpoint-audit" in stages[-2][1]
-    assert "--no-memory-preflight" in stages[-2][1]
-    assert "--no-checkpoint-audit" in stages[-1][1]
+    assert stages[-1][1][-1].endswith("summary.json")
 
 
 @pytest.mark.parametrize("value", ["", "../run", "run id", "a/b"])

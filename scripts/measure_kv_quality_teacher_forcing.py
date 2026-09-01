@@ -40,7 +40,10 @@ if str(ROOT) not in sys.path:
 import torch
 
 from nanovllm import LLM, SamplingParams
-from nanovllm.benchmark_metadata import collect_benchmark_metadata
+from nanovllm.benchmark_metadata import (
+    checkpoint_manifest_metadata,
+    collect_benchmark_metadata,
+)
 from nanovllm.utils.context import get_context
 
 
@@ -833,6 +836,7 @@ def main() -> None:
     ]
     result: dict[str, Any] = {
         **collect_benchmark_metadata(torch),
+        "checkpoint_manifest": checkpoint_manifest_metadata(args.model),
         "configuration": {
             "tensor_parallel_size": args.tensor_parallel_size,
             "recurrent_state_dtype": args.recurrent_state_dtype,

@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 MATRIX_SCRIPT = ROOT / "scripts" / "benchmark_qwen35_matrix.py"
 KERNEL_SCRIPT = ROOT / "scripts" / "benchmark_qwen35_kernels.py"
 QUALITY_SCRIPT = ROOT / "scripts" / "benchmark_qwen35_quality_matrix.py"
+SUMMARY_SCRIPT = ROOT / "scripts" / "summarize_qwen35_rental.py"
 
 
 def parse_tp_sizes(value: str) -> tuple[int, ...]:
@@ -116,6 +117,19 @@ def commands(args: argparse.Namespace) -> list[tuple[str, list[str]]]:
                     "--no-checkpoint-audit",
                 ],
             ),
+            (
+                "final-summary",
+                [
+                    sys.executable,
+                    str(SUMMARY_SCRIPT),
+                    "--run-dir",
+                    str(root),
+                    "--run-id",
+                    args.run_id,
+                    "--output",
+                    str(root / "summary.json"),
+                ],
+            ),
         )
     )
     return result
@@ -174,6 +188,9 @@ def collect_stage_artifacts(
     elif stage_name == "quality-matrix":
         search_root = root / "quality"
         required = [search_root / f"{args.run_id}_summary.json"]
+    elif stage_name == "final-summary":
+        required = [root / "summary.json"]
+        search_root = root
     else:
         raise ValueError(f"unknown validation stage: {stage_name}")
     missing = [path for path in required if not path.is_file()]
@@ -183,7 +200,8 @@ def collect_stage_artifacts(
         )
     artifacts = (
         required
-        if stage_name == "preflight" or stage_name.startswith("kernels-tp")
+        if stage_name in ("preflight", "final-summary")
+        or stage_name.startswith("kernels-tp")
         else sorted(search_root.rglob("*.json"))
     )
     if not artifacts:
@@ -308,6 +326,8 @@ def parse_args() -> argparse.Namespace:
         args.repeats,
     ) <= 0:
         parser.error("workload sizes and repeats must be positive")
+    if args.repeats < 2:
+        parser.error("rental validation requires at least two repeats")
     return args
 
 
