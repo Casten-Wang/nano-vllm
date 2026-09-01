@@ -17,6 +17,7 @@ class BenchmarkMetadataTest(unittest.TestCase):
     def test_checkpoint_manifest_detects_shard_replacement(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
+            (root / "config.json").write_text('{"model_type":"test"}')
             shard = root / "model-00001-of-00001.safetensors"
             shard.write_bytes(b"first")
             (root / "model.safetensors.index.json").write_text(
@@ -29,6 +30,7 @@ class BenchmarkMetadataTest(unittest.TestCase):
             second = module.checkpoint_manifest_metadata(root)
 
         self.assertEqual(first["shard_count"], 1)
+        self.assertIsNotNone(first["config_sha256"])
         self.assertEqual(first["strength"], "metadata-only")
         self.assertNotEqual(first["digest"], second["digest"])
 
@@ -48,6 +50,19 @@ class BenchmarkMetadataTest(unittest.TestCase):
         self.assertEqual(result["strength"], "content-addressed")
         self.assertEqual(result["files"][0]["content_id"], "a" * 64)
         self.assertEqual(result["digest"], after_mtime_change["digest"])
+
+    def test_checkpoint_manifest_detects_config_change(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "model.safetensors").write_bytes(b"weights")
+            config = root / "config.json"
+            config.write_text('{"hidden_size":4}')
+            first = module.checkpoint_manifest_metadata(root)
+            config.write_text('{"hidden_size":8}')
+            second = module.checkpoint_manifest_metadata(root)
+
+        self.assertNotEqual(first["config_sha256"], second["config_sha256"])
+        self.assertNotEqual(first["digest"], second["digest"])
 
     def test_token_digest_is_deterministic_and_length_aware(self):
         outputs = [

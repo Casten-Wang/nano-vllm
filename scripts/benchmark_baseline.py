@@ -156,6 +156,7 @@ def main() -> None:
         for _ in range(args.num_seqs)
     ]
 
+    checkpoint_manifest = checkpoint_manifest_metadata(args.model)
     llm = LLM(
         args.model,
         enforce_eager=args.enforce_eager,
@@ -195,6 +196,9 @@ def main() -> None:
     end_event.record()
     torch.cuda.synchronize()
     synchronized_end = time.perf_counter()
+    final_checkpoint_manifest = checkpoint_manifest_metadata(args.model)
+    if final_checkpoint_manifest["digest"] != checkpoint_manifest["digest"]:
+        raise RuntimeError("checkpoint files changed during the benchmark run")
     gpu_elapsed_s = start_event.elapsed_time(end_event) / 1000.0
     submit_time_s = workload_end - start
     total_time = synchronized_end - start
@@ -211,7 +215,7 @@ def main() -> None:
     result = {
         **collect_benchmark_metadata(),
         "model": args.model,
-        "checkpoint_manifest": checkpoint_manifest_metadata(args.model),
+        "checkpoint_manifest": checkpoint_manifest,
         "num_seqs": args.num_seqs,
         "input_len": args.input_len,
         "output_len": args.output_len,

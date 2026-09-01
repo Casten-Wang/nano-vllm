@@ -23,6 +23,10 @@ def checkpoint_manifest_metadata(model_path: str | Path) -> dict:
     """Fingerprint checkpoint identity without reading tensor payloads."""
 
     root = Path(model_path).expanduser().resolve()
+    config_path = root / "config.json"
+    config_sha256 = (
+        _sha256_bytes(config_path.read_bytes()) if config_path.is_file() else None
+    )
     index_path = root / "model.safetensors.index.json"
     index_sha256 = None
     if index_path.is_file():
@@ -71,6 +75,7 @@ def checkpoint_manifest_metadata(model_path: str | Path) -> dict:
         else files
     )
     identity = {
+        "config_sha256": config_sha256,
         "index_sha256": index_sha256,
         "files": identity_files,
     }
@@ -79,6 +84,7 @@ def checkpoint_manifest_metadata(model_path: str | Path) -> dict:
         "algorithm": "sha256",
         "digest": _sha256_bytes(encoded),
         "strength": "content-addressed" if all_content_addressed else "metadata-only",
+        "config_sha256": config_sha256,
         "index_sha256": index_sha256,
         "shard_count": len(files),
         "total_size_bytes": sum(item["size_bytes"] for item in files),
