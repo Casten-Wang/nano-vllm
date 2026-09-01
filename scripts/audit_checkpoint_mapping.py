@@ -6,6 +6,7 @@ import argparse
 from glob import glob
 from importlib.util import find_spec
 import json
+from math import prod
 from pathlib import Path
 import sys
 import types
@@ -32,39 +33,83 @@ class MetaTensorSlice:
 
     def __init__(self, shape: tuple[int, ...], dtype: torch.dtype) -> None:
         self.tensor = torch.empty(shape, device="meta", dtype=dtype)
+        self.requested_numel = 0
 
     def get_shape(self) -> tuple[int, ...]:
         return tuple(self.tensor.shape)
 
     def __getitem__(self, key):
-        return self.tensor[key]
+        result = self.tensor[key]
+        self.requested_numel += result.numel()
+        return result
+
+
+SAFETENSORS_DTYPE_BYTES = {
+    "BOOL": 1,
+    "U8": 1,
+    "I8": 1,
+    "F8_E4M3": 1,
+    "F8_E5M2": 1,
+    "I16": 2,
+    "U16": 2,
+    "F16": 2,
+    "BF16": 2,
+    "I32": 4,
+    "U32": 4,
+    "F32": 4,
+    "I64": 8,
+    "U64": 8,
+    "F64": 8,
+}
+
+
+def tensor_storage_bytes(tensor_slice) -> int:
+    dtype = tensor_slice.get_dtype()
+    try:
+        element_size = SAFETENSORS_DTYPE_BYTES[dtype]
+    except KeyError as error:
+        raise ValueError(f"unsupported safetensors dtype: {dtype}") from error
+    return prod(tensor_slice.get_shape()) * element_size
 
 
 def validate_weight_shape(model, checkpoint, source_name, target_name, packed):
     parameter = model.get_parameter(target_name)
-    source_shape = tuple(checkpoint.get_slice(source_name).get_shape())
+    checkpoint_slice = checkpoint.get_slice(source_name)
+    source_shape = tuple(checkpoint_slice.get_shape())
+    source_bytes = tensor_storage_bytes(checkpoint_slice)
+    meta_slice = MetaTensorSlice(source_shape, parameter.dtype)
     if packed is not None:
         _, shard_id = packed
+        packed_safetensors_loader = getattr(
+            parameter,
+            "packed_safetensors_loader",
+            None,
+        )
+        if packed_safetensors_loader is not None:
+            packed_safetensors_loader(parameter, meta_slice, shard_id)
+            return source_bytes, meta_slice.requested_numel * (
+                source_bytes // prod(source_shape)
+            ), True
         source = torch.empty(source_shape, device="meta", dtype=parameter.dtype)
         getattr(parameter, "weight_loader")(parameter, source, shard_id)
-        return
+        return source_bytes, source_bytes, False
     safetensors_loader = getattr(parameter, "safetensors_loader", None)
     if safetensors_loader is not None:
-        safetensors_loader(
-            parameter,
-            MetaTensorSlice(source_shape, parameter.dtype),
-        )
-        return
+        safetensors_loader(parameter, meta_slice)
+        return source_bytes, meta_slice.requested_numel * (
+            source_bytes // prod(source_shape)
+        ), True
     weight_loader = getattr(parameter, "weight_loader", None)
     if weight_loader is not None:
         source = torch.empty(source_shape, device="meta", dtype=parameter.dtype)
         weight_loader(parameter, source)
-        return
+        return source_bytes, source_bytes, False
     if tuple(parameter.shape) != source_shape:
         raise ValueError(
             f"checkpoint shape {source_shape} does not match parameter "
             f"shape {tuple(parameter.shape)}"
         )
+    return source_bytes, source_bytes, False
 
 
 def audit_checkpoint_mapping(model: torch.nn.Module, model_path: str | Path) -> dict:
@@ -99,9 +144,15 @@ def audit_checkpoint_mapping(model: torch.nn.Module, model_path: str | Path) -> 
     unexpected = []
     shape_errors = []
     source_count = 0
+    mapped_checkpoint_bytes = 0
+    estimated_local_payload_bytes = 0
+    lazy_tensor_count = 0
+    full_tensor_count = 0
 
     def record_source(source_name, checkpoint=None):
-        nonlocal source_count
+        nonlocal source_count, mapped_checkpoint_bytes
+        nonlocal estimated_local_payload_bytes
+        nonlocal lazy_tensor_count, full_tensor_count
         source_count += 1
         mapped_name = map_weight_name(source_name)
         if mapped_name is None:
@@ -119,7 +170,7 @@ def audit_checkpoint_mapping(model: torch.nn.Module, model_path: str | Path) -> 
             return
         if checkpoint is not None:
             try:
-                validate_weight_shape(
+                source_bytes, local_bytes, lazy = validate_weight_shape(
                     model,
                     checkpoint,
                     source_name,
@@ -135,6 +186,12 @@ def audit_checkpoint_mapping(model: torch.nn.Module, model_path: str | Path) -> 
                     }
                 )
                 return
+            mapped_checkpoint_bytes += source_bytes
+            estimated_local_payload_bytes += local_bytes
+            if lazy:
+                lazy_tensor_count += 1
+            else:
+                full_tensor_count += 1
         loaded.add(target_name)
 
     if files:
@@ -163,6 +220,24 @@ def audit_checkpoint_mapping(model: torch.nn.Module, model_path: str | Path) -> 
         "missing_parameters": missing,
         "unexpected_weights": unexpected,
         "shape_errors": shape_errors,
+        "checkpoint_loading": (
+            {
+                "mapped_checkpoint_bytes": mapped_checkpoint_bytes,
+                "estimated_local_payload_bytes": estimated_local_payload_bytes,
+                "estimated_avoided_payload_bytes": (
+                    mapped_checkpoint_bytes - estimated_local_payload_bytes
+                ),
+                "estimated_local_payload_fraction": (
+                    estimated_local_payload_bytes / mapped_checkpoint_bytes
+                    if mapped_checkpoint_bytes
+                    else 0.0
+                ),
+                "lazy_tensor_count": lazy_tensor_count,
+                "full_tensor_count": full_tensor_count,
+            }
+            if files
+            else None
+        ),
         "valid": not missing and not unexpected and not shape_errors,
     }
 

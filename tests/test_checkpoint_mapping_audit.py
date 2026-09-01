@@ -60,6 +60,14 @@ def test_audit_maps_text_and_skips_non_text_weights(tmp_path):
     assert result["source_tensor_count"] == 2
     assert result["mapped_parameter_count"] == 1
     assert result["skipped_tensor_count"] == 1
+    assert result["checkpoint_loading"] == {
+        "mapped_checkpoint_bytes": 16,
+        "estimated_local_payload_bytes": 16,
+        "estimated_avoided_payload_bytes": 0,
+        "estimated_local_payload_fraction": 1.0,
+        "lazy_tensor_count": 0,
+        "full_tensor_count": 1,
+    }
 
 
 def test_audit_reports_missing_and_unexpected_weights(tmp_path):
@@ -96,6 +104,14 @@ def test_audit_exercises_shape_only_safetensors_loader(tmp_path):
     assert result["valid"]
     assert result["mapped_parameter_count"] == 1
     assert result["shape_errors"] == []
+    assert result["checkpoint_loading"] == {
+        "mapped_checkpoint_bytes": 16,
+        "estimated_local_payload_bytes": 8,
+        "estimated_avoided_payload_bytes": 8,
+        "estimated_local_payload_fraction": 0.5,
+        "lazy_tensor_count": 1,
+        "full_tensor_count": 0,
+    }
 
 
 def test_audit_rejects_directory_without_safetensors(tmp_path):
@@ -122,6 +138,7 @@ def test_audit_uses_index_names_when_shards_are_not_local(tmp_path):
     assert not result["shape_validation_complete"]
     assert result["source_tensor_count"] == 2
     assert result["mapped_parameter_count"] == 1
+    assert result["checkpoint_loading"] is None
 
 
 @pytest.mark.parametrize("value", ["", "0", "4,-1", "four"])
