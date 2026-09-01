@@ -27,6 +27,19 @@ def make_layer(rank: int, world_size: int = 4):
         )
 
 
+class TrackingSlice:
+    def __init__(self, tensor):
+        self.tensor = tensor
+        self.requests = []
+
+    def get_shape(self):
+        return self.tensor.shape
+
+    def __getitem__(self, key):
+        self.requests.append(key)
+        return self.tensor[key]
+
+
 def test_kv_heads_are_replicated_when_tp_exceeds_kv_heads():
     layers = [make_layer(rank) for rank in range(4)]
 
@@ -86,3 +99,67 @@ def test_standalone_kv_projection_replicates_heads_and_bias():
     assert torch.equal(layers[3].weight, loaded_weight[2:])
     assert torch.equal(layers[0].bias, loaded_bias[:2])
     assert torch.equal(layers[3].bias, loaded_bias[2:])
+
+
+def test_qkv_safetensors_loader_reads_only_rank_source_rows():
+    layer = make_layer(rank=3)
+    loaded_q = TrackingSlice(torch.arange(96).reshape(32, 3).float())
+    loaded_k = TrackingSlice(torch.arange(12).reshape(4, 3).float())
+
+    layer.safetensors_loader(layer.weight, loaded_q, "q")
+    layer.safetensors_loader(layer.weight, loaded_k, "k")
+
+    assert torch.equal(layer.weight[:8], loaded_q.tensor[24:32])
+    assert torch.equal(layer.weight[8:10], loaded_k.tensor[2:4])
+    assert loaded_q.requests == [(slice(24, 32), slice(None))]
+    assert loaded_k.requests == [(slice(2, 4), slice(None))]
+
+
+def test_merged_and_row_parallel_safetensors_loaders_slice_by_rank():
+    with (
+        patch.object(LINEAR.dist, "get_world_size", return_value=4),
+        patch.object(LINEAR.dist, "get_rank", return_value=2),
+    ):
+        merged = LINEAR.MergedColumnParallelLinear(3, [8, 12])
+        row = LINEAR.RowParallelLinear(8, 3)
+    first = TrackingSlice(torch.arange(24).reshape(8, 3).float())
+    second = TrackingSlice(torch.arange(36).reshape(12, 3).float())
+    row_source = TrackingSlice(torch.arange(24).reshape(3, 8).float())
+
+    merged.safetensors_loader(merged.weight, first, 0)
+    merged.safetensors_loader(merged.weight, second, 1)
+    row.safetensors_loader(row.weight, row_source)
+
+    assert torch.equal(merged.weight[:2], first.tensor[4:6])
+    assert torch.equal(merged.weight[2:], second.tensor[6:9])
+    assert torch.equal(row.weight, row_source.tensor[:, 4:6])
+    assert first.requests == [(slice(4, 6), slice(None))]
+    assert second.requests == [(slice(6, 9), slice(None))]
+    assert row_source.requests == [(slice(None), slice(4, 6))]
+
+
+def test_column_and_replicated_kv_safetensors_loaders_slice_by_rank():
+    with (
+        patch.object(LINEAR.dist, "get_world_size", return_value=4),
+        patch.object(LINEAR.dist, "get_rank", return_value=1),
+    ):
+        column = LINEAR.ColumnParallelLinear(3, 8, bias=True)
+        kv = LINEAR.KVParallelLinear(3, 2, 2, bias=True)
+    column_weight = TrackingSlice(torch.arange(24).reshape(8, 3).float())
+    column_bias = TrackingSlice(torch.arange(8).float())
+    kv_weight = TrackingSlice(torch.arange(12).reshape(4, 3).float())
+    kv_bias = TrackingSlice(torch.arange(4).float())
+
+    column.safetensors_loader(column.weight, column_weight)
+    column.safetensors_loader(column.bias, column_bias)
+    kv.safetensors_loader(kv.weight, kv_weight)
+    kv.safetensors_loader(kv.bias, kv_bias)
+
+    assert torch.equal(column.weight, column_weight.tensor[2:4])
+    assert torch.equal(column.bias, column_bias.tensor[2:4])
+    assert torch.equal(kv.weight, kv_weight.tensor[:2])
+    assert torch.equal(kv.bias, kv_bias.tensor[:2])
+    assert column_weight.requests == [(slice(2, 4), slice(None))]
+    assert column_bias.requests == [(slice(2, 4),)]
+    assert kv_weight.requests == [(slice(0, 2), slice(None))]
+    assert kv_bias.requests == [(slice(0, 2),)]

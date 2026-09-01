@@ -26,7 +26,18 @@ class FakeSafeFile:
 
     def get_slice(self, name):
         self.sliced.append(name)
-        return torch.tensor([5.0, 6.0])
+        return FakeSlice(torch.tensor([5.0, 6.0]))
+
+
+class FakeSlice:
+    def __init__(self, tensor):
+        self.tensor = tensor
+
+    def get_shape(self):
+        return self.tensor.shape
+
+    def __getitem__(self, key):
+        return self.tensor[key]
 
 
 safe_module = types.ModuleType("safetensors")
@@ -71,8 +82,29 @@ class SlicedMappedModel(MappedModel):
     def __init__(self):
         super().__init__()
         self.model.weight.safetensors_loader = (
-            lambda param, source: param.data.copy_(source)
+            lambda param, source: param.data.copy_(source[:])
         )
+
+
+class PackedSlicedModel(nn.Module):
+    packed_modules_mapping = {"text": ("packed", 7)}
+
+    def __init__(self):
+        super().__init__()
+        self.external = nn.Module()
+        self.external.packed = nn.Module()
+        self.external.packed.weight = nn.Parameter(torch.zeros(2))
+        self.loaded_shards = []
+
+        def load(param, source, shard_id):
+            self.loaded_shards.append(shard_id)
+            param.data.copy_(source[:])
+
+        self.external.packed.weight.safetensors_loader = load
+
+    @staticmethod
+    def map_weight_name(name):
+        return None if name == "external.visual.weight" else name
 
 
 def test_loader_maps_text_names_before_loading_and_skips_visual_tensors(tmp_path):
@@ -106,6 +138,23 @@ def test_parameter_specific_loader_uses_lazy_safetensors_slice(tmp_path):
     loader.load_model(model, str(tmp_path))
 
     torch.testing.assert_close(model.model.weight, torch.tensor([5.0, 6.0]))
+    assert FakeSafeFile.sliced == ["external.text.weight"]
+    assert FakeSafeFile.requested == []
+
+
+def test_packed_parameter_loader_uses_lazy_safetensors_slice(tmp_path):
+    (tmp_path / "model.safetensors").touch()
+    FakeSafeFile.requested.clear()
+    FakeSafeFile.sliced.clear()
+    model = PackedSlicedModel()
+
+    loader.load_model(model, str(tmp_path))
+
+    torch.testing.assert_close(
+        model.external.packed.weight,
+        torch.tensor([5.0, 6.0]),
+    )
+    assert model.loaded_shards == [7]
     assert FakeSafeFile.sliced == ["external.text.weight"]
     assert FakeSafeFile.requested == []
 
