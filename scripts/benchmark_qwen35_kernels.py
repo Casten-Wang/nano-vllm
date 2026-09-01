@@ -170,6 +170,41 @@ def benchmark_router(args, device, dtype) -> dict:
     return result
 
 
+def benchmark_rmsnorm(args, device, dtype) -> dict:
+    x = torch.randn(
+        args.router_tokens,
+        args.hidden_size,
+        device=device,
+        dtype=dtype,
+    )
+    weight = torch.randn(args.hidden_size, device=device)
+    eps = 1e-6
+
+    def reference():
+        normalized = x.float() * torch.rsqrt(
+            x.float().pow(2).mean(dim=-1, keepdim=True) + eps
+        )
+        return ((normalized * (1.0 + weight)).to(dtype),)
+
+    def candidate():
+        x_float = x.float()
+        normalized = x_float * torch.rsqrt(
+            x_float.pow(2).mean(dim=-1, keepdim=True) + eps
+        )
+        return ((normalized * (1.0 + weight)).to(dtype),)
+
+    result = compare(
+        reference,
+        candidate,
+        device=device,
+        warmup=args.warmup,
+        iterations=args.iterations,
+        repeats=args.repeats,
+    )
+    result["avoided_fp32_copy_mib"] = x.numel() * 4 / 1024 / 1024
+    return result
+
+
 def benchmark_convolution(args, device, dtype, local_conv_channels) -> dict:
     x = torch.randn(
         args.prefill_batch,
@@ -274,6 +309,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--router-tokens", type=int, default=2048)
     parser.add_argument("--num-experts", type=int, default=256)
     parser.add_argument("--top-k", type=int, default=8)
+    parser.add_argument("--hidden-size", type=int, default=2048)
     parser.add_argument("--prefill-batch", type=int, default=1)
     parser.add_argument("--prefill-tokens", type=int, default=512)
     parser.add_argument("--decode-batch", type=int, default=32)
@@ -299,6 +335,7 @@ def main() -> None:
         "router_tokens": args.router_tokens,
         "num_experts": args.num_experts,
         "top_k": args.top_k,
+        "hidden_size": args.hidden_size,
         "prefill_batch": args.prefill_batch,
         "prefill_tokens": args.prefill_tokens,
         "decode_batch": args.decode_batch,
@@ -340,6 +377,7 @@ def main() -> None:
         },
         "results": {
             "router_topk_first": benchmark_router(args, device, dtype),
+            "rmsnorm_fp32_reuse": benchmark_rmsnorm(args, device, dtype),
             "vectorized_prefill_convolution": benchmark_convolution(
                 args,
                 device,
