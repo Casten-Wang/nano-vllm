@@ -186,16 +186,15 @@ class Qwen35Experts(nn.Module):
             rounding_mode="floor",
         )
         sorted_weights = routing_weights[order]
-        # One host synchronization replaces one .item() and one full routing
-        # mask scan per active expert in the correctness baseline.
-        counts = torch.bincount(
+        active_experts, counts = torch.unique_consecutive(
             sorted_experts,
-            minlength=self.num_experts,
-        ).cpu().tolist()
+            return_counts=True,
+        )
+        # Copy only active expert metadata in one host synchronization. Decode
+        # batches commonly route to far fewer than all 256 experts.
+        groups = torch.stack((active_experts, counts), dim=1).cpu().tolist()
         offset = 0
-        for expert_id, count in enumerate(counts):
-            if count == 0:
-                continue
+        for expert_id, count in groups:
             end = offset + count
             token_index = sorted_tokens[offset:end]
             expert_input = hidden_states[token_index]

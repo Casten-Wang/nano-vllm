@@ -141,6 +141,23 @@ def test_sorted_expert_dispatch_matches_naive_topk_accumulation():
     torch.testing.assert_close(actual, expected)
 
 
+def test_sorted_expert_dispatch_only_groups_active_experts():
+    experts = make_experts()
+    hidden = torch.randn(2, 2)
+    topk_ids = torch.tensor([[1, 1], [1, 1]])
+    topk_weights = torch.full((2, 2), 0.5)
+
+    with patch.object(
+        qwen35_moe.torch,
+        "bincount",
+        side_effect=AssertionError("dense expert histogram should not be built"),
+    ):
+        output = experts(hidden, topk_ids, topk_weights)
+
+    assert output.shape == hidden.shape
+    assert torch.isfinite(output).all()
+
+
 def test_tensor_parallel_expert_outputs_sum_to_single_rank_reference():
     torch.manual_seed(13)
     full = make_experts(world_size=1)

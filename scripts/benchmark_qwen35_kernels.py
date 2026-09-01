@@ -189,14 +189,13 @@ def expert_dispatch(
     sorted_experts = assignments[order]
     sorted_tokens = torch.div(order, topk_ids.shape[1], rounding_mode="floor")
     sorted_weights = routing_weights[order]
-    counts = torch.bincount(
+    active_experts, counts = torch.unique_consecutive(
         sorted_experts,
-        minlength=gate_up_proj.shape[0],
-    ).cpu().tolist()
+        return_counts=True,
+    )
+    groups = torch.stack((active_experts, counts), dim=1).cpu().tolist()
     offset = 0
-    for expert_id, count in enumerate(counts):
-        if count == 0:
-            continue
+    for expert_id, count in groups:
         end = offset + count
         token_index = sorted_tokens[offset:end]
         gate_up = F.linear(hidden_states[token_index], gate_up_proj[expert_id])
