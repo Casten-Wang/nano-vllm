@@ -490,6 +490,66 @@ def test_official_head_layout_matches_across_tp4_and_tp8():
             torch.testing.assert_close(actual, expected, rtol=3e-5, atol=3e-5)
 
 
+def test_official_state_allocations_match_tp4_and_tp8_memory_budget():
+    layer_config = SimpleNamespace(
+        hidden_size=2048,
+        linear_num_key_heads=16,
+        linear_num_value_heads=32,
+        linear_key_head_dim=128,
+        linear_value_head_dim=128,
+        linear_conv_kernel_dim=4,
+        rms_norm_eps=1e-6,
+    )
+    expected = {
+        4: (15_728_640, 7_864_320, 491_520),
+        8: (7_864_320, 3_932_160, 245_760),
+    }
+    original_device = torch.get_default_device()
+    original_dtype = torch.get_default_dtype()
+    try:
+        torch.set_default_device("meta")
+        torch.set_default_dtype(torch.bfloat16)
+        for tp_size, (
+            fp32_recurrent_bytes,
+            bf16_recurrent_bytes,
+            convolution_bytes,
+        ) in expected.items():
+            layer = make_layer(
+                rank=tp_size - 1,
+                world_size=tp_size,
+                layer_config=layer_config,
+            )
+            layer.allocate_state_cache(1, "cpu")
+            assert layer.state_pool is not None
+            actual_fp32_recurrent = (
+                layer.state_pool.recurrent.numel()
+                * layer.state_pool.recurrent.element_size()
+                * 30
+            )
+            actual_convolution = (
+                layer.state_pool.convolution.numel()
+                * layer.state_pool.convolution.element_size()
+                * 30
+            )
+            assert actual_fp32_recurrent == fp32_recurrent_bytes
+            assert actual_convolution == convolution_bytes
+            layer.allocate_state_cache(
+                1,
+                "cpu",
+                recurrent_dtype=torch.bfloat16,
+            )
+            assert layer.state_pool is not None
+            actual_bf16_recurrent = (
+                layer.state_pool.recurrent.numel()
+                * layer.state_pool.recurrent.element_size()
+                * 30
+            )
+            assert actual_bf16_recurrent == bf16_recurrent_bytes
+    finally:
+        torch.set_default_device(original_device)
+        torch.set_default_dtype(original_dtype)
+
+
 def test_batched_decode_matches_individual_slot_updates():
     torch.manual_seed(19)
     layer = make_layer()
