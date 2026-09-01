@@ -541,18 +541,22 @@ class Qwen35GatedDeltaNet(nn.Module):
             self.hidden_size, self.local_conv_dim, bias=False
         )
         self.in_proj_qkv.weight.weight_loader = self._load_qkv
+        self.in_proj_qkv.weight.safetensors_loader = self._load_qkv_slice
         self.in_proj_z = nn.Linear(
             self.hidden_size, self.local_value_dim, bias=False
         )
         self.in_proj_z.weight.weight_loader = self._load_column
+        self.in_proj_z.weight.safetensors_loader = self._load_column_slice
         self.in_proj_b = nn.Linear(
             self.hidden_size, self.num_v_heads, bias=False
         )
         self.in_proj_b.weight.weight_loader = self._load_column
+        self.in_proj_b.weight.safetensors_loader = self._load_column_slice
         self.in_proj_a = nn.Linear(
             self.hidden_size, self.num_v_heads, bias=False
         )
         self.in_proj_a.weight.weight_loader = self._load_column
+        self.in_proj_a.weight.safetensors_loader = self._load_column_slice
         self.conv1d = nn.Conv1d(
             self.local_conv_dim,
             self.local_conv_dim,
@@ -562,14 +566,17 @@ class Qwen35GatedDeltaNet(nn.Module):
             padding=self.conv_kernel_size - 1,
         )
         self.conv1d.weight.weight_loader = self._load_conv
+        self.conv1d.weight.safetensors_loader = self._load_conv_slice
         self.dt_bias = nn.Parameter(torch.empty(self.num_v_heads))
         self.dt_bias.weight_loader = self._load_vector
+        self.dt_bias.safetensors_loader = self._load_column_slice
         # Keep the decay exponent in FP32; BF16 can turn large learned values
         # into unstable decay factors during long recurrent scans.
         self.A_log = nn.Parameter(
             torch.empty(self.num_v_heads, dtype=torch.float32)
         )
         self.A_log.weight_loader = self._load_vector
+        self.A_log.safetensors_loader = self._load_column_slice
         self.norm = Qwen35GatedRMSNorm(
             self.value_head_dim,
             eps=float(config.rms_norm_eps),
@@ -578,6 +585,7 @@ class Qwen35GatedDeltaNet(nn.Module):
             self.local_value_dim, self.hidden_size, bias=False
         )
         self.out_proj.weight.weight_loader = self._load_row
+        self.out_proj.weight.safetensors_loader = self._load_row_slice
         self.state_pool: Qwen35RecurrentStatePool | None = None
 
     def _column_shard(self, weight: torch.Tensor) -> torch.Tensor:
@@ -586,8 +594,30 @@ class Qwen35GatedDeltaNet(nn.Module):
         width = weight.shape[0] // self.tp_size
         return weight.narrow(0, self.tp_rank * width, width)
 
+    @staticmethod
+    def _slice_shape(weight) -> tuple[int, ...]:
+        get_shape = getattr(weight, "get_shape", None)
+        return tuple(get_shape() if get_shape is not None else weight.shape)
+
+    def _column_bounds(self, size: int) -> tuple[int, int]:
+        if size % self.tp_size:
+            raise ValueError("weight output dimension must divide TP size")
+        width = size // self.tp_size
+        start = self.tp_rank * width
+        return start, start + width
+
     def _load_column(self, param: nn.Parameter, weight: torch.Tensor) -> None:
         param.data.copy_(self._column_shard(weight))
+
+    def _load_column_slice(self, param: nn.Parameter, weight) -> None:
+        shape = self._slice_shape(weight)
+        if not shape:
+            raise ValueError("invalid tensor-parallel column weight shape")
+        start, end = self._column_bounds(shape[0])
+        if tuple(param.shape) != (end - start, *shape[1:]):
+            raise ValueError("invalid tensor-parallel column weight shape")
+        index = (slice(start, end),) + (slice(None),) * (len(shape) - 1)
+        param.data.copy_(weight[index])
 
     def _load_vector(self, param: nn.Parameter, weight: torch.Tensor) -> None:
         param.data.copy_(self._column_shard(weight))
@@ -597,6 +627,15 @@ class Qwen35GatedDeltaNet(nn.Module):
             raise ValueError("weight input dimension must divide TP size")
         width = weight.shape[1] // self.tp_size
         param.data.copy_(weight.narrow(1, self.tp_rank * width, width))
+
+    def _load_row_slice(self, param: nn.Parameter, weight) -> None:
+        shape = self._slice_shape(weight)
+        if len(shape) != 2 or shape[0] != param.shape[0]:
+            raise ValueError("invalid tensor-parallel row weight shape")
+        start, end = self._column_bounds(shape[1])
+        if end - start != param.shape[1]:
+            raise ValueError("invalid tensor-parallel row weight shape")
+        param.data.copy_(weight[:, start:end])
 
     def _load_qkv(self, param: nn.Parameter, weight: torch.Tensor) -> None:
         expected = 2 * self.global_key_dim + self.global_value_dim
@@ -612,6 +651,23 @@ class Qwen35GatedDeltaNet(nn.Module):
                 dim=0,
             )
         )
+
+    def _load_qkv_slice(self, param: nn.Parameter, weight) -> None:
+        expected = 2 * self.global_key_dim + self.global_value_dim
+        shape = self._slice_shape(weight)
+        if shape != (expected, self.hidden_size):
+            raise ValueError("invalid Qwen3.5 in_proj_qkv weight shape")
+        parts = []
+        offset = 0
+        for width in (
+            self.global_key_dim,
+            self.global_key_dim,
+            self.global_value_dim,
+        ):
+            start, end = self._column_bounds(width)
+            parts.append(weight[offset + start : offset + end, :])
+            offset += width
+        param.data.copy_(torch.cat(parts, dim=0))
 
     def _load_conv(self, param: nn.Parameter, weight: torch.Tensor) -> None:
         if weight.ndim != 3 or weight.shape[1] != 1:
@@ -629,6 +685,23 @@ class Qwen35GatedDeltaNet(nn.Module):
             dim=0,
         )
         param.data.copy_(local.unsqueeze(1))
+
+    def _load_conv_slice(self, param: nn.Parameter, weight) -> None:
+        expected = 2 * self.global_key_dim + self.global_value_dim
+        shape = self._slice_shape(weight)
+        if shape != (expected, 1, self.conv_kernel_size):
+            raise ValueError("invalid Qwen3.5 depthwise convolution weight shape")
+        parts = []
+        offset = 0
+        for width in (
+            self.global_key_dim,
+            self.global_key_dim,
+            self.global_value_dim,
+        ):
+            start, end = self._column_bounds(width)
+            parts.append(weight[offset + start : offset + end, :, :])
+            offset += width
+        param.data.copy_(torch.cat(parts, dim=0))
 
     def allocate_state_cache(
         self,

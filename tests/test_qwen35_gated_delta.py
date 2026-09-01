@@ -403,6 +403,48 @@ def test_qkv_and_convolution_loaders_shard_each_component_independently():
     torch.testing.assert_close(layer.conv1d.weight, expected_conv)
 
 
+class TrackingSlice:
+    def __init__(self, tensor):
+        self.tensor = tensor
+        self.requests = []
+
+    def get_shape(self):
+        return self.tensor.shape
+
+    def __getitem__(self, key):
+        self.requests.append(key)
+        return self.tensor[key]
+
+
+def test_gated_delta_safetensors_loaders_only_read_local_tp_slices():
+    layer = make_layer(rank=1, world_size=2)
+    rows = 2 * layer.global_key_dim + layer.global_value_dim
+    qkv = TrackingSlice(torch.arange(rows * 4).reshape(rows, 4).float())
+    conv = TrackingSlice(torch.arange(rows * 2).reshape(rows, 1, 2).float())
+    column = TrackingSlice(torch.arange(32).reshape(8, 4).float())
+    row = TrackingSlice(torch.arange(32).reshape(4, 8).float())
+
+    layer._load_qkv_slice(layer.in_proj_qkv.weight, qkv)
+    layer._load_conv_slice(layer.conv1d.weight, conv)
+    layer._load_column_slice(layer.in_proj_z.weight, column)
+    layer._load_row_slice(layer.out_proj.weight, row)
+
+    torch.testing.assert_close(
+        layer.in_proj_qkv.weight,
+        torch.cat((qkv.tensor[2:4], qkv.tensor[6:8], qkv.tensor[12:16])),
+    )
+    torch.testing.assert_close(
+        layer.conv1d.weight,
+        torch.cat((conv.tensor[2:4], conv.tensor[6:8], conv.tensor[12:16])),
+    )
+    torch.testing.assert_close(layer.in_proj_z.weight, column.tensor[4:8])
+    torch.testing.assert_close(layer.out_proj.weight, row.tensor[:, 4:8])
+    assert len(qkv.requests) == 3
+    assert len(conv.requests) == 3
+    assert len(column.requests) == 1
+    assert len(row.requests) == 1
+
+
 def test_decay_and_gated_norm_parameters_remain_fp32_under_bf16_default():
     original_dtype = torch.get_default_dtype()
     try:
