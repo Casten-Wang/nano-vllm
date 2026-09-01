@@ -27,6 +27,7 @@ def args():
         run_id="rental-a",
         result_dir="benchmark_results/qwen35_rental",
         dry_run=True,
+        resume=False,
     )
 
 
@@ -57,3 +58,37 @@ def test_run_id_rejects_unsafe_paths(value):
 def test_tp_sizes_reject_unsupported_parallelism():
     with pytest.raises(MODULE.argparse.ArgumentTypeError):
         MODULE.parse_tp_sizes("3,4")
+
+
+def test_manifest_resumes_only_identical_run(tmp_path):
+    arguments = args()
+    stages = MODULE.commands(arguments)
+    plan = MODULE.manifest_plan(arguments, stages)
+    path = tmp_path / "manifest.json"
+    manifest = MODULE.prepare_manifest(path, plan, resume=False)
+    MODULE.mark_stage_completed(path, manifest, "preflight")
+
+    resumed = MODULE.prepare_manifest(path, plan, resume=True)
+
+    assert resumed["completed_stages"] == ["preflight"]
+
+
+def test_manifest_rejects_changed_resume_commands(tmp_path):
+    arguments = args()
+    plan = MODULE.manifest_plan(arguments, MODULE.commands(arguments))
+    path = tmp_path / "manifest.json"
+    MODULE.prepare_manifest(path, plan, resume=False)
+    changed = {**plan, "model": "/different/model"}
+
+    with pytest.raises(ValueError, match="does not match"):
+        MODULE.prepare_manifest(path, changed, resume=True)
+
+
+def test_manifest_refuses_accidental_overwrite(tmp_path):
+    arguments = args()
+    plan = MODULE.manifest_plan(arguments, MODULE.commands(arguments))
+    path = tmp_path / "manifest.json"
+    MODULE.prepare_manifest(path, plan, resume=False)
+
+    with pytest.raises(ValueError, match="already exists"):
+        MODULE.prepare_manifest(path, plan, resume=False)
