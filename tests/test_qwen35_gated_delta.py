@@ -290,12 +290,12 @@ def tiny_config():
     )
 
 
-def make_layer(rank=0, world_size=1):
+def make_layer(rank=0, world_size=1, layer_config=None):
     with (
         patch.object(qwen35_gated_delta.dist, "get_world_size", return_value=world_size),
         patch.object(qwen35_gated_delta.dist, "get_rank", return_value=rank),
     ):
-        return Qwen35GatedDeltaNet(tiny_config(), layer_idx=0)
+        return Qwen35GatedDeltaNet(layer_config or tiny_config(), layer_idx=0)
 
 
 def test_qkv_and_convolution_loaders_shard_each_component_independently():
@@ -419,6 +419,75 @@ def test_tensor_parallel_layers_sum_to_single_rank_reference():
         actual = sum(rank_layer(hidden) for rank_layer in ranks)
 
     torch.testing.assert_close(actual, expected, rtol=2e-5, atol=2e-5)
+
+
+@torch.no_grad()
+def test_official_head_layout_matches_across_tp4_and_tp8():
+    torch.manual_seed(37)
+    layer_config = SimpleNamespace(
+        hidden_size=8,
+        linear_num_key_heads=16,
+        linear_num_value_heads=32,
+        linear_key_head_dim=1,
+        linear_value_head_dim=1,
+        linear_conv_kernel_dim=2,
+        rms_norm_eps=1e-6,
+    )
+    sources = {
+        "in_proj_qkv.weight": torch.randn(64, 8),
+        "in_proj_z.weight": torch.randn(32, 8),
+        "in_proj_b.weight": torch.randn(32, 8),
+        "in_proj_a.weight": torch.randn(32, 8),
+        "conv1d.weight": torch.randn(64, 1, 2),
+        "dt_bias": torch.randn(32),
+        "A_log": torch.randn(32),
+        "norm.weight": torch.randn(1),
+        "out_proj.weight": torch.randn(8, 32),
+    }
+
+    def load(layer):
+        for name, source in sources.items():
+            parameter = layer.get_parameter(name)
+            loader = getattr(parameter, "weight_loader", None)
+            if loader is None:
+                parameter.copy_(source)
+            else:
+                loader(parameter, source)
+        layer.allocate_state_cache(1, "cpu")
+
+    hidden = torch.randn(3, 8)
+    context = SimpleNamespace(
+        is_mixed=False,
+        is_prefill=True,
+        state_token_ranges=((0, 3),),
+        state_slots=torch.tensor([0], dtype=torch.int32),
+        state_reset_mask=torch.tensor([True]),
+    )
+    context_module = types.ModuleType("nanovllm.utils.context")
+    context_module.get_context = lambda: context
+    full = make_layer(world_size=1, layer_config=layer_config)
+    load(full)
+
+    with patch.dict(sys.modules, {"nanovllm.utils.context": context_module}):
+        expected = full(hidden)
+        for tp_size in (4, 8):
+            ranks = [
+                make_layer(
+                    rank=rank,
+                    world_size=tp_size,
+                    layer_config=layer_config,
+                )
+                for rank in range(tp_size)
+            ]
+            for rank_layer in ranks:
+                load(rank_layer)
+            with patch.object(
+                qwen35_gated_delta.dist,
+                "all_reduce",
+                return_value=None,
+            ):
+                actual = sum(rank_layer(hidden) for rank_layer in ranks)
+            torch.testing.assert_close(actual, expected, rtol=3e-5, atol=3e-5)
 
 
 def test_batched_decode_matches_individual_slot_updates():
