@@ -22,8 +22,15 @@ dependencies = [
     "safetensors",
 ]
 
+[project.optional-dependencies]
+dev = [
+    "pre-commit>=4.0",
+    "pytest>=8.0",
+]
+
 [project.urls]
-Homepage="https://github.com/GeeeekExplorer/nano-vllm"
+Homepage = "https://github.com/Casten-Wang/nano-vllm"
+Upstream = "https://github.com/GeeeekExplorer/nano-vllm"
 
 [tool.setuptools.packages.find]
 where = ["."]

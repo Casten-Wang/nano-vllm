@@ -1,0 +1,13 @@
+repos:
+  - repo: local
+    hooks:
+      - id: repository-policy
+        name: repository source-only policy
+        entry: python3 scripts/check_repo_policy.py
+        language: system
+        pass_filenames: false
+      - id: compile-python
+        name: compile tracked Python sources
+        entry: python3 -m compileall -q nanovllm projects scripts tests
+        language: system
+        pass_filenames: false

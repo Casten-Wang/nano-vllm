@@ -46,6 +46,10 @@ benchmark_results/
 *.zip
 *.7z
 
+# Repository governance is the only new Markdown content allowed.
+!/AGENTS.md
+!/CONTRIBUTING.md
+
 # Local model/data artifacts.
 *.safetensors
 *.bin
