@@ -243,6 +243,41 @@ def test_state_pool_can_store_recurrent_state_in_model_dtype():
     assert pool.recurrent.element_size() == 2
 
 
+def test_state_pool_converts_fp32_updates_to_compressed_storage_dtype():
+    pool = Qwen35RecurrentStatePool(
+        1,
+        2,
+        2,
+        3,
+        4,
+        5,
+        2,
+        device="cpu",
+        recurrent_dtype=torch.bfloat16,
+        convolution_dtype=torch.bfloat16,
+    )
+    slots = torch.tensor([1])
+    recurrent = torch.randn(1, 2, 3, 4, dtype=torch.float32)
+    convolution = torch.randn(1, 5, 2, dtype=torch.float32)
+
+    pool.update(0, slots, recurrent, convolution)
+
+    assert pool.recurrent.dtype == torch.bfloat16
+    assert pool.convolution.dtype == torch.bfloat16
+    torch.testing.assert_close(
+        pool.recurrent[0, 1].float(),
+        recurrent[0],
+        rtol=4e-3,
+        atol=4e-3,
+    )
+    torch.testing.assert_close(
+        pool.convolution[0, 1].float(),
+        convolution[0],
+        rtol=4e-3,
+        atol=4e-3,
+    )
+
+
 def tiny_config():
     return SimpleNamespace(
         hidden_size=4,

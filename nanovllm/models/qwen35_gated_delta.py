@@ -383,8 +383,8 @@ class Qwen35RecurrentStatePool:
         recurrent: torch.Tensor,
         convolution: torch.Tensor,
     ) -> None:
-        self.recurrent[layer, slots] = recurrent
-        self.convolution[layer, slots] = convolution
+        self.recurrent[layer, slots] = recurrent.to(self.recurrent.dtype)
+        self.convolution[layer, slots] = convolution.to(self.convolution.dtype)
 
     def reset(self, slots: torch.Tensor) -> None:
         self.recurrent[:, slots] = 0

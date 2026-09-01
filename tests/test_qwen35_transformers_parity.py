@@ -228,7 +228,7 @@ def tiny_config():
     return config
 
 
-def make_models(tmp_path, seed):
+def make_models(tmp_path, seed, recurrent_dtype=torch.float32):
     config = tiny_config()
     torch.manual_seed(seed)
     reference = TransformersQwen35(config).eval()
@@ -242,7 +242,7 @@ def make_models(tmp_path, seed):
         for module in local.modules():
             allocate = getattr(module, "allocate_state_cache", None)
             if allocate is not None:
-                allocate(2, "cpu")
+                allocate(2, "cpu", recurrent_dtype=recurrent_dtype)
         safetensors_torch.save_file(
             {
                 name: value.detach().contiguous()
@@ -394,3 +394,57 @@ def test_mixed_decode_and_prefill_matches_transformers(tmp_path):
         rtol=2e-4,
         atol=2e-4,
     )
+
+
+def test_bf16_recurrent_storage_remains_close_over_multi_step_decode(tmp_path):
+    reference, local = make_models(tmp_path, 61, recurrent_dtype=torch.bfloat16)
+    tokens = torch.tensor(
+        [[1, 5, 7, 2, 9, 4, 6, 3, 8, 11, 13, 10, 12, 15, 14, 17, 16, 19]]
+    )
+    CURRENT_CONTEXT["value"] = types.SimpleNamespace(
+        is_prefill=True,
+        is_mixed=False,
+        decode_token_count=0,
+        state_slots=torch.tensor([0], dtype=torch.int32),
+        state_reset_mask=torch.tensor([True]),
+        state_token_ranges=((0, 2),),
+        cu_seqlens_q=torch.tensor([0, 2], dtype=torch.int32),
+    )
+    max_hidden_error = 0.0
+    max_logit_error = 0.0
+    with (
+        patch.dict(sys.modules, {"nanovllm.utils.context": CONTEXT_MODULE}),
+        torch.inference_mode(),
+    ):
+        local(tokens[0, :2], torch.arange(2))
+        for token_index in range(2, tokens.shape[1]):
+            CURRENT_CONTEXT["value"] = types.SimpleNamespace(
+                is_prefill=False,
+                is_mixed=False,
+                decode_token_count=1,
+                state_slots=torch.tensor([0], dtype=torch.int32),
+                state_reset_mask=torch.tensor([False]),
+                state_token_ranges=(),
+                cu_seqlens_q=None,
+            )
+            actual = local(
+                tokens[0, token_index : token_index + 1],
+                torch.tensor([token_index]),
+            )
+            expected = reference.model(
+                input_ids=tokens[:, : token_index + 1],
+                use_cache=False,
+            ).last_hidden_state[:, -1]
+            actual_logits = local.compute_logits(actual)
+            expected_logits = reference.lm_head(expected)
+            max_hidden_error = max(
+                max_hidden_error,
+                (actual - expected).abs().max().item(),
+            )
+            max_logit_error = max(
+                max_logit_error,
+                (actual_logits - expected_logits).abs().max().item(),
+            )
+
+    assert max_hidden_error < 2e-3
+    assert max_logit_error < 2e-3
