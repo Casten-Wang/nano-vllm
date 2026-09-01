@@ -9,6 +9,7 @@ from torch import nn
 
 class FakeSafeFile:
     requested = []
+    sliced = []
 
     def __enter__(self):
         return self
@@ -22,6 +23,10 @@ class FakeSafeFile:
     def get_tensor(self, name):
         self.requested.append(name)
         return torch.tensor([3.0, 4.0])
+
+    def get_slice(self, name):
+        self.sliced.append(name)
+        return torch.tensor([5.0, 6.0])
 
 
 safe_module = types.ModuleType("safetensors")
@@ -62,6 +67,14 @@ class StrictMappedModel(MappedModel):
         self.missing = nn.Parameter(torch.zeros(1))
 
 
+class SlicedMappedModel(MappedModel):
+    def __init__(self):
+        super().__init__()
+        self.model.weight.safetensors_loader = (
+            lambda param, source: param.data.copy_(source)
+        )
+
+
 def test_loader_maps_text_names_before_loading_and_skips_visual_tensors(tmp_path):
     (tmp_path / "model.safetensors").touch()
     FakeSafeFile.requested.clear()
@@ -82,3 +95,16 @@ def test_strict_loader_reports_parameters_absent_from_checkpoint(tmp_path):
         assert "checkpoint is missing model parameters: missing" in str(error)
     else:
         raise AssertionError("strict loading accepted a missing parameter")
+
+
+def test_parameter_specific_loader_uses_lazy_safetensors_slice(tmp_path):
+    (tmp_path / "model.safetensors").touch()
+    FakeSafeFile.requested.clear()
+    FakeSafeFile.sliced.clear()
+    model = SlicedMappedModel()
+
+    loader.load_model(model, str(tmp_path))
+
+    torch.testing.assert_close(model.model.weight, torch.tensor([5.0, 6.0]))
+    assert FakeSafeFile.sliced == ["external.text.weight"]
+    assert FakeSafeFile.requested == []

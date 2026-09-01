@@ -34,6 +34,18 @@ def load_model(model: nn.Module, path: str):
                         break
                 else:
                     param = model.get_parameter(weight_name)
+                    safetensors_loader = getattr(
+                        param,
+                        "safetensors_loader",
+                        None,
+                    )
+                    if safetensors_loader is not None:
+                        safetensors_loader(
+                            param,
+                            f.get_slice(source_weight_name),
+                        )
+                        loaded_parameters.add(weight_name)
+                        continue
                     weight_loader = getattr(param, "weight_loader", default_weight_loader)
                     weight_loader(param, f.get_tensor(source_weight_name))
                     loaded_parameters.add(weight_name)

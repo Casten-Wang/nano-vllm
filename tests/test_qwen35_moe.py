@@ -92,6 +92,43 @@ def test_expert_weights_are_sharded_and_replicable_across_tp_ranks():
     assert torch.equal(rank1.down_proj, source_down[:, :, 2:4])
 
 
+class TrackingSlice:
+    def __init__(self, tensor):
+        self.tensor = tensor
+        self.requests = []
+
+    def get_shape(self):
+        return self.tensor.shape
+
+    def __getitem__(self, key):
+        self.requests.append(key)
+        return self.tensor[key]
+
+
+def test_expert_safetensors_loader_reads_only_local_tp_slices():
+    source_gate_up = TrackingSlice(
+        torch.arange(32, dtype=torch.float32).reshape(2, 8, 2)
+    )
+    source_down = TrackingSlice(
+        torch.arange(16, dtype=torch.float32).reshape(2, 2, 4)
+    )
+    rank1 = make_experts(rank=1, world_size=2)
+
+    rank1._load_gate_up_slice(rank1.gate_up_proj, source_gate_up)
+    rank1._load_down_slice(rank1.down_proj, source_down)
+
+    assert torch.equal(
+        rank1.gate_up_proj,
+        torch.cat(
+            (source_gate_up.tensor[:, 2:4], source_gate_up.tensor[:, 6:8]),
+            dim=1,
+        ),
+    )
+    assert torch.equal(rank1.down_proj, source_down.tensor[:, :, 2:4])
+    assert len(source_gate_up.requests) == 2
+    assert len(source_down.requests) == 1
+
+
 def test_qwen35_rmsnorm_does_not_mutate_input():
     norm = qwen35_moe.Qwen35RMSNorm(2)
     source = torch.tensor([[3.0, 4.0]], dtype=torch.float32)

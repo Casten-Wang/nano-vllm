@@ -76,7 +76,14 @@ class Qwen35Experts(nn.Module):
             )
         )
         self.gate_up_proj.weight_loader = self._load_gate_up
+        self.gate_up_proj.safetensors_loader = self._load_gate_up_slice
         self.down_proj.weight_loader = self._load_down
+        self.down_proj.safetensors_loader = self._load_down_slice
+
+    @staticmethod
+    def _slice_shape(loaded_weight) -> tuple[int, ...]:
+        get_shape = getattr(loaded_weight, "get_shape", None)
+        return tuple(get_shape() if get_shape is not None else loaded_weight.shape)
 
     def _load_gate_up(
         self,
@@ -99,6 +106,28 @@ class Qwen35Experts(nn.Module):
         local_weight = torch.cat((gate[:, start:end], up[:, start:end]), dim=1)
         param.data.copy_(local_weight)
 
+    def _load_gate_up_slice(self, param: nn.Parameter, loaded_weight) -> None:
+        expected_shape = (
+            self.num_experts,
+            2 * self.intermediate_size,
+            self.hidden_size,
+        )
+        shape = self._slice_shape(loaded_weight)
+        if shape != expected_shape:
+            raise ValueError(
+                f"invalid expert gate_up_proj shape: {shape}; "
+                f"expected {expected_shape}"
+            )
+        start = self.tp_rank * self.local_intermediate_size
+        end = start + self.local_intermediate_size
+        gate = loaded_weight[:, start:end, :]
+        up = loaded_weight[
+            :,
+            self.intermediate_size + start : self.intermediate_size + end,
+            :,
+        ]
+        param.data.copy_(torch.cat((gate, up), dim=1))
+
     def _load_down(
         self,
         param: nn.Parameter,
@@ -118,6 +147,21 @@ class Qwen35Experts(nn.Module):
         param.data.copy_(
             loaded_weight.narrow(2, start, self.local_intermediate_size)
         )
+
+    def _load_down_slice(self, param: nn.Parameter, loaded_weight) -> None:
+        expected_shape = (
+            self.num_experts,
+            self.hidden_size,
+            self.intermediate_size,
+        )
+        shape = self._slice_shape(loaded_weight)
+        if shape != expected_shape:
+            raise ValueError(
+                f"invalid expert down_proj shape: {shape}; expected {expected_shape}"
+            )
+        start = self.tp_rank * self.local_intermediate_size
+        end = start + self.local_intermediate_size
+        param.data.copy_(loaded_weight[:, :, start:end])
 
     def forward(
         self,
