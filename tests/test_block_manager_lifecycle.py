@@ -38,6 +38,7 @@ class FakeConfig:
     kvcache_block_size: int = 4
     num_kvcache_blocks: int = 8
     enable_dynamic_chunked_prefill: bool = True
+    model_spec: object | None = None
 
 
 def load_module(name: str, path: Path):
@@ -155,6 +156,24 @@ class BlockManagerLifecycleTest(unittest.TestCase):
         self.assertEqual(seq.block_table, [])
         self.assertEqual(manager.num_used_blocks, 0)
         assert_block_conservation(self, manager)
+
+    def test_hybrid_scheduler_disables_kv_only_prefix_reuse(self):
+        config = FakeConfig(
+            model_spec=types.SimpleNamespace(is_hybrid=True),
+        )
+        scheduler = Scheduler(config)
+        original = Sequence(list(range(8)))
+        scheduler.block_manager.allocate(original, num_cached_blocks=0)
+        original.num_scheduled_tokens = len(original)
+        scheduler.block_manager.hash_blocks(original)
+        scheduler.block_manager.deallocate(original)
+        replacement = Sequence(list(range(8)))
+        scheduler.add(replacement)
+
+        result = scheduler.schedule_dynamic_chunked_prefill()
+
+        self.assertEqual(replacement.num_cached_tokens, 0)
+        self.assertEqual(result.prefill_seqs, [replacement])
 
     def test_prefix_hit_shares_refcount_until_both_requests_release(self):
         manager = BlockManager(num_blocks=4, block_size=4)

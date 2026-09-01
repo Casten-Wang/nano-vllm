@@ -53,6 +53,10 @@ class Scheduler:
             if model_spec is not None and model_spec.is_hybrid
             else None
         )
+        # KV-only prefix entries cannot reconstruct linear-attention state.
+        # Hybrid models must replay the prompt until joint state snapshots
+        # are implemented.
+        self.prefix_cache_enabled = self.state_manager is None
         self.waiting: deque[Sequence] = deque()
         self.running: deque[Sequence] = deque()
 
@@ -95,7 +99,15 @@ class Scheduler:
             if remaining == 0:
                 break
             if not seq.block_table:
-                num_cached_blocks = self.block_manager.can_allocate(seq)
+                num_cached_blocks = (
+                    self.block_manager.get_num_cached_blocks(seq)
+                    if self.prefix_cache_enabled
+                    else 0
+                )
+                num_cached_blocks = self.block_manager.can_allocate(
+                    seq,
+                    num_cached_blocks=num_cached_blocks,
+                )
                 if num_cached_blocks == -1:
                     break
                 num_tokens = seq.num_tokens - num_cached_blocks * self.block_size
@@ -184,7 +196,11 @@ class Scheduler:
                 break
             seq = self.waiting[0]
             if not seq.block_table:
-                num_cached_blocks = self.block_manager.get_num_cached_blocks(seq)
+                num_cached_blocks = (
+                    self.block_manager.get_num_cached_blocks(seq)
+                    if self.prefix_cache_enabled
+                    else 0
+                )
                 seq.num_cached_tokens = num_cached_blocks * self.block_size
                 num_tokens = seq.num_tokens - seq.num_cached_tokens
                 if num_tokens <= 0:
@@ -291,7 +307,8 @@ class Scheduler:
             self.postprocess_one(seq, token_id, seq.is_prefill)
 
     def postprocess_one(self, seq: Sequence, token_id: int, is_prefill: bool):
-        self.block_manager.hash_blocks(seq)
+        if self.prefix_cache_enabled:
+            self.block_manager.hash_blocks(seq)
         seq.num_cached_tokens += seq.num_scheduled_tokens
         seq.num_scheduled_tokens = 0
         if is_prefill and seq.num_cached_tokens < seq.num_tokens:
