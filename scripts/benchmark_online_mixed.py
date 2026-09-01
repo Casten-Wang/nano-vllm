@@ -110,7 +110,7 @@ def main() -> None:
     finished_request_ids: set[int] = set()
     groups: dict[int, str] = {seq_id: "initial" for seq_id in initial_ids}
     torch.cuda.synchronize()
-    torch.cuda.reset_peak_memory_stats()
+    llm.model_runner.call("reset_cuda_peak_memory_stats")
     start = time.perf_counter()
     step_count = 0
 
@@ -193,6 +193,13 @@ def main() -> None:
     execution_stats = llm.model_runner.call("get_execution_stats")
     shape_trace = llm.model_runner.call("get_shape_trace")
     cudagraph_capture_stats = llm.model_runner.call("get_cudagraph_capture_stats")
+    cuda_memory_by_rank = llm.model_runner.call("get_cuda_memory_stats")
+    peak_allocated_bytes = max(
+        item["peak_allocated_bytes"] for item in cuda_memory_by_rank
+    )
+    peak_reserved_bytes = max(
+        item["peak_reserved_bytes"] for item in cuda_memory_by_rank
+    )
     required_paths = [item.strip() for item in args.require_paths.split(",") if item.strip()]
     execution_validation = validate_execution_stats(execution_stats, required_paths)
     expected_requests = args.initial_seqs + args.injected_seqs
@@ -237,8 +244,9 @@ def main() -> None:
         "expected_requests": expected_requests,
         "finished_requests": len(finished_request_ids),
         "total_time_s": total_time,
-        "peak_torch_allocated_mib": torch.cuda.max_memory_allocated() / 1024 / 1024,
-        "peak_torch_reserved_mib": torch.cuda.max_memory_reserved() / 1024 / 1024,
+        "peak_torch_allocated_mib": peak_allocated_bytes / 1024 / 1024,
+        "peak_torch_reserved_mib": peak_reserved_bytes / 1024 / 1024,
+        "cuda_memory_by_rank": cuda_memory_by_rank,
         "step_count": step_count,
         "initial_decode_gap_count": len(initial_gaps),
         "injected_decode_gap_count": len(injected_gaps),

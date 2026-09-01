@@ -186,7 +186,7 @@ def main() -> None:
     llm.model_runner.call("reset_execution_stats")
     llm.model_runner.call("reset_shape_trace")
     torch.cuda.synchronize()
-    torch.cuda.reset_peak_memory_stats()
+    llm.model_runner.call("reset_cuda_peak_memory_stats")
     start_event = torch.cuda.Event(enable_timing=True)
     end_event = torch.cuda.Event(enable_timing=True)
     start = time.perf_counter()
@@ -209,6 +209,13 @@ def main() -> None:
     execution_stats = llm.model_runner.call("get_execution_stats")
     shape_trace = llm.model_runner.call("get_shape_trace")
     cudagraph_capture_stats = llm.model_runner.call("get_cudagraph_capture_stats")
+    cuda_memory_by_rank = llm.model_runner.call("get_cuda_memory_stats")
+    peak_allocated_bytes = max(
+        item["peak_allocated_bytes"] for item in cuda_memory_by_rank
+    )
+    peak_reserved_bytes = max(
+        item["peak_reserved_bytes"] for item in cuda_memory_by_rank
+    )
     required_paths = [item.strip() for item in args.require_paths.split(",") if item.strip()]
     execution_validation = validate_execution_stats(execution_stats, required_paths)
 
@@ -243,8 +250,9 @@ def main() -> None:
         "cpu_submit_time_s": submit_time_s,
         "final_cuda_synchronize_s": synchronized_end - workload_end,
         "output_throughput_tok_s": output_throughput,
-        "peak_torch_allocated_mib": torch.cuda.max_memory_allocated() / 1024 / 1024,
-        "peak_torch_reserved_mib": torch.cuda.max_memory_reserved() / 1024 / 1024,
+        "peak_torch_allocated_mib": peak_allocated_bytes / 1024 / 1024,
+        "peak_torch_reserved_mib": peak_reserved_bytes / 1024 / 1024,
+        "cuda_memory_by_rank": cuda_memory_by_rank,
         "num_kvcache_blocks": llm.model_runner.config.num_kvcache_blocks,
         "kv_cache_storage": kv_cache_storage_metadata(llm.model_runner),
         "recurrent_state_storage": llm.model_runner.call(

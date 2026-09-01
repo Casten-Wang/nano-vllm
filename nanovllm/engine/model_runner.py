@@ -208,6 +208,21 @@ class ModelRunner:
     def get_cudagraph_capture_stats(self):
         return self.cudagraph_capture_stats
 
+    def reset_cuda_peak_memory_stats(self):
+        torch.cuda.reset_peak_memory_stats()
+
+    def get_cuda_memory_stats(self):
+        local = {
+            "rank": self.rank,
+            "peak_allocated_bytes": torch.cuda.max_memory_allocated(),
+            "peak_reserved_bytes": torch.cuda.max_memory_reserved(),
+        }
+        if self.world_size == 1:
+            return [local]
+        gathered = [None] * self.world_size
+        dist.all_gather_object(gathered, local)
+        return gathered
+
     def get_recurrent_state_stats(self):
         recurrent_bytes = 0
         convolution_bytes = 0

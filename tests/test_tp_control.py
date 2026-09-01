@@ -167,6 +167,71 @@ def make_runner(rank: int, events):
 
 
 class TPControlTest(unittest.TestCase):
+    def test_single_rank_cuda_memory_stats(self):
+        runner = object.__new__(ModelRunner)
+        runner.rank = 0
+        runner.world_size = 1
+        cuda = SimpleNamespace(
+            max_memory_allocated=lambda: 12_345,
+            max_memory_reserved=lambda: 67_890,
+        )
+        original_cuda = getattr(model_runner_module.torch, "cuda", None)
+        model_runner_module.torch.cuda = cuda
+        try:
+            stats = runner.get_cuda_memory_stats()
+        finally:
+            if original_cuda is None:
+                del model_runner_module.torch.cuda
+            else:
+                model_runner_module.torch.cuda = original_cuda
+
+        self.assertEqual(
+            stats,
+            [{
+                "rank": 0,
+                "peak_allocated_bytes": 12_345,
+                "peak_reserved_bytes": 67_890,
+            }],
+        )
+
+    def test_multi_rank_cuda_memory_stats_are_gathered(self):
+        runner = object.__new__(ModelRunner)
+        runner.rank = 0
+        runner.world_size = 2
+        cuda = SimpleNamespace(
+            max_memory_allocated=lambda: 100,
+            max_memory_reserved=lambda: 200,
+        )
+        original_cuda = getattr(model_runner_module.torch, "cuda", None)
+        original_gather = getattr(model_runner_module.dist, "all_gather_object", None)
+        model_runner_module.torch.cuda = cuda
+
+        def gather(output, local):
+            output[:] = [local, {
+                "rank": 1,
+                "peak_allocated_bytes": 150,
+                "peak_reserved_bytes": 250,
+            }]
+
+        model_runner_module.dist.all_gather_object = gather
+        try:
+            stats = runner.get_cuda_memory_stats()
+        finally:
+            if original_cuda is None:
+                del model_runner_module.torch.cuda
+            else:
+                model_runner_module.torch.cuda = original_cuda
+            if original_gather is None:
+                del model_runner_module.dist.all_gather_object
+            else:
+                model_runner_module.dist.all_gather_object = original_gather
+
+        self.assertEqual([item["rank"] for item in stats], [0, 1])
+        self.assertEqual(
+            max(item["peak_allocated_bytes"] for item in stats),
+            150,
+        )
+
     def test_worker_success_status_round_trip(self):
         status_buffer = bytearray(CONTROL_STATUS_SIZE)
         runner = make_runner(1, (FakeEvent(), FakeEvent(), status_buffer))
