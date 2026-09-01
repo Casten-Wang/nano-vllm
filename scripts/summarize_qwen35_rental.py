@@ -7,10 +7,49 @@ import json
 from pathlib import Path
 
 
+MOE_RUNTIME_MIN_THROUGHPUT_RATIO = 0.99
+MOE_RUNTIME_MIN_TPOT_SPEEDUP = 1.02
+MOE_RUNTIME_MAX_PEAK_EXTRA_MIB = 64.0
+MOE_RUNTIME_MAX_CV = 0.05
+
+
 def load_json(path: Path) -> dict:
     if not path.is_file():
         raise ValueError(f"required validation artifact is missing: {path}")
     return json.loads(path.read_text())
+
+
+def evaluate_moe_runtime_candidate(
+    *,
+    output_digest_matches: bool,
+    throughput_speedup: float,
+    tpot_speedup: float,
+    peak_memory_delta_mib: float,
+    max_coefficient_of_variation: float,
+) -> dict:
+    checks = {
+        "output_parity": output_digest_matches,
+        "stable_repeats": (
+            max_coefficient_of_variation <= MOE_RUNTIME_MAX_CV
+        ),
+        "throughput_non_regression": (
+            throughput_speedup >= MOE_RUNTIME_MIN_THROUGHPUT_RATIO
+        ),
+        "tpot_speedup": tpot_speedup >= MOE_RUNTIME_MIN_TPOT_SPEEDUP,
+        "peak_memory": (
+            peak_memory_delta_mib <= MOE_RUNTIME_MAX_PEAK_EXTRA_MIB
+        ),
+    }
+    return {
+        "promote_to_default": all(checks.values()),
+        "checks": checks,
+        "thresholds": {
+            "min_throughput_ratio": MOE_RUNTIME_MIN_THROUGHPUT_RATIO,
+            "min_tpot_speedup": MOE_RUNTIME_MIN_TPOT_SPEEDUP,
+            "max_peak_extra_mib": MOE_RUNTIME_MAX_PEAK_EXTRA_MIB,
+            "max_coefficient_of_variation": MOE_RUNTIME_MAX_CV,
+        },
+    }
 
 
 def summarize_moe_runtime(rows: list[dict]) -> dict[str, dict]:
@@ -45,7 +84,35 @@ def summarize_moe_runtime(rows: list[dict]) -> dict[str, dict]:
             )
         baseline_median = baseline["median"]
         candidate_median = candidate["median"]
+        stability_metrics = ("output_throughput_tok_s", "avg_tpot_s")
+        max_cv = max(
+            baseline["coefficient_of_variation"][metric]
+            for metric in stability_metrics
+        )
+        max_cv = max(
+            max_cv,
+            *(
+                candidate["coefficient_of_variation"][metric]
+                for metric in stability_metrics
+            ),
+        )
         tp_name = f"tp{key[0]}"
+        output_digest_matches = (
+            baseline["generated_token_ids_digest"]
+            == candidate["generated_token_ids_digest"]
+        )
+        throughput_speedup = (
+            candidate_median["output_throughput_tok_s"]
+            / baseline_median["output_throughput_tok_s"]
+        )
+        tpot_speedup = (
+            baseline_median["avg_tpot_s"]
+            / candidate_median["avg_tpot_s"]
+        )
+        peak_memory_delta_mib = (
+            candidate_median["peak_torch_allocated_mib"]
+            - baseline_median["peak_torch_allocated_mib"]
+        )
         comparisons[tp_name] = {
             "configuration": {
                 "recurrent_state_dtype": key[1],
@@ -53,21 +120,17 @@ def summarize_moe_runtime(rows: list[dict]) -> dict[str, dict]:
             },
             "baseline_label": baseline["label"],
             "candidate_label": candidate["label"],
-            "output_digest_matches": (
-                baseline["generated_token_ids_digest"]
-                == candidate["generated_token_ids_digest"]
-            ),
-            "throughput_speedup": (
-                candidate_median["output_throughput_tok_s"]
-                / baseline_median["output_throughput_tok_s"]
-            ),
-            "tpot_speedup": (
-                baseline_median["avg_tpot_s"]
-                / candidate_median["avg_tpot_s"]
-            ),
-            "peak_memory_delta_mib": (
-                candidate_median["peak_torch_allocated_mib"]
-                - baseline_median["peak_torch_allocated_mib"]
+            "output_digest_matches": output_digest_matches,
+            "throughput_speedup": throughput_speedup,
+            "tpot_speedup": tpot_speedup,
+            "peak_memory_delta_mib": peak_memory_delta_mib,
+            "max_coefficient_of_variation": max_cv,
+            "promotion": evaluate_moe_runtime_candidate(
+                output_digest_matches=output_digest_matches,
+                throughput_speedup=throughput_speedup,
+                tpot_speedup=tpot_speedup,
+                peak_memory_delta_mib=peak_memory_delta_mib,
+                max_coefficient_of_variation=max_cv,
             ),
         }
     return comparisons
@@ -162,6 +225,15 @@ def summarize(run_dir: Path, run_id: str) -> dict:
         "single_commit": len(commits) == 1,
         "single_checkpoint": len(checkpoint_digests) == 1,
     }
+    microbenchmark_promoted = all(
+        item["promotion"]["promote_to_runtime"]
+        for item in kernels.values()
+    )
+    runtime_promoted = all(
+        item["promotion"]["promote_to_default"]
+        for item in moe_runtime.values()
+    )
+    same_tp_coverage = set(kernels) == set(moe_runtime)
     return {
         "run_id": run_id,
         "model": quality["model"],
@@ -178,10 +250,14 @@ def summarize(run_dir: Path, run_id: str) -> dict:
             "comparisons_by_tp": quality["comparisons_by_tp"],
         },
         "graph_safe_moe": {
-            "all_tp_promoted": all(
-                item["promotion"]["promote_to_runtime"]
-                for item in kernels.values()
+            "all_tp_promoted": (
+                same_tp_coverage
+                and microbenchmark_promoted
+                and runtime_promoted
             ),
+            "same_tp_coverage": same_tp_coverage,
+            "microbenchmark_all_tp_promoted": microbenchmark_promoted,
+            "runtime_all_tp_promoted": runtime_promoted,
             "by_tp": kernels,
             "runtime_by_tp": moe_runtime,
         },

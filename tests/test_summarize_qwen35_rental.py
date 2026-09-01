@@ -39,6 +39,10 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
                 "avg_tpot_s": 0.2,
                 "peak_torch_allocated_mib": 8,
             },
+            "coefficient_of_variation": {
+                "output_throughput_tok_s": 0.01,
+                "avg_tpot_s": 0.02,
+            },
         },
         {
             "label": "batched",
@@ -55,6 +59,10 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
                 "output_throughput_tok_s": 20,
                 "avg_tpot_s": 0.1,
                 "peak_torch_allocated_mib": 12,
+            },
+            "coefficient_of_variation": {
+                "output_throughput_tok_s": 0.02,
+                "avg_tpot_s": 0.01,
             },
         },
     ]
@@ -111,3 +119,18 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     assert runtime["throughput_speedup"] == 2.0
     assert runtime["tpot_speedup"] == 2.0
     assert runtime["peak_memory_delta_mib"] == 4
+    assert runtime["promotion"]["promote_to_default"]
+
+
+def test_runtime_promotion_rejects_unstable_or_regressing_candidate():
+    result = MODULE.evaluate_moe_runtime_candidate(
+        output_digest_matches=True,
+        throughput_speedup=0.98,
+        tpot_speedup=1.10,
+        peak_memory_delta_mib=4.0,
+        max_coefficient_of_variation=0.06,
+    )
+
+    assert not result["promote_to_default"]
+    assert not result["checks"]["throughput_non_regression"]
+    assert not result["checks"]["stable_repeats"]
