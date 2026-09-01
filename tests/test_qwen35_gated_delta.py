@@ -5,6 +5,7 @@ import types
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
 import torch
 import torch.nn.functional as F
 
@@ -24,6 +25,7 @@ SPEC.loader.exec_module(qwen35_gated_delta)
 Qwen35RecurrentStatePool = qwen35_gated_delta.Qwen35RecurrentStatePool
 Qwen35GatedDeltaNet = qwen35_gated_delta.Qwen35GatedDeltaNet
 causal_conv1d_scan = qwen35_gated_delta.causal_conv1d_scan
+chunk_gated_delta_rule = qwen35_gated_delta.chunk_gated_delta_rule
 recurrent_gated_delta_rule = qwen35_gated_delta.recurrent_gated_delta_rule
 
 
@@ -64,6 +66,26 @@ def test_single_token_decode_matches_last_prefill_token():
 
     torch.testing.assert_close(torch.cat((prefix, decoded), dim=1), expected)
     torch.testing.assert_close(state, expected_state)
+
+
+@pytest.mark.parametrize("sequence_length", [1, 5, 17, 64, 65])
+def test_chunk_rule_matches_recurrent_oracle(sequence_length):
+    q, k, v, decay, beta = inputs(5)
+    repeats = (sequence_length + q.shape[1] - 1) // q.shape[1]
+    q, k, v, decay, beta = (
+        tensor.repeat(1, repeats, 1, 1)[:, :sequence_length]
+        if tensor.ndim == 4
+        else tensor.repeat(1, repeats, 1)[:, :sequence_length]
+        for tensor in (q, k, v, decay, beta)
+    )
+    expected, expected_state = recurrent_gated_delta_rule(q, k, v, decay, beta)
+
+    actual, actual_state = chunk_gated_delta_rule(
+        q, k, v, decay, beta, chunk_size=16
+    )
+
+    torch.testing.assert_close(actual, expected, rtol=2e-4, atol=2e-4)
+    torch.testing.assert_close(actual_state, expected_state, rtol=2e-4, atol=2e-4)
 
 
 def test_causal_convolution_chunk_and_decode_are_equivalent():
