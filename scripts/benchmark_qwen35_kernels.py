@@ -240,21 +240,21 @@ def expert_dispatch_reference(
     return output
 
 
-def benchmark_expert_dispatch(args, device, dtype) -> dict:
+def benchmark_expert_dispatch(args, device, dtype, token_count: int) -> dict:
     local_intermediate_size = args.moe_intermediate_size // args.tp_size
     hidden = torch.randn(
-        args.expert_tokens,
+        token_count,
         args.hidden_size,
         device=device,
         dtype=dtype,
     )
     topk_ids = torch.randint(
         args.num_experts,
-        (args.expert_tokens, args.top_k),
+        (token_count, args.top_k),
         device=device,
     )
     topk_weights = torch.rand(
-        args.expert_tokens,
+        token_count,
         args.top_k,
         device=device,
         dtype=dtype,
@@ -310,8 +310,8 @@ def benchmark_expert_dispatch(args, device, dtype) -> dict:
     )
     result.update(
         {
-            "tokens": args.expert_tokens,
-            "routes": args.expert_tokens * args.top_k,
+            "tokens": token_count,
+            "routes": token_count * args.top_k,
             "active_experts": torch.unique(topk_ids).numel(),
             "local_intermediate_size": local_intermediate_size,
             "estimated_model_moe_ms": (
@@ -320,6 +320,21 @@ def benchmark_expert_dispatch(args, device, dtype) -> dict:
         }
     )
     return result
+
+
+def benchmark_expert_dispatch_sweep(args, device, dtype) -> dict[str, dict]:
+    """Measure decode- through prefill-sized expert routing workloads."""
+
+    return {
+        str(token_count): benchmark_expert_dispatch(
+            args,
+            device,
+            dtype,
+            token_count,
+        )
+        for token_count in args.expert_token_counts
+    }
+
 
 def benchmark_rmsnorm(args, device, dtype) -> dict:
     x = torch.randn(
@@ -562,7 +577,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--hidden-size", type=int, default=2048)
     parser.add_argument("--moe-intermediate-size", type=int, default=512)
     parser.add_argument("--num-hidden-layers", type=int, default=40)
-    parser.add_argument("--expert-tokens", type=int, default=32)
+    parser.add_argument(
+        "--expert-token-counts",
+        type=int,
+        nargs="+",
+        default=(1, 8, 32, 128, 512),
+        metavar="N",
+        help="MoE token counts to scan from decode to prefill workloads",
+    )
     parser.add_argument("--prefill-batch", type=int, default=1)
     parser.add_argument("--prefill-tokens", type=int, default=512)
     parser.add_argument("--decode-batch", type=int, default=32)
@@ -593,7 +615,6 @@ def main() -> None:
         "hidden_size": args.hidden_size,
         "moe_intermediate_size": args.moe_intermediate_size,
         "num_hidden_layers": args.num_hidden_layers,
-        "expert_tokens": args.expert_tokens,
         "prefill_batch": args.prefill_batch,
         "prefill_tokens": args.prefill_tokens,
         "decode_batch": args.decode_batch,
@@ -603,6 +624,8 @@ def main() -> None:
         "repeats": args.repeats,
     }
     invalid = [name for name, value in positive_values.items() if value <= 0]
+    if any(value <= 0 for value in args.expert_token_counts):
+        invalid.append("expert_token_counts")
     if invalid:
         raise ValueError(f"benchmark values must be positive: {', '.join(invalid)}")
     if args.top_k > args.num_experts:
@@ -638,7 +661,7 @@ def main() -> None:
         },
         "results": {
             "router_topk_first": benchmark_router(args, device, dtype),
-            "expert_dispatch_torch": benchmark_expert_dispatch(
+            "expert_dispatch_torch": benchmark_expert_dispatch_sweep(
                 args,
                 device,
                 dtype,

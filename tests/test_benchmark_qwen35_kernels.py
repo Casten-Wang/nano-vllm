@@ -1,5 +1,6 @@
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
+from types import SimpleNamespace
 
 import torch
 
@@ -51,3 +52,24 @@ def test_expert_dispatch_matches_naive_route_accumulation():
         down,
     )
     torch.testing.assert_close(actual, reference)
+
+
+def test_expert_dispatch_sweep_preserves_requested_token_counts(monkeypatch):
+    calls = []
+
+    def fake_benchmark(args, device, dtype, token_count):
+        calls.append(token_count)
+        return {"tokens": token_count}
+
+    monkeypatch.setattr(MODULE, "benchmark_expert_dispatch", fake_benchmark)
+    args = SimpleNamespace(expert_token_counts=(1, 8, 32, 128, 512))
+
+    result = MODULE.benchmark_expert_dispatch_sweep(
+        args,
+        torch.device("cpu"),
+        torch.float32,
+    )
+
+    assert calls == [1, 8, 32, 128, 512]
+    assert list(result) == ["1", "8", "32", "128", "512"]
+    assert result["128"] == {"tokens": 128}
