@@ -88,6 +88,10 @@ def audit_model_headers(model, headers: dict[str, dict]) -> dict:
     skipped = []
     unexpected = []
     shape_errors = []
+    mapped_checkpoint_bytes = 0
+    estimated_local_payload_bytes = 0
+    lazy_tensor_count = 0
+    full_tensor_count = 0
     for source_name in sorted(headers):
         mapped = map_name(source_name)
         if mapped is None:
@@ -99,7 +103,7 @@ def audit_model_headers(model, headers: dict[str, dict]) -> dict:
             unexpected.append({"source": source_name, "mapped": target})
             continue
         try:
-            validate_weight_shape(
+            source_bytes, local_bytes, lazy = validate_weight_shape(
                 model,
                 checkpoint,
                 source_name,
@@ -111,6 +115,12 @@ def audit_model_headers(model, headers: dict[str, dict]) -> dict:
                 {"source": source_name, "mapped": target, "error": str(error)}
             )
             continue
+        mapped_checkpoint_bytes += source_bytes
+        estimated_local_payload_bytes += local_bytes
+        if lazy:
+            lazy_tensor_count += 1
+        else:
+            full_tensor_count += 1
         loaded.add(target)
     missing = sorted(expected - loaded)
     return {
@@ -121,6 +131,20 @@ def audit_model_headers(model, headers: dict[str, dict]) -> dict:
         "unexpected_weights": unexpected,
         "shape_errors": shape_errors,
         "local_parameter_bytes": parameter_storage_bytes(model),
+        "checkpoint_loading": {
+            "mapped_checkpoint_bytes": mapped_checkpoint_bytes,
+            "estimated_local_payload_bytes": estimated_local_payload_bytes,
+            "estimated_avoided_payload_bytes": (
+                mapped_checkpoint_bytes - estimated_local_payload_bytes
+            ),
+            "estimated_local_payload_fraction": (
+                estimated_local_payload_bytes / mapped_checkpoint_bytes
+                if mapped_checkpoint_bytes
+                else 0.0
+            ),
+            "lazy_tensor_count": lazy_tensor_count,
+            "full_tensor_count": full_tensor_count,
+        },
         "valid": not missing and not unexpected and not shape_errors,
     }
 
