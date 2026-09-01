@@ -50,6 +50,43 @@ def test_router_selects_and_renormalizes_topk_experts():
     assert torch.allclose(weights.sum(dim=-1), torch.ones(2))
 
 
+def test_router_topk_first_matches_full_softmax_reference():
+    torch.manual_seed(31)
+    router = qwen35_moe.Qwen35TopKRouter(16, 256, 8).to(torch.bfloat16)
+    router.weight.data.normal_(mean=0.0, std=0.2)
+    hidden = torch.randn(19, 16, dtype=torch.bfloat16)
+
+    weights, ids = router(hidden)
+    logits = torch.nn.functional.linear(hidden, router.weight)
+    probabilities = torch.softmax(logits.float(), dim=-1)
+    expected_weights, expected_ids = torch.topk(probabilities, 8, dim=-1)
+    expected_weights /= expected_weights.sum(dim=-1, keepdim=True)
+
+    assert torch.equal(ids, expected_ids)
+    torch.testing.assert_close(
+        weights.float(),
+        expected_weights,
+        rtol=4e-3,
+        atol=4e-3,
+    )
+
+
+def test_router_softmax_only_materializes_selected_experts():
+    router = qwen35_moe.Qwen35TopKRouter(4, 256, 8)
+    hidden = torch.randn(11, 4)
+    softmax_shapes = []
+    original_softmax = qwen35_moe.torch.softmax
+
+    def record_softmax_shape(tensor, *args, **kwargs):
+        softmax_shapes.append(tuple(tensor.shape))
+        return original_softmax(tensor, *args, **kwargs)
+
+    with patch.object(qwen35_moe.torch, "softmax", side_effect=record_softmax_shape):
+        router(hidden)
+
+    assert softmax_shapes == [(11, 8)]
+
+
 def test_expert_reference_path_matches_manual_mixture():
     experts = make_experts()
     experts.gate_up_proj.data.fill_(1.0)

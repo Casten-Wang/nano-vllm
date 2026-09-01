@@ -39,9 +39,11 @@ class Qwen35TopKRouter(nn.Module):
     def forward(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         flat_states = hidden_states.reshape(-1, self.hidden_size)
         router_logits = F.linear(flat_states, self.weight)
-        router_probs = torch.softmax(router_logits.float(), dim=-1)
-        topk_weights, topk_ids = torch.topk(router_probs, self.top_k, dim=-1)
-        topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
+        # The full-softmax denominator cancels when selected expert weights
+        # are renormalized. Select first so FP32 softmax only materializes
+        # ``top_k`` values per token instead of ``num_experts`` values.
+        topk_logits, topk_ids = torch.topk(router_logits, self.top_k, dim=-1)
+        topk_weights = torch.softmax(topk_logits.float(), dim=-1)
         return topk_weights.to(hidden_states.dtype), topk_ids
 
 
