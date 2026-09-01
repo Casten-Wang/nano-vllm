@@ -20,8 +20,9 @@ class Qwen35RMSNorm(nn.Module):
         self.weight = nn.Parameter(torch.zeros(hidden_size))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        normalized = x.float() * torch.rsqrt(
-            x.float().pow(2).mean(dim=-1, keepdim=True) + self.eps
+        x_float = x.float()
+        normalized = x_float * torch.rsqrt(
+            x_float.pow(2).mean(dim=-1, keepdim=True) + self.eps
         )
         return (normalized * (1.0 + self.weight.float())).to(x.dtype)
 
