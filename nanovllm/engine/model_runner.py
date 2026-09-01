@@ -430,11 +430,23 @@ class ModelRunner:
         model_spec = self.config.model_spec
         if model_spec is None or not model_spec.is_hybrid:
             return
+        model_config = self.config.model_config
+        if model_config is None:
+            raise RuntimeError("model configuration was not initialized")
+        recurrent_dtype = (
+            torch.float32
+            if self.config.recurrent_state_dtype == "float32"
+            else model_config.dtype
+        )
         allocated_layers = 0
         for module in self.model.modules():
             allocate = getattr(module, "allocate_state_cache", None)
             if allocate is not None and callable(allocate):
-                allocate(self.config.max_num_seqs, torch.cuda.current_device())
+                allocate(
+                    self.config.max_num_seqs,
+                    torch.cuda.current_device(),
+                    recurrent_dtype=recurrent_dtype,
+                )
                 allocated_layers += 1
         if allocated_layers != len(model_spec.linear_attention_layers):
             raise RuntimeError(

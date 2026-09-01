@@ -138,6 +138,7 @@ class Qwen35RecurrentStatePool:
         conv_kernel_size: int,
         *,
         device: torch.device | str,
+        recurrent_dtype: torch.dtype = torch.float32,
         convolution_dtype: torch.dtype = torch.float32,
     ) -> None:
         if min(num_layers, num_slots, num_heads, key_dim, value_dim) <= 0:
@@ -150,7 +151,7 @@ class Qwen35RecurrentStatePool:
             num_heads,
             key_dim,
             value_dim,
-            dtype=torch.float32,
+            dtype=recurrent_dtype,
             device=device,
         )
         self.convolution = torch.zeros(
@@ -318,7 +319,13 @@ class Qwen35GatedDeltaNet(nn.Module):
         )
         param.data.copy_(local.unsqueeze(1))
 
-    def allocate_state_cache(self, num_slots: int, device: torch.device | str) -> None:
+    def allocate_state_cache(
+        self,
+        num_slots: int,
+        device: torch.device | str,
+        *,
+        recurrent_dtype: torch.dtype = torch.float32,
+    ) -> None:
         self.state_pool = Qwen35RecurrentStatePool(
             1,
             num_slots,
@@ -328,6 +335,7 @@ class Qwen35GatedDeltaNet(nn.Module):
             self.local_conv_dim,
             self.conv_kernel_size,
             device=device,
+            recurrent_dtype=recurrent_dtype,
             convolution_dtype=self.in_proj_qkv.weight.dtype,
         )
 

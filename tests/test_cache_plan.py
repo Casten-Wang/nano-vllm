@@ -82,6 +82,17 @@ def test_qwen35_tp8_is_supported_with_replicated_kv_heads():
     assert plan.recurrent_bytes_per_sequence == 7_864_320
 
 
+def test_model_dtype_recurrent_storage_halves_state_memory():
+    fp32 = cache_plan_module.plan_cache_memory(qwen35_spec(), 4)
+    bf16 = cache_plan_module.plan_cache_memory(
+        qwen35_spec(),
+        4,
+        recurrent_dtype_bytes=2,
+    )
+
+    assert bf16.recurrent_bytes_per_sequence * 2 == fp32.recurrent_bytes_per_sequence
+
+
 def test_invalid_tensor_parallel_size_is_rejected():
     try:
         cache_plan_module.plan_cache_memory(qwen35_spec(), 3)

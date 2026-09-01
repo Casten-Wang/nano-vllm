@@ -27,6 +27,7 @@ class Config:
     enable_dynamic_chunked_prefill: bool = False
     int8_partitioned_decode_threshold: int = 8192
     int8_partitioned_decode_partition_size: int = 512
+    recurrent_state_dtype: str = "float32"
     distributed_port: int | None = None
     shared_memory_name: str | None = None
 
@@ -57,6 +58,8 @@ class Config:
             raise ValueError("int8_partitioned_decode_threshold must be positive")
         if self.int8_partitioned_decode_partition_size <= 0:
             raise ValueError("int8_partitioned_decode_partition_size must be positive")
+        if self.recurrent_state_dtype not in ("float32", "model"):
+            raise ValueError("recurrent_state_dtype must be 'float32' or 'model'")
         if self.distributed_port is not None and not 1 <= self.distributed_port <= 65535:
             raise ValueError("distributed_port must be in [1, 65535]")
         if self.shared_memory_name is not None and not self.shared_memory_name:

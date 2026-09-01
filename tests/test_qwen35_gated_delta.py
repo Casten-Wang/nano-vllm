@@ -115,6 +115,25 @@ def test_state_pool_isolates_updates_and_resets_reused_slots():
     assert torch.count_nonzero(pool.recurrent[0, 1]) > 0
 
 
+def test_state_pool_can_store_recurrent_state_in_model_dtype():
+    pool = Qwen35RecurrentStatePool(
+        2,
+        4,
+        3,
+        4,
+        6,
+        14,
+        4,
+        device="cpu",
+        recurrent_dtype=torch.bfloat16,
+        convolution_dtype=torch.bfloat16,
+    )
+
+    assert pool.recurrent.dtype == torch.bfloat16
+    assert pool.convolution.dtype == torch.bfloat16
+    assert pool.recurrent.element_size() == 2
+
+
 def tiny_config():
     return SimpleNamespace(
         hidden_size=4,
