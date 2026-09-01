@@ -107,8 +107,15 @@ class QKVParallelLinear(ColumnParallelLinear):
         total_num_kv_heads = total_num_kv_heads or total_num_heads
         self.head_size = head_size
         self.num_heads = divide(total_num_heads, tp_size)
-        self.num_kv_heads = divide(total_num_kv_heads, tp_size)
-        output_size = (total_num_heads + 2 * total_num_kv_heads) * self.head_size
+        if tp_size >= total_num_kv_heads:
+            self.num_kv_heads = 1
+            self.num_kv_head_replicas = divide(tp_size, total_num_kv_heads)
+        else:
+            self.num_kv_heads = divide(total_num_kv_heads, tp_size)
+            self.num_kv_head_replicas = 1
+        output_size = (
+            self.num_heads + 2 * self.num_kv_heads
+        ) * self.head_size * tp_size
         super().__init__(hidden_size, output_size, bias)
 
     def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor, loaded_shard_id: str):
@@ -124,7 +131,16 @@ class QKVParallelLinear(ColumnParallelLinear):
             shard_size = self.num_kv_heads * self.head_size
             shard_offset = self.num_heads * self.head_size + self.num_kv_heads * self.head_size
         param_data = param_data.narrow(self.tp_dim, shard_offset, shard_size)
-        loaded_weight = loaded_weight.chunk(self.tp_size, self.tp_dim)[self.tp_rank]
+        shard_rank = (
+            self.tp_rank
+            if loaded_shard_id == "q"
+            else self.tp_rank // self.num_kv_head_replicas
+        )
+        loaded_weight = loaded_weight.narrow(
+            self.tp_dim,
+            shard_rank * shard_size,
+            shard_size,
+        )
         param_data.copy_(loaded_weight)
 
 
