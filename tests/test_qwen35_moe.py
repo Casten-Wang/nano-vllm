@@ -28,15 +28,22 @@ linear = load_module("nanovllm.layers.linear", "nanovllm/layers/linear.py")
 qwen35_moe = load_module("qwen35_moe_under_test", "nanovllm/models/qwen35_moe.py")
 
 
-def make_experts(rank: int = 0, world_size: int = 1):
+def make_experts(
+    rank: int = 0,
+    world_size: int = 1,
+    *,
+    hidden_size: int = 2,
+    intermediate_size: int = 4,
+    num_experts: int = 2,
+):
     with (
         patch.object(qwen35_moe.dist, "get_world_size", return_value=world_size),
         patch.object(qwen35_moe.dist, "get_rank", return_value=rank),
     ):
         return qwen35_moe.Qwen35Experts(
-            hidden_size=2,
-            intermediate_size=4,
-            num_experts=2,
+            hidden_size=hidden_size,
+            intermediate_size=intermediate_size,
+            num_experts=num_experts,
         )
 
 
@@ -155,6 +162,52 @@ def test_tensor_parallel_expert_outputs_sum_to_single_rank_reference():
         actual = sum(rank(hidden, topk_ids, topk_weights) for rank in ranks)
 
     torch.testing.assert_close(actual, expected, rtol=2e-5, atol=2e-5)
+
+
+@torch.no_grad()
+def test_official_expert_count_matches_across_tp4_and_tp8():
+    torch.manual_seed(41)
+    kwargs = {
+        "hidden_size": 4,
+        "intermediate_size": 8,
+        "num_experts": 256,
+    }
+    source_gate_up = torch.randn(256, 16, 4)
+    source_down = torch.randn(256, 4, 8)
+    hidden = torch.randn(5, 4)
+    topk_ids = torch.tensor(
+        [
+            [0, 1, 2, 3, 4, 5, 6, 7],
+            [31, 63, 95, 127, 159, 191, 223, 255],
+            [8, 16, 32, 64, 96, 128, 192, 224],
+            [255, 224, 192, 128, 64, 32, 16, 8],
+            [7, 6, 5, 4, 3, 2, 1, 0],
+        ]
+    )
+    topk_weights = torch.rand(5, 8)
+    topk_weights /= topk_weights.sum(dim=-1, keepdim=True)
+
+    def load(experts):
+        experts._load_gate_up(experts.gate_up_proj, source_gate_up)
+        experts._load_down(experts.down_proj, source_down)
+
+    full = make_experts(world_size=1, **kwargs)
+    load(full)
+    expected = full(hidden, topk_ids, topk_weights)
+
+    for tp_size in (4, 8):
+        ranks = [
+            make_experts(rank=rank, world_size=tp_size, **kwargs)
+            for rank in range(tp_size)
+        ]
+        for rank_experts in ranks:
+            load(rank_experts)
+        with patch.object(qwen35_moe.dist, "all_reduce", return_value=None):
+            actual = sum(
+                rank_experts(hidden, topk_ids, topk_weights)
+                for rank_experts in ranks
+            )
+        torch.testing.assert_close(actual, expected, rtol=3e-5, atol=3e-5)
 
 
 def test_expert_weights_are_sharded_and_replicable_across_tp_ranks():
