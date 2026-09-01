@@ -21,6 +21,7 @@ if str(ROOT) not in sys.path:
 from nanovllm.models.model_spec import resolve_model_spec
 from nanovllm.models.registry import create_model
 from nanovllm.utils.loader import resolve_packed_parameter
+from nanovllm.benchmark_metadata import checkpoint_manifest_metadata
 
 
 def audit_checkpoint_mapping(model: torch.nn.Module, model_path: str | Path) -> dict:
@@ -114,14 +115,19 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    checkpoint_manifest = checkpoint_manifest_metadata(args.model)
     results = {}
     for tp_size in args.tp_sizes:
         model = instantiate_meta_model(args.model, tp_size)
         results[f"tp{tp_size}"] = audit_checkpoint_mapping(model, args.model)
         del model
+    final_checkpoint_manifest = checkpoint_manifest_metadata(args.model)
+    if final_checkpoint_manifest["digest"] != checkpoint_manifest["digest"]:
+        raise RuntimeError("checkpoint files changed during the mapping audit")
 
     report = {
         "model": str(Path(args.model).expanduser().resolve()),
+        "checkpoint_manifest": checkpoint_manifest,
         "tensor_parallel_sizes": list(args.tp_sizes),
         "results": results,
         "valid": all(result["valid"] for result in results.values()),

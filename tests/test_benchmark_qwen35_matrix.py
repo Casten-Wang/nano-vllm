@@ -28,6 +28,8 @@ def args(**overrides):
         "result_dir": "benchmark_results/matrix",
         "warmup": True,
         "repeats": 3,
+        "tp_sizes": (4, 8),
+        "checkpoint_audit": True,
     }
     values.update(overrides)
     return Namespace(**values)
@@ -83,6 +85,17 @@ def test_case_command_is_eager_and_fully_identified():
     assert command[command.index("--kv-cache-dtype") + 1] == "int8"
     assert command[command.index("--name") + 1] == "qwen35_tp8_state-model_kv-int8_r2"
     assert "--enforce-eager" in command
+
+
+def test_checkpoint_audit_covers_selected_tp_sizes():
+    command = MODULE.checkpoint_audit_command(args())
+
+    assert command[1].endswith("scripts/audit_checkpoint_mapping.py")
+    assert command[command.index("--model") + 1] == "/models/qwen35"
+    assert command[command.index("--tp-sizes") + 1] == "4,8"
+    assert command[command.index("--output") + 1].endswith(
+        "benchmark_results/matrix/checkpoint_mapping_audit.json"
+    )
 
 
 def test_no_warmup_is_forwarded():
