@@ -206,6 +206,57 @@ def test_chunk_rule_matches_recurrent_oracle(sequence_length):
     torch.testing.assert_close(actual_state, expected_state, rtol=2e-4, atol=2e-4)
 
 
+@pytest.mark.parametrize("sequence_length", [1, 17, 65])
+def test_chunk_rule_broadcasts_key_heads_without_replication(sequence_length):
+    torch.manual_seed(47)
+    query = torch.randn(2, sequence_length, 2, 4)
+    key = torch.randn_like(query)
+    value = torch.randn(2, sequence_length, 6, 3)
+    decay = -torch.rand(2, sequence_length, 6)
+    beta = torch.rand(2, sequence_length, 6)
+    state = torch.randn(2, 6, 4, 3)
+
+    expected, expected_state = recurrent_gated_delta_rule(
+        query.repeat_interleave(3, dim=2),
+        key.repeat_interleave(3, dim=2),
+        value,
+        decay,
+        beta,
+        state,
+    )
+    actual, actual_state = chunk_gated_delta_rule(
+        query,
+        key,
+        value,
+        decay,
+        beta,
+        state,
+        chunk_size=16,
+    )
+
+    torch.testing.assert_close(actual, expected, rtol=2e-4, atol=2e-4)
+    torch.testing.assert_close(actual_state, expected_state, rtol=2e-4, atol=2e-4)
+
+
+def test_grouped_chunk_rule_handles_empty_prefill():
+    query = torch.empty(2, 0, 2, 4, dtype=torch.bfloat16)
+    value = torch.empty(2, 0, 6, 3, dtype=torch.bfloat16)
+    state = torch.randn(2, 6, 4, 3)
+
+    output, next_state = chunk_gated_delta_rule(
+        query,
+        query,
+        value,
+        torch.empty(2, 0, 6),
+        torch.empty(2, 0, 6, dtype=torch.bfloat16),
+        state,
+    )
+
+    assert output.shape == value.shape
+    assert output.dtype == value.dtype
+    torch.testing.assert_close(next_state, state)
+
+
 def test_causal_convolution_chunk_and_decode_are_equivalent():
     generator = torch.Generator().manual_seed(2)
     x = torch.randn(2, 6, 7, generator=generator)

@@ -488,6 +488,96 @@ def benchmark_delta_decode(
     return result
 
 
+def benchmark_delta_prefill_head_groups(
+    args,
+    device,
+    dtype,
+    local_key_heads,
+    local_value_heads,
+) -> dict:
+    query = torch.randn(
+        args.prefill_batch,
+        args.prefill_tokens,
+        local_key_heads,
+        args.key_head_dim,
+        device=device,
+        dtype=dtype,
+    )
+    key = torch.randn_like(query)
+    value = torch.randn(
+        args.prefill_batch,
+        args.prefill_tokens,
+        local_value_heads,
+        args.value_head_dim,
+        device=device,
+        dtype=dtype,
+    )
+    decay = -torch.rand(
+        args.prefill_batch,
+        args.prefill_tokens,
+        local_value_heads,
+        device=device,
+    )
+    beta = torch.rand(
+        args.prefill_batch,
+        args.prefill_tokens,
+        local_value_heads,
+        device=device,
+        dtype=dtype,
+    )
+    state = torch.randn(
+        args.prefill_batch,
+        local_value_heads,
+        args.key_head_dim,
+        args.value_head_dim,
+        device=device,
+        dtype=dtype,
+    )
+    repeat_factor = local_value_heads // local_key_heads
+
+    def reference():
+        return GDN.chunk_gated_delta_rule(
+            query.repeat_interleave(repeat_factor, dim=2),
+            key.repeat_interleave(repeat_factor, dim=2),
+            value,
+            decay,
+            beta,
+            state,
+        )
+
+    def candidate():
+        return GDN.chunk_gated_delta_rule(
+            query,
+            key,
+            value,
+            decay,
+            beta,
+            state,
+        )
+
+    result = compare(
+        reference,
+        candidate,
+        device=device,
+        warmup=args.warmup,
+        iterations=args.iterations,
+        repeats=args.repeats,
+    )
+    repeated_qk_elements = (
+        2
+        * args.prefill_batch
+        * args.prefill_tokens
+        * (local_value_heads - local_key_heads)
+        * args.key_head_dim
+    )
+    result["avoided_qk_replication_mib"] = (
+        repeated_qk_elements * torch.empty((), dtype=dtype).element_size()
+        / 1024
+        / 1024
+    )
+    return result
+
+
 def evaluate_recurrent_storage_drift(
     args,
     device,
@@ -697,6 +787,13 @@ def main() -> None:
                 device,
                 dtype,
                 local_conv_channels,
+            ),
+            "grouped_delta_prefill": benchmark_delta_prefill_head_groups(
+                args,
+                device,
+                dtype,
+                local_key_heads,
+                local_value_heads,
             ),
             "specialized_delta_decode": benchmark_delta_decode(
                 args,

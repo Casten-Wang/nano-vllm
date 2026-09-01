@@ -252,54 +252,102 @@ def chunk_gated_delta_rule(
         raise ValueError("chunk_size must be positive")
     if query.shape != key.shape or query.ndim != 4 or value.ndim != 4:
         raise ValueError("query, key, and value shapes are inconsistent")
-    if query.shape[:3] != value.shape[:3]:
-        raise ValueError("query/key and value batch, sequence, heads must match")
-    if log_decay.shape != query.shape[:3] or beta.shape != query.shape[:3]:
-        raise ValueError("decay and beta must have shape [batch, sequence, heads]")
-    if query.shape[1] == 0:
-        return recurrent_gated_delta_rule(
-            query, key, value, log_decay, beta, initial_state
+    if query.shape[:2] != value.shape[:2]:
+        raise ValueError("query/key and value batch and sequence must match")
+    if query.shape[2] <= 0 or value.shape[2] % query.shape[2]:
+        raise ValueError("value heads must be a multiple of key heads")
+    if log_decay.shape != value.shape[:3] or beta.shape != value.shape[:3]:
+        raise ValueError(
+            "decay and beta must have shape [batch, sequence, value_heads]"
         )
+    if query.shape[1] == 0:
+        expected_state_shape = (
+            query.shape[0],
+            value.shape[2],
+            query.shape[3],
+            value.shape[3],
+        )
+        if initial_state is None:
+            state = torch.zeros(
+                expected_state_shape,
+                dtype=torch.float32,
+                device=query.device,
+            )
+        elif tuple(initial_state.shape) != expected_state_shape:
+            raise ValueError(
+                f"invalid recurrent state shape: {tuple(initial_state.shape)}; "
+                f"expected {expected_state_shape}"
+            )
+        else:
+            state = initial_state.float()
+        return value.new_empty(value.shape), state
 
     chunk_size = effective_chunk_size(query.shape[1], chunk_size)
 
     input_dtype = query.dtype
-    batch_size, sequence_length, num_heads, key_dim = query.shape
+    batch_size, sequence_length, key_heads, key_dim = query.shape
+    value_heads = value.shape[2]
+    groups = value_heads // key_heads
     value_dim = value.shape[-1]
-    query, key, value = (
+    query, key = (
         tensor.transpose(1, 2).float().contiguous()
-        for tensor in (query, key, value)
+        for tensor in (query, key)
     )
-    beta = beta.transpose(1, 2).float().contiguous()
-    decay = log_decay.transpose(1, 2).float().contiguous()
+    value = value.transpose(1, 2).float().reshape(
+        batch_size,
+        key_heads,
+        groups,
+        sequence_length,
+        value_dim,
+    )
+    beta = beta.transpose(1, 2).float().reshape(
+        batch_size,
+        key_heads,
+        groups,
+        sequence_length,
+    )
+    decay = log_decay.transpose(1, 2).float().reshape_as(beta)
     query = l2_normalize(query) / (key_dim**0.5)
     key = l2_normalize(key)
 
     pad_size = (-sequence_length) % chunk_size
-    query, key, value = (
-        F.pad(tensor, (0, 0, 0, pad_size))
-        for tensor in (query, key, value)
+    query, key = (
+        F.pad(tensor, (0, 0, 0, pad_size)) for tensor in (query, key)
     )
+    value = F.pad(value, (0, 0, 0, pad_size))
     beta, decay = (
         F.pad(tensor, (0, pad_size)) for tensor in (beta, decay)
     )
     total_length = sequence_length + pad_size
     num_chunks = total_length // chunk_size
     value_beta = value * beta.unsqueeze(-1)
-    key_beta = key * beta.unsqueeze(-1)
-    query, key, key_beta, value_beta = (
+    key_beta = key.unsqueeze(2) * beta.unsqueeze(-1)
+    query, key = (
         tensor.reshape(
             batch_size,
-            num_heads,
+            key_heads,
             num_chunks,
             chunk_size,
             tensor.shape[-1],
         )
-        for tensor in (query, key, key_beta, value_beta)
+        .unsqueeze(2)
+        for tensor in (query, key)
+    )
+    key_beta, value_beta = (
+        tensor.reshape(
+            batch_size,
+            key_heads,
+            groups,
+            num_chunks,
+            chunk_size,
+            tensor.shape[-1],
+        )
+        for tensor in (key_beta, value_beta)
     )
     decay = decay.reshape(
         batch_size,
-        num_heads,
+        key_heads,
+        groups,
         num_chunks,
         chunk_size,
     )
@@ -332,14 +380,26 @@ def chunk_gated_delta_rule(
     if initial_state is None:
         state = torch.zeros(
             batch_size,
-            num_heads,
+            value_heads,
             key_dim,
             value_dim,
             dtype=torch.float32,
             device=query.device,
         )
     else:
+        expected_state_shape = (
+            batch_size,
+            value_heads,
+            key_dim,
+            value_dim,
+        )
+        if tuple(initial_state.shape) != expected_state_shape:
+            raise ValueError(
+                f"invalid recurrent state shape: {tuple(initial_state.shape)}; "
+                f"expected {expected_state_shape}"
+            )
         state = initial_state.float()
+    state = state.reshape(batch_size, key_heads, groups, key_dim, value_dim)
     output = torch.zeros_like(new_values)
     query = query * cumulative_decay.exp().unsqueeze(-1)
     key = key * (
@@ -348,20 +408,25 @@ def chunk_gated_delta_rule(
     chunk_decay = cumulative_decay[..., -1].exp()[..., None, None]
     for chunk_index in range(num_chunks):
         corrected_value = (
-            new_values[:, :, chunk_index]
-            - cumulative_keys[:, :, chunk_index] @ state
+            new_values[:, :, :, chunk_index]
+            - cumulative_keys[:, :, :, chunk_index] @ state
         )
-        output[:, :, chunk_index] = (
-            query[:, :, chunk_index] @ state
-            + intra_attention[:, :, chunk_index] @ corrected_value
+        output[:, :, :, chunk_index] = (
+            query[:, :, :, chunk_index] @ state
+            + intra_attention[:, :, :, chunk_index] @ corrected_value
         )
         state = (
-            state * chunk_decay[:, :, chunk_index]
-            + key[:, :, chunk_index].transpose(-1, -2) @ corrected_value
+            state * chunk_decay[:, :, :, chunk_index]
+            + key[:, :, :, chunk_index].transpose(-1, -2) @ corrected_value
         )
-    output = output.reshape(batch_size, num_heads, total_length, value_dim)
+    output = output.reshape(batch_size, value_heads, total_length, value_dim)
     output = output[:, :, :sequence_length].transpose(1, 2).contiguous()
-    return output.to(input_dtype), state
+    return output.to(input_dtype), state.reshape(
+        batch_size,
+        value_heads,
+        key_dim,
+        value_dim,
+    )
 
 
 class Qwen35RecurrentStatePool:
@@ -656,10 +721,6 @@ class Qwen35GatedDeltaNet(nn.Module):
         value = value.view(
             batch_size, sequence_length, self.num_v_heads, self.value_head_dim
         )
-        repeat_factor = self.num_v_heads // self.num_k_heads
-        if repeat_factor > 1:
-            query = query.repeat_interleave(repeat_factor, dim=2)
-            key = key.repeat_interleave(repeat_factor, dim=2)
         output, recurrent_state = chunk_gated_delta_rule(
             query,
             key,
