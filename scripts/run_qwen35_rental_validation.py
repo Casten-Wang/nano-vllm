@@ -99,6 +99,7 @@ def commands(args: argparse.Namespace) -> list[tuple[str, list[str]]]:
                     str(root / "performance"),
                     "--no-checkpoint-audit",
                     "--no-memory-preflight",
+                    "--include-moe-candidate",
                 ],
             ),
             (

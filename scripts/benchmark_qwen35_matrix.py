@@ -22,11 +22,20 @@ class BenchmarkCase:
     tensor_parallel_size: int
     recurrent_state_dtype: str
     kv_cache_dtype: str
+    moe_decode_backend: str = "sorted"
 
     @property
     def name(self) -> str:
         kv = "bf16" if self.kv_cache_dtype == "auto" else self.kv_cache_dtype
-        return f"qwen35_tp{self.tensor_parallel_size}_state-{self.recurrent_state_dtype}_kv-{kv}"
+        suffix = (
+            ""
+            if self.moe_decode_backend == "sorted"
+            else f"_moe-{self.moe_decode_backend}"
+        )
+        return (
+            f"qwen35_tp{self.tensor_parallel_size}_"
+            f"state-{self.recurrent_state_dtype}_kv-{kv}{suffix}"
+        )
 
 
 def comma_separated_ints(value: str) -> tuple[int, ...]:
@@ -36,8 +45,12 @@ def comma_separated_ints(value: str) -> tuple[int, ...]:
     return values
 
 
-def build_cases(tp_sizes: tuple[int, ...]) -> list[BenchmarkCase]:
-    return [
+def build_cases(
+    tp_sizes: tuple[int, ...],
+    *,
+    include_moe_candidate: bool = False,
+) -> list[BenchmarkCase]:
+    cases = [
         BenchmarkCase(tp, state_dtype, kv_dtype)
         for tp, state_dtype, kv_dtype in itertools.product(
             tp_sizes,
@@ -45,6 +58,17 @@ def build_cases(tp_sizes: tuple[int, ...]) -> list[BenchmarkCase]:
             ("auto", "int8"),
         )
     ]
+    if include_moe_candidate:
+        cases.extend(
+            BenchmarkCase(
+                tp,
+                "model",
+                "auto",
+                moe_decode_backend="batched",
+            )
+            for tp in tp_sizes
+        )
+    return cases
 
 
 def command_for_case(
@@ -66,6 +90,8 @@ def command_for_case(
         str(args.gpu_memory_utilization),
         "--recurrent-state-dtype",
         case.recurrent_state_dtype,
+        "--qwen35-moe-decode-backend",
+        case.moe_decode_backend,
         "--kv-cache-dtype",
         case.kv_cache_dtype,
         "--num-seqs",
@@ -300,6 +326,14 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--repeats", type=int, default=3)
+    parser.add_argument(
+        "--include-moe-candidate",
+        action="store_true",
+        help=(
+            "Add one graph-safe batched MoE decode case per TP size using "
+            "model-dtype recurrent state and BF16 KV cache."
+        ),
+    )
     parser.add_argument("--result-dir", default="benchmark_results/qwen35_matrix")
     parser.add_argument(
         "--run-id",
@@ -355,7 +389,10 @@ def main() -> None:
         args = normalize_args(parse_args())
     except ValueError as error:
         raise SystemExit(str(error)) from error
-    cases = build_cases(args.tp_sizes)
+    cases = build_cases(
+        args.tp_sizes,
+        include_moe_candidate=args.include_moe_candidate,
+    )
     run_id = args.run_id or datetime.now(timezone.utc).strftime(
         "qwen35_%Y%m%dT%H%M%S%fZ"
     )

@@ -50,6 +50,23 @@ def test_default_matrix_covers_tp_state_and_kv_variants():
     assert len({case.name for case in cases}) == len(cases)
 
 
+def test_moe_candidate_adds_one_targeted_case_per_tp_size():
+    cases = MODULE.build_cases((4, 8), include_moe_candidate=True)
+
+    assert len(cases) == 10
+    candidates = [
+        case for case in cases if case.moe_decode_backend == "batched"
+    ]
+    assert {
+        (
+            case.tensor_parallel_size,
+            case.recurrent_state_dtype,
+            case.kv_cache_dtype,
+        )
+        for case in candidates
+    } == {(4, "model", "auto"), (8, "model", "auto")}
+
+
 def test_default_sequence_capacity_tracks_workload(monkeypatch):
     monkeypatch.setattr(
         MODULE.sys,
@@ -202,6 +219,7 @@ def test_case_command_is_eager_and_fully_identified():
     assert command[command.index("--tensor-parallel-size") + 1] == "8"
     assert command[command.index("--gpu-memory-utilization") + 1] == "0.9"
     assert command[command.index("--recurrent-state-dtype") + 1] == "model"
+    assert command[command.index("--qwen35-moe-decode-backend") + 1] == "sorted"
     assert command[command.index("--kv-cache-dtype") + 1] == "int8"
     assert command[command.index("--name") + 1] == "qwen35_tp8_state-model_kv-int8_r2"
     assert command[command.index("--require-paths") + 1] == (

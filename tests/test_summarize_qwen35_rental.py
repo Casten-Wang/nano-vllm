@@ -24,20 +24,38 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     write(tmp_path / "preflight/memory_preflight.json", {"valid": True})
     rows = [
         {
-            "label": "fast",
+            "label": "sorted",
             "commit": "abc",
+            "tensor_parallel_size": 4,
+            "recurrent_state_dtype": "model",
+            "kv_cache_dtype": "auto",
+            "qwen35_moe_decode_backend": "sorted",
+            "generated_token_ids_digest": "tokens",
             "repeat_output_digests_match": True,
             "execution_paths_valid": True,
             "generation_valid": True,
-            "median": {"output_throughput_tok_s": 20, "peak_torch_allocated_mib": 12},
+            "median": {
+                "output_throughput_tok_s": 10,
+                "avg_tpot_s": 0.2,
+                "peak_torch_allocated_mib": 8,
+            },
         },
         {
-            "label": "small",
+            "label": "batched",
             "commit": "abc",
+            "tensor_parallel_size": 4,
+            "recurrent_state_dtype": "model",
+            "kv_cache_dtype": "auto",
+            "qwen35_moe_decode_backend": "batched",
+            "generated_token_ids_digest": "tokens",
             "repeat_output_digests_match": True,
             "execution_paths_valid": True,
             "generation_valid": True,
-            "median": {"output_throughput_tok_s": 10, "peak_torch_allocated_mib": 8},
+            "median": {
+                "output_throughput_tok_s": 20,
+                "avg_tpot_s": 0.1,
+                "peak_torch_allocated_mib": 12,
+            },
         },
     ]
     write(
@@ -85,6 +103,11 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     report = MODULE.summarize(tmp_path, run_id)
 
     assert report["valid"]
-    assert report["performance"]["best_throughput"]["label"] == "fast"
-    assert report["performance"]["lowest_peak_memory"]["label"] == "small"
+    assert report["performance"]["best_throughput"]["label"] == "batched"
+    assert report["performance"]["lowest_peak_memory"]["label"] == "sorted"
     assert report["graph_safe_moe"]["all_tp_promoted"]
+    runtime = report["graph_safe_moe"]["runtime_by_tp"]["tp4"]
+    assert runtime["output_digest_matches"]
+    assert runtime["throughput_speedup"] == 2.0
+    assert runtime["tpot_speedup"] == 2.0
+    assert runtime["peak_memory_delta_mib"] == 4

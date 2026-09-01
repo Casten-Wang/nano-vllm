@@ -13,6 +13,66 @@ def load_json(path: Path) -> dict:
     return json.loads(path.read_text())
 
 
+def summarize_moe_runtime(rows: list[dict]) -> dict[str, dict]:
+    baselines = {
+        (
+            row["tensor_parallel_size"],
+            row["recurrent_state_dtype"],
+            row["kv_cache_dtype"],
+        ): row
+        for row in rows
+        if row.get("qwen35_moe_decode_backend") == "sorted"
+    }
+    comparisons = {}
+    candidates = [
+        row
+        for row in rows
+        if row.get("qwen35_moe_decode_backend") == "batched"
+    ]
+    if not candidates:
+        raise ValueError("performance matrix contains no batched MoE candidate")
+    for candidate in candidates:
+        key = (
+            candidate["tensor_parallel_size"],
+            candidate["recurrent_state_dtype"],
+            candidate["kv_cache_dtype"],
+        )
+        baseline = baselines.get(key)
+        if baseline is None:
+            raise ValueError(
+                "batched MoE candidate has no matching sorted baseline: "
+                f"TP={key[0]}, state={key[1]}, KV={key[2]}"
+            )
+        baseline_median = baseline["median"]
+        candidate_median = candidate["median"]
+        tp_name = f"tp{key[0]}"
+        comparisons[tp_name] = {
+            "configuration": {
+                "recurrent_state_dtype": key[1],
+                "kv_cache_dtype": key[2],
+            },
+            "baseline_label": baseline["label"],
+            "candidate_label": candidate["label"],
+            "output_digest_matches": (
+                baseline["generated_token_ids_digest"]
+                == candidate["generated_token_ids_digest"]
+            ),
+            "throughput_speedup": (
+                candidate_median["output_throughput_tok_s"]
+                / baseline_median["output_throughput_tok_s"]
+            ),
+            "tpot_speedup": (
+                baseline_median["avg_tpot_s"]
+                / candidate_median["avg_tpot_s"]
+            ),
+            "peak_memory_delta_mib": (
+                candidate_median["peak_torch_allocated_mib"]
+                - baseline_median["peak_torch_allocated_mib"]
+            ),
+        }
+    return comparisons
+
+
 def summarize(run_dir: Path, run_id: str) -> dict:
     audit = load_json(run_dir / "preflight" / "checkpoint_mapping_audit.json")
     memory = load_json(run_dir / "preflight" / "memory_preflight.json")
@@ -41,6 +101,7 @@ def summarize(run_dir: Path, run_id: str) -> dict:
         valid_runs,
         key=lambda row: row["median"]["peak_torch_allocated_mib"],
     )
+    moe_runtime = summarize_moe_runtime(performance["runs"])
 
     kernels = {}
     commits = {
@@ -90,6 +151,9 @@ def summarize(run_dir: Path, run_id: str) -> dict:
         "performance_paths_valid": performance["all_execution_paths_valid"],
         "performance_generation_valid": performance["all_generation_valid"],
         "performance_output_parity": performance["all_output_digests_match"],
+        "moe_runtime_output_parity": all(
+            item["output_digest_matches"] for item in moe_runtime.values()
+        ),
         "quality_reads_stored_kv": all(
             row["kv_sensitive_token_rows"] > 0 for row in quality["cases"]
         ),
@@ -119,6 +183,7 @@ def summarize(run_dir: Path, run_id: str) -> dict:
                 for item in kernels.values()
             ),
             "by_tp": kernels,
+            "runtime_by_tp": moe_runtime,
         },
     }
 
