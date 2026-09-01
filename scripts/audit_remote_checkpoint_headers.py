@@ -77,6 +77,9 @@ class HeaderCheckpoint:
         return HeaderSlice(self.headers[name])
 
 
+ALLOWED_TEXT_ONLY_SKIP_PREFIXES = ("model.visual.", "mtp.")
+
+
 def audit_model_headers(model, headers: dict[str, dict]) -> dict:
     expected = {
         name for name, _ in model.named_parameters(remove_duplicate=False)
@@ -86,6 +89,10 @@ def audit_model_headers(model, headers: dict[str, dict]) -> dict:
     checkpoint = HeaderCheckpoint(headers)
     loaded = set()
     skipped = []
+    skipped_by_prefix = {
+        prefix: 0 for prefix in ALLOWED_TEXT_ONLY_SKIP_PREFIXES
+    }
+    unclassified_skipped = []
     unexpected = []
     shape_errors = []
     mapped_checkpoint_bytes = 0
@@ -96,6 +103,12 @@ def audit_model_headers(model, headers: dict[str, dict]) -> dict:
         mapped = map_name(source_name)
         if mapped is None:
             skipped.append(source_name)
+            for prefix in ALLOWED_TEXT_ONLY_SKIP_PREFIXES:
+                if source_name.startswith(prefix):
+                    skipped_by_prefix[prefix] += 1
+                    break
+            else:
+                unclassified_skipped.append(source_name)
             continue
         packed = resolve_packed_parameter(mapped, packed_mapping)
         target = packed[0] if packed is not None else mapped
@@ -127,6 +140,8 @@ def audit_model_headers(model, headers: dict[str, dict]) -> dict:
         "expected_parameter_count": len(expected),
         "mapped_parameter_count": len(loaded),
         "skipped_tensor_count": len(skipped),
+        "skipped_by_prefix": skipped_by_prefix,
+        "unclassified_skipped_weights": unclassified_skipped,
         "missing_parameters": missing,
         "unexpected_weights": unexpected,
         "shape_errors": shape_errors,
@@ -145,7 +160,12 @@ def audit_model_headers(model, headers: dict[str, dict]) -> dict:
             "lazy_tensor_count": lazy_tensor_count,
             "full_tensor_count": full_tensor_count,
         },
-        "valid": not missing and not unexpected and not shape_errors,
+        "valid": (
+            not missing
+            and not unexpected
+            and not shape_errors
+            and not unclassified_skipped
+        ),
     }
 
 

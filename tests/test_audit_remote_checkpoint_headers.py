@@ -68,6 +68,52 @@ def test_header_only_audit_reports_shape_error():
     assert result["shape_errors"]
 
 
+def test_header_only_audit_classifies_text_only_skips():
+    class TextOnlyModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.empty(1, device="meta"))
+
+        @staticmethod
+        def map_weight_name(name):
+            if name.startswith("model.visual.") or name.startswith("mtp."):
+                return None
+            return name
+
+    headers = {
+        "weight": {"dtype": "F32", "shape": [1]},
+        "model.visual.patch.weight": {"dtype": "F32", "shape": [1]},
+        "mtp.head.weight": {"dtype": "F32", "shape": [1]},
+    }
+
+    result = MODULE.audit_model_headers(TextOnlyModel(), headers)
+
+    assert result["valid"]
+    assert result["skipped_by_prefix"] == {"model.visual.": 1, "mtp.": 1}
+    assert result["unclassified_skipped_weights"] == []
+
+
+def test_header_only_audit_rejects_unclassified_skip():
+    class UnexpectedSkipModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.empty(1, device="meta"))
+
+        @staticmethod
+        def map_weight_name(name):
+            return None if name.startswith("audio.") else name
+
+    headers = {
+        "weight": {"dtype": "F32", "shape": [1]},
+        "audio.weight": {"dtype": "F32", "shape": [1]},
+    }
+
+    result = MODULE.audit_model_headers(UnexpectedSkipModel(), headers)
+
+    assert not result["valid"]
+    assert result["unclassified_skipped_weights"] == ["audio.weight"]
+
+
 def test_fetch_header_rejects_oversized_metadata(monkeypatch):
     monkeypatch.setattr(
         MODULE,
