@@ -41,7 +41,13 @@ def build_cases(tp_sizes: tuple[int, ...]) -> list[BenchmarkCase]:
     ]
 
 
-def command_for_case(args: argparse.Namespace, case: BenchmarkCase) -> list[str]:
+def command_for_case(
+    args: argparse.Namespace,
+    case: BenchmarkCase,
+    repeat: int = 1,
+) -> list[str]:
+    repeats = getattr(args, "repeats", 1)
+    name = f"{case.name}_r{repeat}" if repeats > 1 else case.name
     command = [
         sys.executable,
         str(BASELINE_SCRIPT),
@@ -68,7 +74,7 @@ def command_for_case(args: argparse.Namespace, case: BenchmarkCase) -> list[str]
         "--seed",
         str(args.seed),
         "--name",
-        case.name,
+        name,
         "--result-dir",
         args.result_dir,
         "--enforce-eager",
@@ -102,6 +108,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-num-batched-tokens", type=int, default=16384)
     parser.add_argument("--max-num-seqs", type=int, default=512)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--repeats", type=int, default=1)
     parser.add_argument("--result-dir", default="benchmark_results/qwen35_matrix")
     parser.add_argument("--warmup", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--dry-run", action="store_true")
@@ -110,6 +117,8 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    if args.repeats <= 0:
+        raise SystemExit("--repeats must be positive")
     cases = build_cases(args.tp_sizes)
     if not args.dry_run:
         required_gpus = max(case.tensor_parallel_size for case in cases)
@@ -120,9 +129,14 @@ def main() -> None:
                 f"but found {available_gpus}; use --tp-sizes to select a runnable subset"
             )
 
-    for index, case in enumerate(cases, start=1):
-        command = command_for_case(args, case)
-        print(f"[{index}/{len(cases)}] {case.name}", flush=True)
+    runs = [
+        (case, repeat)
+        for case in cases
+        for repeat in range(1, args.repeats + 1)
+    ]
+    for index, (case, repeat) in enumerate(runs, start=1):
+        command = command_for_case(args, case, repeat)
+        print(f"[{index}/{len(runs)}] {case.name} repeat {repeat}", flush=True)
         if args.dry_run:
             print(subprocess.list2cmdline(command))
         else:

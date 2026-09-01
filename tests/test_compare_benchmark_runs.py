@@ -70,6 +70,7 @@ def result(
         "metrics": {
             "avg_ttft_s": 2.0,
             "avg_tpot_s": 0.05,
+            "avg_request_latency_s": 3.0,
         },
     }
 
@@ -157,6 +158,31 @@ def test_comparison_rejects_different_scheduler_capacity():
 
     with pytest.raises(ValueError, match="candidate.max_num_batched_tokens"):
         MODULE.compare_results(
+            [result(), candidate],
+            ["baseline", "candidate"],
+        )
+
+
+def test_repeat_summary_reports_distribution_and_stability():
+    runs = [result(throughput=value) for value in (90.0, 100.0, 110.0)]
+
+    summary = MODULE.summarize_repeats(runs, ["r1", "r2", "r3"])
+
+    throughput = summary["statistics"]["output_throughput_tok_s"]
+    assert throughput["count"] == 3
+    assert throughput["median"] == 100.0
+    assert throughput["mean"] == 100.0
+    assert throughput["population_stdev"] == pytest.approx(8.1649658)
+    assert throughput["coefficient_of_variation"] == pytest.approx(0.081649658)
+    assert summary["all_output_digests_match"]
+
+
+def test_repeat_summary_rejects_different_optimization_configuration():
+    candidate = result()
+    candidate["kv_cache_dtype"] = "int8"
+
+    with pytest.raises(ValueError, match="candidate.kv_cache_dtype"):
+        MODULE.summarize_repeats(
             [result(), candidate],
             ["baseline", "candidate"],
         )

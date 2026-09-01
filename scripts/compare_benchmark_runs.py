@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import statistics
 
 
 WORKLOAD_FIELDS = (
@@ -46,6 +47,20 @@ OPTIMIZATION_FIELDS = (
 
 def ratio(value: float, baseline: float) -> float | None:
     return value / baseline if baseline else None
+
+
+def distribution(values: list[float]) -> dict:
+    mean = statistics.fmean(values)
+    stdev = statistics.pstdev(values)
+    return {
+        "count": len(values),
+        "min": min(values),
+        "median": statistics.median(values),
+        "mean": mean,
+        "max": max(values),
+        "population_stdev": stdev,
+        "coefficient_of_variation": stdev / mean if mean else None,
+    }
 
 
 def load_result(path: Path) -> dict:
@@ -176,6 +191,51 @@ def compare_results(results: list[dict], labels: list[str]) -> dict:
     }
 
 
+def summarize_repeats(results: list[dict], labels: list[str]) -> dict:
+    comparison = compare_results(results, labels)
+    baseline = results[0]
+    mismatches = []
+    for label, result in zip(labels[1:], results[1:]):
+        for field in ("commit", *OPTIMIZATION_FIELDS):
+            if result[field] != baseline[field]:
+                mismatches.append(f"{label}.{field}")
+    if mismatches:
+        raise ValueError(
+            "benchmark repeats do not share one implementation: "
+            + ", ".join(mismatches)
+        )
+
+    metrics = {
+        "output_throughput_tok_s": [
+            result["output_throughput_tok_s"] for result in results
+        ],
+        "avg_ttft_s": [result["metrics"]["avg_ttft_s"] for result in results],
+        "avg_tpot_s": [result["metrics"]["avg_tpot_s"] for result in results],
+        "avg_request_latency_s": [
+            result["metrics"]["avg_request_latency_s"] for result in results
+        ],
+        "peak_torch_allocated_mib": [
+            result["peak_torch_allocated_mib"] for result in results
+        ],
+    }
+    return {
+        "commit": baseline["commit"],
+        "workload": comparison["workload"],
+        "environment": comparison["environment"],
+        "configuration": {
+            field: baseline[field] for field in OPTIMIZATION_FIELDS
+        },
+        "checkpoint_identity_strength": comparison[
+            "checkpoint_identity_strength"
+        ],
+        "all_output_digests_match": comparison["all_output_digests_match"],
+        "all_execution_paths_valid": comparison["all_execution_paths_valid"],
+        "statistics": {
+            name: distribution(values) for name, values in metrics.items()
+        },
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("results", type=Path, nargs="+")
@@ -186,11 +246,18 @@ def main() -> None:
         help="Optional JSON output path; result files should remain ignored.",
     )
     parser.add_argument("--require-output-parity", action="store_true")
+    parser.add_argument(
+        "--summarize-repeats",
+        action="store_true",
+        help="Require one identical implementation and summarize repeated runs.",
+    )
     args = parser.parse_args()
     labels = [path.stem for path in args.results]
-    comparison = compare_results(
-        [load_result(path) for path in args.results],
-        labels,
+    results = [load_result(path) for path in args.results]
+    comparison = (
+        summarize_repeats(results, labels)
+        if args.summarize_repeats
+        else compare_results(results, labels)
     )
     rendered = json.dumps(comparison, indent=2, ensure_ascii=False) + "\n"
     if args.output is not None:

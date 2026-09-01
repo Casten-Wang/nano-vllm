@@ -27,6 +27,7 @@ def args(**overrides):
         "seed": 7,
         "result_dir": "benchmark_results/matrix",
         "warmup": True,
+        "repeats": 3,
     }
     values.update(overrides)
     return Namespace(**values)
@@ -44,13 +45,13 @@ def test_default_matrix_covers_tp_state_and_kv_variants():
 
 def test_case_command_is_eager_and_fully_identified():
     case = MODULE.BenchmarkCase(8, "model", "int8")
-    command = MODULE.command_for_case(args(), case)
+    command = MODULE.command_for_case(args(), case, repeat=2)
 
     assert command[1].endswith("scripts/benchmark_baseline.py")
     assert command[command.index("--tensor-parallel-size") + 1] == "8"
     assert command[command.index("--recurrent-state-dtype") + 1] == "model"
     assert command[command.index("--kv-cache-dtype") + 1] == "int8"
-    assert command[command.index("--name") + 1] == "qwen35_tp8_state-model_kv-int8"
+    assert command[command.index("--name") + 1] == "qwen35_tp8_state-model_kv-int8_r2"
     assert "--enforce-eager" in command
 
 
