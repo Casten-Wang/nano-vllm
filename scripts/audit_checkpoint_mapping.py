@@ -139,6 +139,28 @@ def parameter_storage_bytes(model: torch.nn.Module) -> int:
     )
 
 
+def recurrent_storage_bytes_per_sequence(model: torch.nn.Module) -> dict[str, int]:
+    recurrent_elements = 0
+    convolution_bytes = 0
+    recurrent_model_bytes = 0
+    for module in model.modules():
+        if not callable(getattr(module, "allocate_state_cache", None)):
+            continue
+        recurrent_count = (
+            module.num_v_heads * module.key_head_dim * module.value_head_dim
+        )
+        convolution_count = module.local_conv_dim * module.conv_kernel_size
+        model_element_size = module.in_proj_qkv.weight.element_size()
+        recurrent_elements += recurrent_count
+        recurrent_model_bytes += recurrent_count * model_element_size
+        convolution_bytes += convolution_count * model_element_size
+    return {
+        "float32": recurrent_elements * 4 + convolution_bytes,
+        "model": recurrent_model_bytes + convolution_bytes,
+        "convolution": convolution_bytes,
+    }
+
+
 def instantiate_meta_model(model_path: str, tp_size: int) -> torch.nn.Module:
     config = AutoConfig.from_pretrained(model_path)
     model_spec = resolve_model_spec(config)
@@ -187,6 +209,9 @@ def main() -> None:
         model = instantiate_meta_model(args.model, tp_size)
         result = audit_checkpoint_mapping(model, args.model)
         result["local_parameter_bytes"] = parameter_storage_bytes(model)
+        result["state_bytes_per_sequence"] = (
+            recurrent_storage_bytes_per_sequence(model)
+        )
         results[f"tp{tp_size}"] = result
         del model
     final_checkpoint_manifest = checkpoint_manifest_metadata(args.model)

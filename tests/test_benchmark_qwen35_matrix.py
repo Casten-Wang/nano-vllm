@@ -92,8 +92,14 @@ def test_memory_preflight_covers_each_tp_rank():
     gib = 1024**3
     report = {
         "results": {
-            "tp4": {"local_parameter_bytes": 16 * gib},
-            "tp8": {"local_parameter_bytes": 8 * gib},
+            "tp4": {
+                "local_parameter_bytes": 16 * gib,
+                "state_bytes_per_sequence": {"float32": 8, "model": 4},
+            },
+            "tp8": {
+                "local_parameter_bytes": 8 * gib,
+                "state_bytes_per_sequence": {"float32": 4, "model": 2},
+            },
         }
     }
 
@@ -102,16 +108,27 @@ def test_memory_preflight_covers_each_tp_rank():
         (4, 8),
         [20 * gib] * 8,
         2 * gib,
+        64,
     )
 
     assert result["valid"]
-    assert result["results"]["tp4"]["required_free_bytes_per_rank"] == 18 * gib
+    assert result["results"]["tp4"]["max_state_bytes_per_rank"] == 8 * 64
+    assert result["results"]["tp4"]["required_free_bytes_per_rank"] == (
+        18 * gib + 8 * 64
+    )
     assert len(result["results"]["tp8"]["free_bytes_by_rank"]) == 8
 
 
 def test_memory_preflight_rejects_insufficient_rank():
     gib = 1024**3
-    report = {"results": {"tp4": {"local_parameter_bytes": 16 * gib}}}
+    report = {
+        "results": {
+            "tp4": {
+                "local_parameter_bytes": 16 * gib,
+                "state_bytes_per_sequence": {"float32": gib // 64, "model": 0},
+            }
+        }
+    }
 
     with pytest.raises(ValueError, match="ranks 2"):
         MODULE.validate_memory_capacity(
@@ -119,6 +136,7 @@ def test_memory_preflight_rejects_insufficient_rank():
             (4,),
             [20 * gib, 20 * gib, 17 * gib, 20 * gib],
             2 * gib,
+            64,
         )
 
 

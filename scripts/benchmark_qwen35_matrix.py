@@ -193,9 +193,12 @@ def validate_memory_capacity(
     tp_sizes: tuple[int, ...],
     free_bytes_by_device: list[int],
     headroom_bytes: int,
+    max_num_seqs: int,
 ) -> dict:
     if headroom_bytes < 0:
         raise ValueError("memory headroom must be non-negative")
+    if max_num_seqs <= 0:
+        raise ValueError("max_num_seqs must be positive")
     results = {}
     for tp_size in tp_sizes:
         if len(free_bytes_by_device) < tp_size:
@@ -204,7 +207,18 @@ def validate_memory_capacity(
         parameter_bytes = audit.get("local_parameter_bytes")
         if not isinstance(parameter_bytes, int) or parameter_bytes <= 0:
             raise ValueError(f"checkpoint audit has no TP={tp_size} parameter size")
-        required_bytes = parameter_bytes + headroom_bytes
+        state_sizes = audit.get("state_bytes_per_sequence", {})
+        if not all(
+            isinstance(state_sizes.get(dtype), int)
+            and state_sizes[dtype] >= 0
+            for dtype in ("float32", "model")
+        ):
+            raise ValueError(f"checkpoint audit has no TP={tp_size} state size")
+        state_bytes = max(
+            state_sizes["float32"],
+            state_sizes["model"],
+        ) * max_num_seqs
+        required_bytes = parameter_bytes + state_bytes + headroom_bytes
         free_bytes = free_bytes_by_device[:tp_size]
         insufficient = [
             rank for rank, available in enumerate(free_bytes)
@@ -212,6 +226,8 @@ def validate_memory_capacity(
         ]
         results[f"tp{tp_size}"] = {
             "local_parameter_bytes": parameter_bytes,
+            "max_state_bytes_per_rank": state_bytes,
+            "max_num_seqs": max_num_seqs,
             "headroom_bytes": headroom_bytes,
             "required_free_bytes_per_rank": required_bytes,
             "free_bytes_by_rank": free_bytes,
@@ -317,6 +333,7 @@ def main() -> None:
                     args.tp_sizes,
                     gpu_free_memory_bytes(),
                     int(args.memory_headroom_gib * 1024**3),
+                    args.max_num_seqs,
                 )
                 memory_path = Path(args.result_dir) / "memory_preflight.json"
                 memory_path.write_text(json.dumps(memory_report, indent=2) + "\n")
