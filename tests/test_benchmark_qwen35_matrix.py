@@ -143,15 +143,18 @@ def test_memory_preflight_covers_each_tp_rank():
         64,
         640,
         1.0,
+        1,
     )
 
     assert result["valid"]
-    assert result["results"]["tp4"]["max_state_bytes_per_rank"] == 8 * 64
+    assert result["results"]["tp4"]["max_state_bytes_per_rank"] == 8 * 65
+    assert result["results"]["tp4"]["recurrent_padding_slots"] == 1
+    assert result["results"]["tp4"]["allocated_state_slot_count"] == 65
     assert result["results"]["tp4"]["minimum_workload_kv_bytes_per_rank"] == (
         64 * 3 * 256 * 1024
     )
     assert result["results"]["tp4"]["required_free_bytes_per_rank"] == (
-        18 * gib + 8 * 64 + 64 * 3 * 256 * 1024
+        18 * gib + 8 * 65 + 64 * 3 * 256 * 1024
     )
     assert len(result["results"]["tp8"]["memory_by_rank"]) == 8
 
@@ -183,6 +186,7 @@ def test_memory_preflight_rejects_insufficient_rank():
             64,
             640,
             1.0,
+            1,
         )
 
 

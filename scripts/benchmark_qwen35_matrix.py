@@ -228,11 +228,14 @@ def validate_memory_capacity(
     num_seqs: int,
     sequence_length: int,
     gpu_memory_utilization: float,
+    recurrent_padding_slots: int = 0,
 ) -> dict:
     if headroom_bytes < 0:
         raise ValueError("memory headroom must be non-negative")
     if max_num_seqs <= 0:
         raise ValueError("max_num_seqs must be positive")
+    if recurrent_padding_slots < 0:
+        raise ValueError("recurrent padding slots must be non-negative")
     if num_seqs <= 0 or sequence_length <= 0:
         raise ValueError("workload dimensions must be positive")
     if not 0 < gpu_memory_utilization <= 1:
@@ -252,10 +255,12 @@ def validate_memory_capacity(
             for dtype in ("float32", "model")
         ):
             raise ValueError(f"checkpoint audit has no TP={tp_size} state size")
-        state_bytes = max(
+        state_bytes_per_sequence = max(
             state_sizes["float32"],
             state_sizes["model"],
-        ) * max_num_seqs
+        )
+        state_slot_count = max_num_seqs + recurrent_padding_slots
+        state_bytes = state_bytes_per_sequence * state_slot_count
         kv_bytes_per_token = audit.get("kv_bytes_per_token")
         if not isinstance(kv_bytes_per_token, int) or kv_bytes_per_token <= 0:
             raise ValueError(f"checkpoint audit has no TP={tp_size} KV size")
@@ -290,6 +295,8 @@ def validate_memory_capacity(
             "max_state_bytes_per_rank": state_bytes,
             "minimum_workload_kv_bytes_per_rank": kv_bytes,
             "max_num_seqs": max_num_seqs,
+            "recurrent_padding_slots": recurrent_padding_slots,
+            "allocated_state_slot_count": state_slot_count,
             "headroom_bytes": headroom_bytes,
             "required_free_bytes_per_rank": required_bytes,
             "gpu_memory_utilization": gpu_memory_utilization,
@@ -301,7 +308,7 @@ def validate_memory_capacity(
             ranks = ", ".join(str(rank) for rank in insufficient)
             raise ValueError(
                 f"TP={tp_size} ranks {ranks} lack free memory for model "
-                "parameters plus configured headroom"
+                "parameters, recurrent state, KV cache, and configured headroom"
             )
     return {"valid": True, "results": results}
 
@@ -424,6 +431,7 @@ def main() -> None:
                     args.num_seqs,
                     args.input_len + args.output_len,
                     args.gpu_memory_utilization,
+                    int(args.include_moe_candidate),
                 )
                 memory_path = Path(args.result_dir) / "memory_preflight.json"
                 memory_path.write_text(json.dumps(memory_report, indent=2) + "\n")

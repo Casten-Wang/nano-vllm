@@ -235,6 +235,10 @@ def summarize(run_dir: Path, run_id: str) -> dict:
             raise ValueError(f"multiple CUDA Graph summaries found for {tp_name}")
         cudagraph[tp_name] = {
             "passed": result["passed"],
+            "hybrid_graph_captured": result.get(
+                "hybrid_graph_captured",
+                False,
+            ),
             "scenario_count": len(result["scenarios"]),
             "batch_sizes": [
                 scenario["batch_size"] for scenario in result["scenarios"]
@@ -273,7 +277,10 @@ def summarize(run_dir: Path, run_id: str) -> dict:
         ),
         "hybrid_cudagraph_parity": (
             set(cudagraph) == set(kernels)
-            and all(item["passed"] for item in cudagraph.values())
+            and all(
+                item["passed"] and item["hybrid_graph_captured"]
+                for item in cudagraph.values()
+            )
         ),
         "quality_reads_stored_kv": all(
             row["kv_sensitive_token_rows"] > 0 for row in quality["cases"]
@@ -321,7 +328,8 @@ def summarize(run_dir: Path, run_id: str) -> dict:
         },
         "hybrid_cudagraph": {
             "all_tp_passed": all(
-                item["passed"] for item in cudagraph.values()
+                item["passed"] and item["hybrid_graph_captured"]
+                for item in cudagraph.values()
             ),
             "same_tp_coverage": set(cudagraph) == set(kernels),
             "by_tp": cudagraph,

@@ -69,6 +69,7 @@ def commands(args: argparse.Namespace) -> list[tuple[str, list[str]]]:
                 "--result-dir",
                 str(root / "preflight"),
                 "--preflight-only",
+                "--include-moe-candidate",
             ],
         )
     ]

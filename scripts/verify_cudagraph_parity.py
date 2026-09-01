@@ -126,6 +126,9 @@ def run_worker(args: argparse.Namespace) -> None:
     outputs = llm.generate(prompts, sampling_params, use_tqdm=False)
     execution_stats = llm.model_runner.call("get_execution_stats")
     shape_trace = llm.model_runner.call("get_shape_trace")
+    cudagraph_capture_stats = llm.model_runner.call(
+        "get_cudagraph_capture_stats"
+    )
     artifact = {
         "mode": args.worker_mode,
         "input_lengths": lengths,
@@ -134,6 +137,7 @@ def run_worker(args: argparse.Namespace) -> None:
         "logits_steps": logits_steps,
         "execution_stats": execution_stats,
         "shape_trace": shape_trace,
+        "cudagraph_capture_stats": cudagraph_capture_stats,
         "config": {
             "kv_cache_dtype": args.kv_cache_dtype,
             "kv_dequant_backend": args.kv_dequant_backend,
@@ -490,9 +494,16 @@ def main() -> None:
                 "comparison": comparison,
                 "eager_execution_stats": eager["execution_stats"],
                 "graph_execution_stats": graph["execution_stats"],
+                "graph_capture_stats": graph["cudagraph_capture_stats"],
             }
         )
 
+    hybrid_graph_captured = all(
+        scenario["graph_capture_stats"].get("supported")
+        and scenario["graph_capture_stats"].get("hybrid_recurrent_state")
+        and scenario["graph_capture_stats"].get("recurrent_padding_slot") is not None
+        for scenario in scenario_results
+    )
     summary = {
         **collect_benchmark_metadata(torch),
         "passed": all_passed,
@@ -505,6 +516,7 @@ def main() -> None:
         "output_len": args.output_len,
         "atol": args.atol,
         "rtol": args.rtol,
+        "hybrid_graph_captured": hybrid_graph_captured,
         "scenarios": scenario_results,
     }
     summary_path = run_dir / "summary.json"

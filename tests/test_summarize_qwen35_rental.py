@@ -120,6 +120,7 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
             "git_dirty": False,
             "cuda_available": True,
             "passed": True,
+            "hybrid_graph_captured": True,
             "scenarios": [
                 {"batch_size": 3},
                 {"batch_size": 9},
