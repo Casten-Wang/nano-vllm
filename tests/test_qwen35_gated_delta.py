@@ -221,3 +221,53 @@ def test_gated_delta_layer_chunked_prefill_matches_one_shot():
     torch.testing.assert_close(torch.cat((first, second)), expected)
     torch.testing.assert_close(layer.state_pool.recurrent[:, 1], expected_recurrent)
     torch.testing.assert_close(layer.state_pool.convolution[:, 1], expected_convolution)
+
+
+def test_tensor_parallel_layers_sum_to_single_rank_reference():
+    torch.manual_seed(11)
+    full = make_layer(world_size=1)
+    ranks = [make_layer(rank=rank, world_size=2) for rank in range(2)]
+    sources = {
+        "in_proj_qkv.weight": torch.randn(16, 4),
+        "in_proj_z.weight": torch.randn(8, 4),
+        "in_proj_b.weight": torch.randn(4, 4),
+        "in_proj_a.weight": torch.randn(4, 4),
+        "conv1d.weight": torch.randn(16, 1, 2),
+        "dt_bias": torch.randn(4),
+        "A_log": torch.randn(4),
+        "norm.weight": torch.randn(2),
+        "out_proj.weight": torch.randn(4, 8),
+    }
+
+    def load(layer):
+        for name, source in sources.items():
+            parameter = layer.get_parameter(name)
+            loader = getattr(parameter, "weight_loader", None)
+            if loader is None:
+                parameter.data.copy_(source)
+            else:
+                loader(parameter, source)
+        layer.allocate_state_cache(2, "cpu")
+
+    load(full)
+    for rank_layer in ranks:
+        load(rank_layer)
+    hidden = torch.randn(4, 4)
+    context = SimpleNamespace(
+        is_mixed=False,
+        is_prefill=True,
+        cu_seqlens_q=torch.tensor([0, 4], dtype=torch.int32),
+        state_slots=torch.tensor([0], dtype=torch.int32),
+        state_reset_mask=torch.tensor([True]),
+    )
+    context_module = types.ModuleType("nanovllm.utils.context")
+    context_module.get_context = lambda: context
+
+    with (
+        patch.dict(sys.modules, {"nanovllm.utils.context": context_module}),
+        patch.object(qwen35_gated_delta.dist, "all_reduce", return_value=None),
+    ):
+        expected = full(hidden)
+        actual = sum(rank_layer(hidden) for rank_layer in ranks)
+
+    torch.testing.assert_close(actual, expected, rtol=2e-5, atol=2e-5)

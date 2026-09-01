@@ -32,11 +32,18 @@ rotary = load_module(
 
 
 class FakeAttention(nn.Module):
-    def __init__(self, *args):
+    def __init__(self, num_heads, head_dim, scale, num_kv_heads):
         super().__init__()
+        self.num_heads = num_heads
+        self.num_kv_heads = num_kv_heads
 
     def forward(self, query, key, value):
-        return query
+        repeats = self.num_heads // self.num_kv_heads
+        return (
+            query
+            + key.repeat_interleave(repeats, dim=1)
+            + value.repeat_interleave(repeats, dim=1)
+        )
 
 
 attention_module = types.ModuleType("nanovllm.layers.attention")
@@ -126,3 +133,37 @@ def test_query_gate_is_applied_after_attention():
     output_open = layer(positions, hidden)
 
     assert not torch.allclose(output_closed, output_open)
+
+
+def test_tensor_parallel_attention_sums_to_single_rank_reference():
+    torch.manual_seed(9)
+    full = make_attention(world_size=1)
+    ranks = [make_attention(rank=rank, world_size=2) for rank in range(2)]
+    sources = {
+        "q_proj.weight": torch.randn(32, 8),
+        "k_proj.weight": torch.randn(4, 8),
+        "v_proj.weight": torch.randn(4, 8),
+        "o_proj.weight": torch.randn(8, 16),
+        "q_norm.weight": torch.randn(4),
+        "k_norm.weight": torch.randn(4),
+    }
+
+    def load(layer):
+        for name, source in sources.items():
+            parameter = layer.get_parameter(name)
+            loader = getattr(parameter, "weight_loader", None)
+            if loader is None:
+                parameter.data.copy_(source)
+            else:
+                loader(parameter, source)
+
+    load(full)
+    for rank_layer in ranks:
+        load(rank_layer)
+    hidden = torch.randn(3, 8)
+    positions = torch.arange(3)
+    with patch.object(linear.dist, "all_reduce", return_value=None):
+        expected = full(positions, hidden)
+        actual = sum(layer(positions, hidden) for layer in ranks)
+
+    torch.testing.assert_close(actual, expected, rtol=2e-5, atol=2e-5)
