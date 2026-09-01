@@ -16,6 +16,7 @@ from nanovllm.engine.execution import (
 from nanovllm.engine.sequence import Sequence
 from nanovllm.engine.kv_cache_packing import PackedBlockMetadata, build_packed_block_metadata
 from nanovllm.models.registry import create_model
+from nanovllm.models.cache_plan import plan_cache_memory
 from nanovllm.layers.sampler import Sampler
 from nanovllm.utils.context import set_context, get_context, reset_context
 from nanovllm.utils.loader import load_model
@@ -430,10 +431,15 @@ class ModelRunner:
         used = total - free
         peak = torch.cuda.memory_stats()["allocated_bytes.all.peak"]
         current = torch.cuda.memory_stats()["allocated_bytes.all.current"]
-        num_kv_heads = hf_config.num_key_value_heads // self.world_size
+        cache_plan = plan_cache_memory(
+            model_spec,
+            self.world_size,
+            kv_dtype_bytes=dtype_nbytes(hf_config.dtype),
+        )
+        num_kv_heads = cache_plan.local_kv_heads
         head_dim = getattr(hf_config, "head_dim", hf_config.hidden_size // hf_config.num_attention_heads)
         num_kv_layers = model_spec.num_kv_cache_layers
-        block_bytes = 2 * num_kv_layers * self.block_size * num_kv_heads * head_dim * dtype_nbytes(hf_config.dtype)
+        block_bytes = cache_plan.kv_bytes_per_token * self.block_size
         local_num_blocks = int(
             total * config.gpu_memory_utilization - used - peak + current
         ) // block_bytes
@@ -468,9 +474,14 @@ class ModelRunner:
         peak = torch.cuda.memory_stats()["allocated_bytes.all.peak"]
         current = torch.cuda.memory_stats()["allocated_bytes.all.current"]
         num_layers = model_spec.num_kv_cache_layers
-        num_kv_heads = hf_config.num_key_value_heads // self.world_size
+        cache_plan = plan_cache_memory(
+            model_spec,
+            self.world_size,
+            kv_dtype_bytes=dtype_nbytes(torch.int8),
+        )
+        num_kv_heads = cache_plan.local_kv_heads
         head_dim = getattr(hf_config, "head_dim", hf_config.hidden_size // hf_config.num_attention_heads)
-        kv_data_bytes = 2 * num_layers * self.block_size * num_kv_heads * head_dim * dtype_nbytes(torch.int8)
+        kv_data_bytes = cache_plan.kv_bytes_per_token * self.block_size
         scale_bytes = 2 * num_layers * self.block_size * num_kv_heads * dtype_nbytes(torch.float16)
         block_bytes = kv_data_bytes + scale_bytes
         local_num_blocks = int(
