@@ -297,6 +297,105 @@ def benchmark_delta_decode(args, device, dtype, local_value_heads) -> dict:
     )
 
 
+def evaluate_recurrent_storage_drift(
+    args,
+    device,
+    dtype,
+    local_value_heads,
+) -> dict:
+    shape = (
+        args.decode_batch,
+        local_value_heads,
+        args.key_head_dim,
+    )
+    scenarios = (
+        ("slow_decay", -1e-4, 0.5),
+        ("medium_decay", -1e-2, 0.5),
+        ("fast_decay", -0.15, 0.5),
+    )
+    results = {}
+    for scenario_index, (name, decay_value, beta_value) in enumerate(scenarios):
+        generator = torch.Generator(device=device).manual_seed(
+            args.seed + scenario_index
+        )
+        state_fp32 = torch.zeros(
+            *shape,
+            args.value_head_dim,
+            device=device,
+            dtype=torch.float32,
+        )
+        state_model = state_fp32.to(dtype)
+        squared_error = torch.zeros((), device=device)
+        max_error = torch.zeros((), device=device)
+        element_count = 0
+        decay = torch.full(
+            shape[:2],
+            decay_value,
+            device=device,
+            dtype=torch.float32,
+        )
+        beta = torch.full(
+            shape[:2],
+            beta_value,
+            device=device,
+            dtype=dtype,
+        )
+        for _ in range(args.drift_steps):
+            query = torch.randn(
+                *shape,
+                device=device,
+                dtype=dtype,
+                generator=generator,
+            )
+            key = torch.randn(
+                *shape,
+                device=device,
+                dtype=dtype,
+                generator=generator,
+            )
+            value = torch.randn(
+                args.decode_batch,
+                local_value_heads,
+                args.value_head_dim,
+                device=device,
+                dtype=dtype,
+                generator=generator,
+            )
+            output_fp32, state_fp32 = GDN.recurrent_gated_delta_step(
+                query,
+                key,
+                value,
+                decay,
+                beta,
+                state_fp32,
+            )
+            output_model, next_state = GDN.recurrent_gated_delta_step(
+                query,
+                key,
+                value,
+                decay,
+                beta,
+                state_model,
+            )
+            state_model = next_state.to(dtype)
+            difference = output_model.float() - output_fp32.float()
+            squared_error += difference.square().sum()
+            max_error = torch.maximum(max_error, difference.abs().max())
+            element_count += difference.numel()
+
+        state_difference = state_model.float() - state_fp32
+        results[name] = {
+            "log_decay": decay_value,
+            "beta": beta_value,
+            "steps": args.drift_steps,
+            "output_max_abs_error": max_error.item(),
+            "output_rmse": (squared_error / element_count).sqrt().item(),
+            "final_state_max_abs_error": state_difference.abs().max().item(),
+            "final_state_mean_abs_error": state_difference.abs().mean().item(),
+        }
+    return results
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--device", default="auto")
@@ -318,6 +417,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--key-head-dim", type=int, default=128)
     parser.add_argument("--value-head-dim", type=int, default=128)
     parser.add_argument("--conv-kernel-size", type=int, default=4)
+    parser.add_argument("--drift-steps", type=int, default=256)
+    parser.add_argument("--seed", type=int, default=47)
     parser.add_argument("--warmup", type=int, default=10)
     parser.add_argument("--iterations", type=int, default=50)
     parser.add_argument("--repeats", type=int, default=5)
@@ -339,6 +440,7 @@ def main() -> None:
         "prefill_batch": args.prefill_batch,
         "prefill_tokens": args.prefill_tokens,
         "decode_batch": args.decode_batch,
+        "drift_steps": args.drift_steps,
         "warmup": args.warmup,
         "iterations": args.iterations,
         "repeats": args.repeats,
@@ -364,7 +466,7 @@ def main() -> None:
         + local_value_heads * args.value_head_dim
     )
 
-    torch.manual_seed(47)
+    torch.manual_seed(args.seed)
     result = {
         **METADATA.collect_benchmark_metadata(torch),
         "configuration": {
@@ -385,6 +487,12 @@ def main() -> None:
                 local_conv_channels,
             ),
             "specialized_delta_decode": benchmark_delta_decode(
+                args,
+                device,
+                dtype,
+                local_value_heads,
+            ),
+            "recurrent_storage_drift": evaluate_recurrent_storage_drift(
                 args,
                 device,
                 dtype,
