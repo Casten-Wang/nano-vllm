@@ -167,6 +167,10 @@ class ModelRunner:
     def supports_cudagraph(self) -> bool:
         if self.enforce_eager or self.config.sliding_window_size is not None:
             return False
+        if self.config.model_spec is not None and self.config.model_spec.is_hybrid:
+            # Hybrid recurrent state needs dedicated graph input buffers. Keep
+            # the first correctness baseline eager until those are captured.
+            return False
         if self.config.kv_cache_dtype == "int8":
             # First INT8 graph version only covers the fused V1 decode path.
             # Dequant-then-FlashAttention and partitioned long-context decode
@@ -534,6 +538,26 @@ class ModelRunner:
         packed_block_tables = torch.tensor(metadata.packed_block_tables, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
         return selected_block_ids, packed_block_tables
 
+    def prepare_state_slots(self, seqs: list[Sequence]):
+        model_spec = self.config.model_spec
+        if model_spec is None or not model_spec.is_hybrid:
+            return None
+        state_slots = []
+        for warmup_slot, seq in enumerate(seqs):
+            if seq.state_slot is None:
+                if seq.block_table:
+                    raise RuntimeError(
+                        "scheduled hybrid sequence has no recurrent state slot"
+                    )
+                state_slots.append(warmup_slot)
+            else:
+                state_slots.append(seq.state_slot)
+        return torch.tensor(
+            state_slots,
+            dtype=torch.int32,
+            pin_memory=True,
+        ).cuda(non_blocking=True)
+
     def prepare_prefill(self, seqs: list[Sequence]):
         input_ids = []
         positions = []
@@ -599,6 +623,7 @@ class ModelRunner:
             dequant_block_ids,
             dequant_block_tables,
             self.config.sliding_window_size,
+            state_slots=self.prepare_state_slots(seqs),
         )
         return input_ids, positions
 
@@ -661,6 +686,7 @@ class ModelRunner:
             block_tables=block_tables,
             dequant_block_ids=dequant_block_ids,
             dequant_block_tables=dequant_block_tables,
+            state_slots=self.prepare_state_slots(seqs),
         )
 
     def build_decode_inputs(self, seqs: list[Sequence]):
@@ -692,6 +718,7 @@ class ModelRunner:
             dequant_block_ids=dequant_block_ids,
             dequant_block_tables=dequant_block_tables,
             max_context_len=max(context_lens) if context_lens else 0,
+            state_slots=self.prepare_state_slots(seqs),
         )
 
     def prepare_decode(self, seqs: list[Sequence]):
@@ -728,6 +755,7 @@ class ModelRunner:
             dequant_block_tables=dequant_block_tables,
             sliding_window_size=self.config.sliding_window_size,
             max_context_len=max_context_len,
+            state_slots=self.prepare_state_slots(seqs),
         )
         return input_ids, positions
 
@@ -764,6 +792,11 @@ class ModelRunner:
             prefill_block_tables=prefill["block_tables"],
             prefill_dequant_block_ids=prefill["dequant_block_ids"],
             prefill_dequant_block_tables=prefill["dequant_block_tables"],
+            state_slots=torch.cat(
+                (decode["state_slots"], prefill["state_slots"]),
+            )
+            if decode["state_slots"] is not None
+            else None,
         )
         return input_ids, positions
 

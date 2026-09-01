@@ -4,14 +4,20 @@ import sys
 import types
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 
 ROOT = Path(__file__).resolve().parents[1]
 MODULE_PATH = ROOT / "nanovllm" / "engine" / "model_runner.py"
+CONTEXT_MODULE_PATH = ROOT / "nanovllm" / "utils" / "context.py"
 
 
 class FakeTensor:
-    pass
+    def __init__(self, values=None):
+        self.values = list(values or [])
+
+    def cuda(self, non_blocking=False):
+        return self
 
 
 class FakeEvent:
@@ -39,6 +45,8 @@ def load_model_runner_module():
         "nanovllm.engine.sequence",
         "nanovllm.engine.kv_cache_packing",
         "nanovllm.models",
+        "nanovllm.models.registry",
+        "nanovllm.models.cache_plan",
         "nanovllm.models.qwen3",
         "nanovllm.layers",
         "nanovllm.layers.sampler",
@@ -52,6 +60,13 @@ def load_model_runner_module():
         torch_module.Tensor = FakeTensor
         torch_module.dtype = object
         torch_module.inference_mode = lambda: (lambda fn: fn)
+        torch_module.int32 = object()
+        torch_module.int64 = object()
+        torch_module.float32 = object()
+        torch_module.tensor = lambda values, **kwargs: FakeTensor(values)
+        torch_module.cat = lambda tensors: FakeTensor(
+            value for tensor in tensors for value in tensor.values
+        )
 
         distributed_module = types.ModuleType("torch.distributed")
         torch_module.distributed = distributed_module
@@ -63,6 +78,8 @@ def load_model_runner_module():
         sequence_module = types.ModuleType("nanovllm.engine.sequence")
         packing_module = types.ModuleType("nanovllm.engine.kv_cache_packing")
         models_module = types.ModuleType("nanovllm.models")
+        registry_module = types.ModuleType("nanovllm.models.registry")
+        cache_plan_module = types.ModuleType("nanovllm.models.cache_plan")
         qwen_module = types.ModuleType("nanovllm.models.qwen3")
         layers_module = types.ModuleType("nanovllm.layers")
         sampler_module = types.ModuleType("nanovllm.layers.sampler")
@@ -79,6 +96,8 @@ def load_model_runner_module():
         packing_module.PackedBlockMetadata = object
         packing_module.build_packed_block_metadata = lambda *args, **kwargs: None
         qwen_module.Qwen3ForCausalLM = object
+        registry_module.create_model = lambda *args, **kwargs: object()
+        cache_plan_module.plan_cache_memory = lambda *args, **kwargs: None
         sampler_module.Sampler = object
         context_module.set_context = lambda *args, **kwargs: None
         context_module.get_context = lambda: None
@@ -96,6 +115,8 @@ def load_model_runner_module():
                 "nanovllm.engine.sequence": sequence_module,
                 "nanovllm.engine.kv_cache_packing": packing_module,
                 "nanovllm.models": models_module,
+                "nanovllm.models.registry": registry_module,
+                "nanovllm.models.cache_plan": cache_plan_module,
                 "nanovllm.models.qwen3": qwen_module,
                 "nanovllm.layers": layers_module,
                 "nanovllm.layers.sampler": sampler_module,
@@ -189,6 +210,117 @@ class TPControlTest(unittest.TestCase):
 
         with self.assertRaisesRegex(RuntimeError, "invalid status payload"):
             runner.read_worker_status(1, status_buffer)
+
+
+class HybridStateContextTest(unittest.TestCase):
+    def test_context_keeps_existing_positional_arguments_compatible(self):
+        torch_module = types.ModuleType("torch")
+        torch_module.Tensor = FakeTensor
+        original_torch = sys.modules.get("torch")
+        sys.modules["torch"] = torch_module
+        try:
+            spec = importlib.util.spec_from_file_location(
+                "nanovllm_context_under_test",
+                CONTEXT_MODULE_PATH,
+            )
+            context_module = importlib.util.module_from_spec(spec)
+            assert spec.loader is not None
+            sys.modules[spec.name] = context_module
+            spec.loader.exec_module(context_module)
+            dequant_ids = object()
+            dequant_tables = object()
+            context_module.set_context(
+                True,
+                None,
+                None,
+                0,
+                0,
+                None,
+                None,
+                None,
+                dequant_ids,
+                dequant_tables,
+            )
+        finally:
+            sys.modules.pop("nanovllm_context_under_test", None)
+            if original_torch is None:
+                sys.modules.pop("torch", None)
+            else:
+                sys.modules["torch"] = original_torch
+
+        context = context_module.get_context()
+        self.assertIs(context.dequant_block_ids, dequant_ids)
+        self.assertIs(context.dequant_block_tables, dequant_tables)
+        self.assertIsNone(context.state_slots)
+
+    def make_hybrid_runner(self):
+        runner = object.__new__(ModelRunner)
+        runner.config = SimpleNamespace(
+            model_spec=SimpleNamespace(is_hybrid=True),
+            sliding_window_size=None,
+        )
+        return runner
+
+    def test_state_slots_preserve_sequence_order(self):
+        runner = self.make_hybrid_runner()
+        seqs = [
+            SimpleNamespace(state_slot=7, block_table=[1]),
+            SimpleNamespace(state_slot=2, block_table=[2]),
+        ]
+
+        slots = runner.prepare_state_slots(seqs)
+
+        self.assertEqual(slots.values, [7, 2])
+
+    def test_scheduled_hybrid_sequence_requires_state_slot(self):
+        runner = self.make_hybrid_runner()
+        seq = SimpleNamespace(state_slot=None, block_table=[1])
+
+        with self.assertRaisesRegex(RuntimeError, "no recurrent state slot"):
+            runner.prepare_state_slots([seq])
+
+    def test_mixed_context_orders_decode_before_prefill_slots(self):
+        runner = self.make_hybrid_runner()
+        runner.block_size = 256
+        runner.build_decode_inputs = lambda seqs: {
+            "input_ids": [1, 2],
+            "positions": [4, 5],
+            "slot_mapping": [10, 11],
+            "context_lens": [5, 6],
+            "block_tables": FakeTensor(),
+            "dequant_block_ids": None,
+            "dequant_block_tables": None,
+            "state_slots": FakeTensor([8, 9]),
+        }
+        runner.build_prefill_inputs = lambda seqs: {
+            "input_ids": [3, 4],
+            "positions": [0, 1],
+            "slot_mapping": [12, 13],
+            "cu_seqlens_q": [0, 2],
+            "cu_seqlens_k": [0, 2],
+            "max_seqlen_q": 2,
+            "max_seqlen_k": 2,
+            "block_tables": None,
+            "dequant_block_ids": None,
+            "dequant_block_tables": None,
+            "state_slots": FakeTensor([3]),
+        }
+        captured = {}
+        original = model_runner_module.set_context
+        model_runner_module.set_context = lambda *args, **kwargs: captured.update(kwargs)
+        try:
+            runner.prepare_mixed([object()], [object(), object()])
+        finally:
+            model_runner_module.set_context = original
+
+        self.assertEqual(captured["state_slots"].values, [8, 9, 3])
+
+    def test_hybrid_model_disables_cuda_graph(self):
+        runner = self.make_hybrid_runner()
+        runner.enforce_eager = False
+        runner.config.kv_cache_dtype = "auto"
+
+        self.assertFalse(runner.supports_cudagraph())
 
 
 if __name__ == "__main__":

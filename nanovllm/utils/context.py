@@ -13,6 +13,7 @@ class Context:
     context_lens: torch.Tensor | None = None
     max_context_len: int = 0
     block_tables: torch.Tensor | None = None
+    state_slots: torch.Tensor | None = None
     dequant_block_ids: torch.Tensor | None = None
     dequant_block_tables: torch.Tensor | None = None
     sliding_window_size: int | None = None
@@ -65,6 +66,7 @@ def set_context(
     prefill_dequant_block_tables=None,
     max_context_len=0,
     decode_max_context_len=0,
+    state_slots=None,
 ):
     global _CONTEXT
     _CONTEXT = Context(
@@ -77,6 +79,7 @@ def set_context(
         context_lens=context_lens,
         max_context_len=max_context_len,
         block_tables=block_tables,
+        state_slots=state_slots,
         dequant_block_ids=dequant_block_ids,
         dequant_block_tables=dequant_block_tables,
         sliding_window_size=sliding_window_size,
