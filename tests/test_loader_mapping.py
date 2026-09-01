@@ -75,6 +75,25 @@ class SlicedMappedModel(MappedModel):
         )
 
 
+class PackedSlicedMappedModel(nn.Module):
+    packed_modules_mapping = {"gate_proj": ("gate_up_proj", 0)}
+
+    def __init__(self):
+        super().__init__()
+        self.model = nn.Module()
+        self.model.gate_up_proj = nn.Linear(2, 1, bias=False)
+        self.model.gate_up_proj.weight.data.zero_()
+        self.model.gate_up_proj.weight.packed_safetensors_loader = (
+            lambda param, source, shard_id: param.data.copy_(source + shard_id)
+        )
+
+    @staticmethod
+    def map_weight_name(name):
+        if name == "external.visual.weight":
+            return None
+        return "model.gate_proj.weight"
+
+
 def test_loader_maps_text_names_before_loading_and_skips_visual_tensors(tmp_path):
     (tmp_path / "model.safetensors").touch()
     FakeSafeFile.requested.clear()
@@ -106,6 +125,19 @@ def test_parameter_specific_loader_uses_lazy_safetensors_slice(tmp_path):
     loader.load_model(model, str(tmp_path))
 
     torch.testing.assert_close(model.model.weight, torch.tensor([5.0, 6.0]))
+    assert FakeSafeFile.sliced == ["external.text.weight"]
+    assert FakeSafeFile.requested == []
+
+
+def test_packed_parameter_loader_uses_lazy_safetensors_slice(tmp_path):
+    (tmp_path / "model.safetensors").touch()
+    FakeSafeFile.requested.clear()
+    FakeSafeFile.sliced.clear()
+    model = PackedSlicedMappedModel()
+
+    loader.load_model(model, str(tmp_path))
+
+    torch.testing.assert_close(model.model.gate_up_proj.weight, torch.tensor([[5.0, 6.0]]))
     assert FakeSafeFile.sliced == ["external.text.weight"]
     assert FakeSafeFile.requested == []
 

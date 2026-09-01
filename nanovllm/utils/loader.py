@@ -44,6 +44,19 @@ def load_model(model: nn.Module, path: str):
                 if packed_parameter is not None:
                     param_name, shard_id = packed_parameter
                     param = model.get_parameter(param_name)
+                    packed_safetensors_loader = getattr(
+                        param,
+                        "packed_safetensors_loader",
+                        None,
+                    )
+                    if packed_safetensors_loader is not None:
+                        packed_safetensors_loader(
+                            param,
+                            f.get_slice(source_weight_name),
+                            shard_id,
+                        )
+                        loaded_parameters.add(param_name)
+                        continue
                     weight_loader = getattr(param, "weight_loader")
                     weight_loader(
                         param,

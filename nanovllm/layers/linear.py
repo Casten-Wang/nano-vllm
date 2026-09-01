@@ -101,6 +101,9 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
     ):
         self.output_sizes = output_sizes
         super().__init__(input_size, sum(output_sizes), bias)
+        self.weight.packed_safetensors_loader = self.packed_safetensors_loader
+        if self.bias is not None:
+            self.bias.packed_safetensors_loader = self.packed_safetensors_loader
 
     def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor, loaded_shard_id: int):
         param_data = param.data
@@ -109,6 +112,30 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         param_data = param_data.narrow(self.tp_dim, shard_offset, shard_size)
         loaded_weight = loaded_weight.chunk(self.tp_size, self.tp_dim)[self.tp_rank]
         param_data.copy_(loaded_weight)
+
+    def packed_safetensors_loader(
+        self,
+        param: nn.Parameter,
+        loaded_weight,
+        loaded_shard_id: int,
+    ):
+        if not 0 <= loaded_shard_id < len(self.output_sizes):
+            raise ValueError("invalid merged column shard id")
+        shape = tuple(loaded_weight.get_shape())
+        expected_shape = (self.output_sizes[loaded_shard_id], *param.shape[1:])
+        if shape != expected_shape:
+            raise ValueError(
+                f"invalid merged column weight shape: {shape}; "
+                f"expected {expected_shape}"
+            )
+        shard_size = self.output_sizes[loaded_shard_id] // self.tp_size
+        source_start = self.tp_rank * shard_size
+        target_start = sum(self.output_sizes[:loaded_shard_id]) // self.tp_size
+        target = param.data.narrow(self.tp_dim, target_start, shard_size)
+        index = (slice(source_start, source_start + shard_size),) + (
+            slice(None),
+        ) * (len(shape) - 1)
+        target.copy_(loaded_weight[index])
 
 
 class QKVParallelLinear(ColumnParallelLinear):
@@ -135,6 +162,9 @@ class QKVParallelLinear(ColumnParallelLinear):
             self.num_heads + 2 * self.num_kv_heads
         ) * self.head_size * tp_size
         super().__init__(hidden_size, output_size, bias)
+        self.weight.packed_safetensors_loader = self.packed_safetensors_loader
+        if self.bias is not None:
+            self.bias.packed_safetensors_loader = self.packed_safetensors_loader
 
     def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor, loaded_shard_id: str):
         param_data = param.data
@@ -160,6 +190,42 @@ class QKVParallelLinear(ColumnParallelLinear):
             shard_size,
         )
         param_data.copy_(loaded_weight)
+
+    def packed_safetensors_loader(
+        self,
+        param: nn.Parameter,
+        loaded_weight,
+        loaded_shard_id: str,
+    ):
+        if loaded_shard_id not in ("q", "k", "v"):
+            raise ValueError("invalid QKV shard id")
+        if loaded_shard_id == "q":
+            shard_size = self.num_heads * self.head_size
+            target_start = 0
+            source_rank = self.tp_rank
+            source_rows = shard_size * self.tp_size
+        else:
+            shard_size = self.num_kv_heads * self.head_size
+            target_start = self.num_heads * self.head_size
+            if loaded_shard_id == "v":
+                target_start += shard_size
+            source_rank = self.tp_rank // self.num_kv_head_replicas
+            source_rows = shard_size * (
+                self.tp_size // self.num_kv_head_replicas
+            )
+        shape = tuple(loaded_weight.get_shape())
+        expected_shape = (source_rows, *param.shape[1:])
+        if shape != expected_shape:
+            raise ValueError(
+                f"invalid QKV {loaded_shard_id} weight shape: {shape}; "
+                f"expected {expected_shape}"
+            )
+        source_start = source_rank * shard_size
+        target = param.data.narrow(self.tp_dim, target_start, shard_size)
+        index = (slice(source_start, source_start + shard_size),) + (
+            slice(None),
+        ) * (len(shape) - 1)
+        target.copy_(loaded_weight[index])
 
 
 class KVParallelLinear(ColumnParallelLinear):

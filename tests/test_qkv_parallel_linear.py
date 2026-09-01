@@ -142,3 +142,39 @@ def test_lazy_column_and_row_loaders_read_only_local_tp_slices():
     assert torch.equal(row.weight, row_source.tensor[:, 4:8])
     assert column_source.requests == [(slice(4, 8), slice(None))]
     assert row_source.requests == [(slice(None), slice(4, 8))]
+
+
+def test_lazy_merged_column_loader_reads_each_local_packed_shard():
+    with (
+        patch.object(LINEAR.dist, "get_world_size", return_value=2),
+        patch.object(LINEAR.dist, "get_rank", return_value=1),
+    ):
+        layer = LINEAR.MergedColumnParallelLinear(3, [8, 4])
+    gate = TrackingSlice(torch.arange(24).reshape(8, 3).float())
+    up = TrackingSlice(torch.arange(12).reshape(4, 3).float() + 100)
+
+    layer.packed_safetensors_loader(layer.weight, gate, 0)
+    layer.packed_safetensors_loader(layer.weight, up, 1)
+
+    assert torch.equal(layer.weight[:4], gate.tensor[4:8])
+    assert torch.equal(layer.weight[4:], up.tensor[2:4])
+    assert gate.requests == [(slice(4, 8), slice(None))]
+    assert up.requests == [(slice(2, 4), slice(None))]
+
+
+def test_lazy_qkv_loader_preserves_replicated_kv_source_selection():
+    layer = make_layer(rank=1)
+    query = TrackingSlice(torch.arange(96).reshape(32, 3).float())
+    key = TrackingSlice(torch.arange(12).reshape(4, 3).float())
+    value = TrackingSlice(torch.arange(12).reshape(4, 3).float() + 100)
+
+    layer.packed_safetensors_loader(layer.weight, query, "q")
+    layer.packed_safetensors_loader(layer.weight, key, "k")
+    layer.packed_safetensors_loader(layer.weight, value, "v")
+
+    assert torch.equal(layer.weight[:8], query.tensor[8:16])
+    assert torch.equal(layer.weight[8:10], key.tensor[:2])
+    assert torch.equal(layer.weight[10:12], value.tensor[:2])
+    assert query.requests == [(slice(8, 16), slice(None))]
+    assert key.requests == [(slice(0, 2), slice(None))]
+    assert value.requests == [(slice(0, 2), slice(None))]
