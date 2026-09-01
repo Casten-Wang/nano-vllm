@@ -64,3 +64,25 @@ def test_query_weight_loader_remains_rank_sharded():
 
     for rank, layer in enumerate(layers):
         assert torch.equal(layer.weight[:8], loaded_q[rank * 8 : (rank + 1) * 8])
+
+
+def test_standalone_kv_projection_replicates_heads_and_bias():
+    loaded_weight = torch.arange(12, dtype=torch.float32).reshape(4, 3)
+    loaded_bias = torch.arange(4, dtype=torch.float32)
+    layers = []
+    for rank in range(4):
+        with (
+            patch.object(LINEAR.dist, "get_world_size", return_value=4),
+            patch.object(LINEAR.dist, "get_rank", return_value=rank),
+        ):
+            layer = LINEAR.KVParallelLinear(3, 2, 2, bias=True)
+        layer.weight_loader(layer.weight, loaded_weight)
+        layer.weight_loader(layer.bias, loaded_bias)
+        layers.append(layer)
+
+    assert torch.equal(layers[0].weight, loaded_weight[:2])
+    assert torch.equal(layers[1].weight, loaded_weight[:2])
+    assert torch.equal(layers[2].weight, loaded_weight[2:])
+    assert torch.equal(layers[3].weight, loaded_weight[2:])
+    assert torch.equal(layers[0].bias, loaded_bias[:2])
+    assert torch.equal(layers[3].bias, loaded_bias[2:])
