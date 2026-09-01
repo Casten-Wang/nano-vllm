@@ -78,25 +78,91 @@ def _load_local_runtime():
                 self.num_kv_heads = num_kv_heads
                 self.scale = scale
                 self.k_cache = self.v_cache = torch.tensor([])
+                self.keys_by_slot = {}
+                self.values_by_slot = {}
 
             def forward(self, query, key, value):
+                context = CURRENT_CONTEXT["value"]
                 repeats = self.num_heads // self.num_kv_heads
                 key = key.repeat_interleave(repeats, dim=1)
                 value = value.repeat_interleave(repeats, dim=1)
                 output = torch.empty_like(query)
-                for start, end in CURRENT_CONTEXT["value"].state_token_ranges:
+
+                slots = context.state_slots.tolist()
+                if context.state_reset_mask is not None:
+                    for slot, reset in zip(
+                        slots,
+                        context.state_reset_mask.tolist(),
+                    ):
+                        if reset:
+                            self.keys_by_slot.pop(slot, None)
+                            self.values_by_slot.pop(slot, None)
+
+                decode_count = (
+                    context.decode_token_count
+                    if context.is_mixed
+                    else (0 if context.is_prefill else query.shape[0])
+                )
+                for row in range(decode_count):
+                    slot = slots[row]
+                    previous_key = self.keys_by_slot.get(slot)
+                    previous_value = self.values_by_slot.get(slot)
+                    all_key = (
+                        key[row : row + 1]
+                        if previous_key is None
+                        else torch.cat((previous_key, key[row : row + 1]))
+                    )
+                    all_value = (
+                        value[row : row + 1]
+                        if previous_value is None
+                        else torch.cat((previous_value, value[row : row + 1]))
+                    )
+                    scores = torch.einsum(
+                        "thd,shd->hts",
+                        query[row : row + 1],
+                        all_key,
+                    ) * self.scale
+                    output[row : row + 1] = torch.einsum(
+                        "hts,shd->thd",
+                        scores.softmax(dim=-1),
+                        all_value,
+                    )
+                    self.keys_by_slot[slot] = all_key
+                    self.values_by_slot[slot] = all_value
+
+                for range_index, (start, end) in enumerate(
+                    context.state_token_ranges
+                ):
+                    slot = slots[decode_count + range_index]
+                    previous_key = self.keys_by_slot.get(slot)
+                    previous_value = self.values_by_slot.get(slot)
+                    prefix_length = 0 if previous_key is None else previous_key.shape[0]
+                    all_key = (
+                        key[start:end]
+                        if previous_key is None
+                        else torch.cat((previous_key, key[start:end]))
+                    )
+                    all_value = (
+                        value[start:end]
+                        if previous_value is None
+                        else torch.cat((previous_value, value[start:end]))
+                    )
                     scores = torch.einsum(
                         "thd,shd->hts",
                         query[start:end],
-                        key[start:end],
+                        all_key,
                     ) * self.scale
-                    mask = torch.ones(end - start, end - start, dtype=torch.bool).triu(1)
+                    query_positions = prefix_length + torch.arange(end - start)
+                    key_positions = torch.arange(all_key.shape[0])
+                    mask = key_positions.unsqueeze(0) > query_positions.unsqueeze(1)
                     scores = scores.masked_fill(mask, float("-inf"))
                     output[start:end] = torch.einsum(
                         "hts,shd->thd",
                         scores.softmax(dim=-1),
-                        value[start:end],
+                        all_value,
                     )
+                    self.keys_by_slot[slot] = all_key
+                    self.values_by_slot[slot] = all_value
                 return output
 
         attention_module.Attention = EagerAttention
@@ -215,3 +281,80 @@ def test_tiny_text_model_matches_transformers_end_to_end(tmp_path):
         rtol=2e-4,
         atol=2e-4,
     )
+
+
+def test_prefill_then_decode_matches_transformers_full_recomputation(tmp_path):
+    config = tiny_config()
+    torch.manual_seed(53)
+    reference = TransformersQwen35(config).eval()
+    with (
+        patch.object(LINEAR.dist, "get_world_size", return_value=1),
+        patch.object(LINEAR.dist, "get_rank", return_value=0),
+        patch("torch.distributed.get_world_size", return_value=1),
+        patch("torch.distributed.get_rank", return_value=0),
+    ):
+        local = LOCAL.Qwen3_5MoeForCausalLM(config).eval()
+        for module in local.modules():
+            allocate = getattr(module, "allocate_state_cache", None)
+            if allocate is not None:
+                allocate(2, "cpu")
+        safetensors_torch.save_file(
+            {
+                name: value.detach().contiguous()
+                for name, value in reference.state_dict().items()
+            },
+            str(tmp_path / "model.safetensors"),
+        )
+        LOADER.load_model(local, str(tmp_path))
+
+    tokens = torch.tensor([[1, 5, 7, 2, 9]])
+    CURRENT_CONTEXT["value"] = types.SimpleNamespace(
+        is_prefill=True,
+        is_mixed=False,
+        decode_token_count=0,
+        state_slots=torch.tensor([0], dtype=torch.int32),
+        state_reset_mask=torch.tensor([True]),
+        state_token_ranges=((0, 3),),
+        cu_seqlens_q=torch.tensor([0, 3], dtype=torch.int32),
+    )
+    with (
+        patch.dict(sys.modules, {"nanovllm.utils.context": CONTEXT_MODULE}),
+        torch.inference_mode(),
+    ):
+        expected_prefix = reference.model(
+            input_ids=tokens[:, :3],
+            use_cache=False,
+        ).last_hidden_state.squeeze(0)
+        actual_prefix = local(tokens[0, :3], torch.arange(3))
+        torch.testing.assert_close(
+            actual_prefix,
+            expected_prefix,
+            rtol=2e-4,
+            atol=2e-4,
+        )
+
+        for token_index in range(3, tokens.shape[1]):
+            CURRENT_CONTEXT["value"] = types.SimpleNamespace(
+                is_prefill=False,
+                is_mixed=False,
+                decode_token_count=1,
+                state_slots=torch.tensor([0], dtype=torch.int32),
+                state_reset_mask=torch.tensor([False]),
+                state_token_ranges=(),
+                cu_seqlens_q=None,
+            )
+            actual = local(
+                tokens[0, token_index : token_index + 1],
+                torch.tensor([token_index]),
+            )
+            expected = reference.model(
+                input_ids=tokens[:, : token_index + 1],
+                use_cache=False,
+            ).last_hidden_state[:, -1]
+            torch.testing.assert_close(actual, expected, rtol=2e-4, atol=2e-4)
+            torch.testing.assert_close(
+                local.compute_logits(actual),
+                reference.lm_head(expected),
+                rtol=2e-4,
+                atol=2e-4,
+            )
