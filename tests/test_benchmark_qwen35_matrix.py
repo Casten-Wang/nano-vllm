@@ -88,16 +88,23 @@ def test_negative_memory_headroom_is_rejected():
         MODULE.normalize_args(args(memory_headroom_gib=-1))
 
 
+def test_workload_longer_than_context_is_rejected_before_gpu_use():
+    with pytest.raises(ValueError, match="cannot exceed max_model_len"):
+        MODULE.normalize_args(args(input_len=4000, output_len=128))
+
+
 def test_memory_preflight_covers_each_tp_rank():
     gib = 1024**3
     report = {
         "results": {
             "tp4": {
                 "local_parameter_bytes": 16 * gib,
+                "kv_bytes_per_token": 1024,
                 "state_bytes_per_sequence": {"float32": 8, "model": 4},
             },
             "tp8": {
                 "local_parameter_bytes": 8 * gib,
+                "kv_bytes_per_token": 512,
                 "state_bytes_per_sequence": {"float32": 4, "model": 2},
             },
         }
@@ -109,12 +116,17 @@ def test_memory_preflight_covers_each_tp_rank():
         [20 * gib] * 8,
         2 * gib,
         64,
+        64,
+        640,
     )
 
     assert result["valid"]
     assert result["results"]["tp4"]["max_state_bytes_per_rank"] == 8 * 64
+    assert result["results"]["tp4"]["minimum_workload_kv_bytes_per_rank"] == (
+        64 * 3 * 256 * 1024
+    )
     assert result["results"]["tp4"]["required_free_bytes_per_rank"] == (
-        18 * gib + 8 * 64
+        18 * gib + 8 * 64 + 64 * 3 * 256 * 1024
     )
     assert len(result["results"]["tp8"]["free_bytes_by_rank"]) == 8
 
@@ -125,6 +137,7 @@ def test_memory_preflight_rejects_insufficient_rank():
         "results": {
             "tp4": {
                 "local_parameter_bytes": 16 * gib,
+                "kv_bytes_per_token": 1024,
                 "state_bytes_per_sequence": {"float32": gib // 64, "model": 0},
             }
         }
@@ -137,6 +150,8 @@ def test_memory_preflight_rejects_insufficient_rank():
             [20 * gib, 20 * gib, 17 * gib, 20 * gib],
             2 * gib,
             64,
+            64,
+            640,
         )
 
 

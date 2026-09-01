@@ -19,6 +19,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from nanovllm.models.model_spec import resolve_model_spec
+from nanovllm.models.cache_plan import plan_cache_memory
 from nanovllm.models.registry import create_model
 from nanovllm.utils.loader import resolve_packed_parameter
 from nanovllm.benchmark_metadata import checkpoint_manifest_metadata
@@ -139,25 +140,30 @@ def parameter_storage_bytes(model: torch.nn.Module) -> int:
     )
 
 
-def recurrent_storage_bytes_per_sequence(model: torch.nn.Module) -> dict[str, int]:
-    recurrent_elements = 0
-    convolution_bytes = 0
-    recurrent_model_bytes = 0
-    for module in model.modules():
-        if not callable(getattr(module, "allocate_state_cache", None)):
-            continue
-        recurrent_count = (
-            module.num_v_heads * module.key_head_dim * module.value_head_dim
-        )
-        convolution_count = module.local_conv_dim * module.conv_kernel_size
-        model_element_size = module.in_proj_qkv.weight.element_size()
-        recurrent_elements += recurrent_count
-        recurrent_model_bytes += recurrent_count * model_element_size
-        convolution_bytes += convolution_count * model_element_size
+def cache_storage_metadata(model_spec, tp_size: int, model_dtype_bytes: int) -> dict:
+    fp32_state = plan_cache_memory(
+        model_spec,
+        tp_size,
+        kv_dtype_bytes=model_dtype_bytes,
+        recurrent_dtype_bytes=4,
+        convolution_dtype_bytes=model_dtype_bytes,
+    )
+    model_state = plan_cache_memory(
+        model_spec,
+        tp_size,
+        kv_dtype_bytes=model_dtype_bytes,
+        recurrent_dtype_bytes=model_dtype_bytes,
+        convolution_dtype_bytes=model_dtype_bytes,
+    )
     return {
-        "float32": recurrent_elements * 4 + convolution_bytes,
-        "model": recurrent_model_bytes + convolution_bytes,
-        "convolution": convolution_bytes,
+        "kv_bytes_per_token": fp32_state.kv_bytes_per_token,
+        "state_bytes_per_sequence": {
+            "float32": fp32_state.recurrent_bytes_per_sequence
+            + fp32_state.convolution_bytes_per_sequence,
+            "model": model_state.recurrent_bytes_per_sequence
+            + model_state.convolution_bytes_per_sequence,
+            "convolution": fp32_state.convolution_bytes_per_sequence,
+        },
     }
 
 
@@ -203,15 +209,22 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    config = AutoConfig.from_pretrained(args.model)
+    model_spec = resolve_model_spec(config)
+    model_config = model_spec.text_config
+    model_dtype = getattr(model_config, "dtype", None)
+    if not isinstance(model_dtype, torch.dtype):
+        model_dtype = getattr(model_config, "torch_dtype", None)
+    if not isinstance(model_dtype, torch.dtype):
+        model_dtype = torch.bfloat16
+    model_dtype_bytes = torch.empty((), dtype=model_dtype).element_size()
     checkpoint_manifest = checkpoint_manifest_metadata(args.model)
     results = {}
     for tp_size in args.tp_sizes:
         model = instantiate_meta_model(args.model, tp_size)
         result = audit_checkpoint_mapping(model, args.model)
         result["local_parameter_bytes"] = parameter_storage_bytes(model)
-        result["state_bytes_per_sequence"] = (
-            recurrent_storage_bytes_per_sequence(model)
-        )
+        result.update(cache_storage_metadata(model_spec, tp_size, model_dtype_bytes))
         results[f"tp{tp_size}"] = result
         del model
     final_checkpoint_manifest = checkpoint_manifest_metadata(args.model)

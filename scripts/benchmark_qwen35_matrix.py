@@ -14,6 +14,7 @@ BASELINE_SCRIPT = ROOT / "scripts" / "benchmark_baseline.py"
 AUDIT_SCRIPT = ROOT / "scripts" / "audit_checkpoint_mapping.py"
 COMPARE_SCRIPT = ROOT / "scripts" / "compare_benchmark_runs.py"
 INT8_PARTITION_THRESHOLD = 8192
+KVCACHE_BLOCK_SIZE = 256
 
 
 @dataclass(frozen=True)
@@ -194,11 +195,15 @@ def validate_memory_capacity(
     free_bytes_by_device: list[int],
     headroom_bytes: int,
     max_num_seqs: int,
+    num_seqs: int,
+    sequence_length: int,
 ) -> dict:
     if headroom_bytes < 0:
         raise ValueError("memory headroom must be non-negative")
     if max_num_seqs <= 0:
         raise ValueError("max_num_seqs must be positive")
+    if num_seqs <= 0 or sequence_length <= 0:
+        raise ValueError("workload dimensions must be positive")
     results = {}
     for tp_size in tp_sizes:
         if len(free_bytes_by_device) < tp_size:
@@ -218,7 +223,22 @@ def validate_memory_capacity(
             state_sizes["float32"],
             state_sizes["model"],
         ) * max_num_seqs
-        required_bytes = parameter_bytes + state_bytes + headroom_bytes
+        kv_bytes_per_token = audit.get("kv_bytes_per_token")
+        if not isinstance(kv_bytes_per_token, int) or kv_bytes_per_token <= 0:
+            raise ValueError(f"checkpoint audit has no TP={tp_size} KV size")
+        blocks_per_sequence = (
+            sequence_length + KVCACHE_BLOCK_SIZE - 1
+        ) // KVCACHE_BLOCK_SIZE
+        concurrent_sequences = min(num_seqs, max_num_seqs)
+        kv_bytes = (
+            concurrent_sequences
+            * blocks_per_sequence
+            * KVCACHE_BLOCK_SIZE
+            * kv_bytes_per_token
+        )
+        required_bytes = (
+            parameter_bytes + state_bytes + kv_bytes + headroom_bytes
+        )
         free_bytes = free_bytes_by_device[:tp_size]
         insufficient = [
             rank for rank, available in enumerate(free_bytes)
@@ -227,6 +247,7 @@ def validate_memory_capacity(
         results[f"tp{tp_size}"] = {
             "local_parameter_bytes": parameter_bytes,
             "max_state_bytes_per_rank": state_bytes,
+            "minimum_workload_kv_bytes_per_rank": kv_bytes,
             "max_num_seqs": max_num_seqs,
             "headroom_bytes": headroom_bytes,
             "required_free_bytes_per_rank": required_bytes,
@@ -290,6 +311,10 @@ def normalize_args(args: argparse.Namespace) -> argparse.Namespace:
         args.max_num_seqs = args.num_seqs
     if args.repeats <= 0:
         raise ValueError("--repeats must be positive")
+    if args.num_seqs <= 0 or args.input_len <= 0 or args.output_len <= 0:
+        raise ValueError("workload sizes must be positive")
+    if args.input_len + args.output_len > args.max_model_len:
+        raise ValueError("input_len plus output_len cannot exceed max_model_len")
     if args.memory_headroom_gib < 0:
         raise ValueError("--memory-headroom-gib must be non-negative")
     if args.run_id is not None and (
@@ -334,6 +359,8 @@ def main() -> None:
                     gpu_free_memory_bytes(),
                     int(args.memory_headroom_gib * 1024**3),
                     args.max_num_seqs,
+                    args.num_seqs,
+                    args.input_len + args.output_len,
                 )
                 memory_path = Path(args.result_dir) / "memory_preflight.json"
                 memory_path.write_text(json.dumps(memory_report, indent=2) + "\n")

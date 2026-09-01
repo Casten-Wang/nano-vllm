@@ -1,5 +1,6 @@
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
+from types import SimpleNamespace
 
 import torch
 
@@ -25,28 +26,36 @@ def test_parameter_storage_bytes_uses_parameter_dtype_and_shape():
     assert MODULE.parameter_storage_bytes(model) == expected
 
 
-def test_recurrent_storage_bytes_include_every_layer_and_convolution():
-    class StatefulLayer(torch.nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.num_v_heads = 4
-            self.key_head_dim = 3
-            self.value_head_dim = 2
-            self.local_conv_dim = 10
-            self.conv_kernel_size = 4
-            self.in_proj_qkv = torch.nn.Linear(1, 1, dtype=torch.bfloat16)
+def test_cache_storage_metadata_uses_tp_and_model_dtype():
+    config = SimpleNamespace(
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=8,
+        hidden_size=32,
+        linear_num_key_heads=4,
+        linear_num_value_heads=8,
+        linear_key_head_dim=4,
+        linear_value_head_dim=4,
+        linear_conv_kernel_dim=2,
+    )
+    model_spec = MODULE.resolve_model_spec(
+        SimpleNamespace(
+            architectures=["Qwen3_5MoeForConditionalGeneration"],
+            text_config=SimpleNamespace(
+                **vars(config),
+                layer_types=["linear_attention", "full_attention"],
+            ),
+        )
+    )
 
-        def allocate_state_cache(self):
-            pass
+    result = MODULE.cache_storage_metadata(model_spec, 2, 2)
 
-    model = torch.nn.Sequential(StatefulLayer(), StatefulLayer())
-
-    result = MODULE.recurrent_storage_bytes_per_sequence(model)
-
-    recurrent_elements = 2 * 4 * 3 * 2
-    convolution_bytes = 2 * 10 * 4 * 2
     assert result == {
-        "float32": recurrent_elements * 4 + convolution_bytes,
-        "model": recurrent_elements * 2 + convolution_bytes,
-        "convolution": convolution_bytes,
+        "kv_bytes_per_token": 32,
+        "state_bytes_per_sequence": {
+            "float32": 384,
+            "model": 256,
+            "convolution": 128,
+        },
     }
