@@ -73,12 +73,18 @@ attention = load_module(
 )
 
 
-def config():
+def config(
+    *,
+    hidden_size=8,
+    num_attention_heads=4,
+    num_key_value_heads=1,
+    head_dim=4,
+):
     return SimpleNamespace(
-        hidden_size=8,
-        num_attention_heads=4,
-        num_key_value_heads=1,
-        head_dim=4,
+        hidden_size=hidden_size,
+        num_attention_heads=num_attention_heads,
+        num_key_value_heads=num_key_value_heads,
+        head_dim=head_dim,
         attention_bias=False,
         rms_norm_eps=1e-6,
         max_position_embeddings=32,
@@ -89,7 +95,7 @@ def config():
     )
 
 
-def make_attention(rank=0, world_size=1):
+def make_attention(rank=0, world_size=1, layer_config=None):
     rotary.get_rope.cache_clear()
     with (
         patch.object(attention.dist, "get_world_size", return_value=world_size),
@@ -97,7 +103,7 @@ def make_attention(rank=0, world_size=1):
         patch.object(linear.dist, "get_world_size", return_value=world_size),
         patch.object(linear.dist, "get_rank", return_value=rank),
     ):
-        return attention.Qwen35Attention(config())
+        return attention.Qwen35Attention(layer_config or config())
 
 
 def test_attention_shapes_include_local_query_gate_and_replicated_kv():
@@ -167,3 +173,48 @@ def test_tensor_parallel_attention_sums_to_single_rank_reference():
         actual = sum(layer(positions, hidden) for layer in ranks)
 
     torch.testing.assert_close(actual, expected, rtol=2e-5, atol=2e-5)
+
+
+@torch.no_grad()
+def test_official_head_layout_matches_across_tp4_and_tp8():
+    torch.manual_seed(29)
+    layer_config = config(
+        hidden_size=8,
+        num_attention_heads=16,
+        num_key_value_heads=2,
+        head_dim=4,
+    )
+    full = make_attention(world_size=1, layer_config=layer_config)
+    sources = {
+        "q_proj.weight": torch.randn(128, 8),
+        "k_proj.weight": torch.randn(8, 8),
+        "v_proj.weight": torch.randn(8, 8),
+        "o_proj.weight": torch.randn(8, 64),
+        "q_norm.weight": torch.randn(4),
+        "k_norm.weight": torch.randn(4),
+    }
+
+    def load(layer):
+        for name, source in sources.items():
+            parameter = layer.get_parameter(name)
+            loader = getattr(parameter, "weight_loader", None)
+            if loader is None:
+                parameter.copy_(source)
+            else:
+                loader(parameter, source)
+
+    load(full)
+    hidden = torch.randn(5, 8)
+    positions = torch.arange(5)
+    expected = full(positions, hidden)
+
+    for tp_size in (4, 8):
+        ranks = [
+            make_attention(rank=rank, world_size=tp_size, layer_config=layer_config)
+            for rank in range(tp_size)
+        ]
+        for rank_layer in ranks:
+            load(rank_layer)
+        with patch.object(linear.dist, "all_reduce", return_value=None):
+            actual = sum(rank_layer(positions, hidden) for rank_layer in ranks)
+        torch.testing.assert_close(actual, expected, rtol=2e-5, atol=2e-5)
