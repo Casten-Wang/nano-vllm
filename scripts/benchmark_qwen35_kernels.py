@@ -245,6 +245,38 @@ def expert_dispatch_general(
     return output
 
 
+def expert_dispatch_batched_decode(
+    hidden_states: torch.Tensor,
+    topk_ids: torch.Tensor,
+    topk_weights: torch.Tensor,
+    gate_up_proj: torch.Tensor,
+    down_proj: torch.Tensor,
+) -> torch.Tensor:
+    """Graph-safe single-token candidate using batched expert matmuls.
+
+    This removes device-to-host routing synchronization at the cost of
+    gathering the selected expert weights. It remains benchmark-only until
+    GPU latency and peak-memory measurements justify that trade-off.
+    """
+
+    if hidden_states.shape[0] != 1:
+        raise ValueError("batched decode dispatch requires exactly one token")
+    expert_ids = topk_ids[0]
+    selected_gate_up = gate_up_proj.index_select(0, expert_ids)
+    expanded_hidden = hidden_states.expand(expert_ids.numel(), -1).unsqueeze(-1)
+    gate_up = torch.bmm(selected_gate_up, expanded_hidden).squeeze(-1)
+    gate, up = gate_up.chunk(2, dim=-1)
+    selected_down = down_proj.index_select(0, expert_ids)
+    expert_output = torch.bmm(
+        selected_down,
+        (F.silu(gate) * up).unsqueeze(-1),
+    ).squeeze(-1)
+    return (expert_output * topk_weights[0].unsqueeze(-1)).sum(
+        dim=0,
+        keepdim=True,
+    )
+
+
 def expert_dispatch_reference(
     hidden_states: torch.Tensor,
     topk_ids: torch.Tensor,
@@ -376,6 +408,45 @@ def benchmark_expert_dispatch(args, device, dtype, token_count: int) -> dict:
         result["decode_fast_path_speedup"] = (
             general_timing["median_ms"] / result["candidate"]["median_ms"]
         )
+        graph_safe_output = expert_dispatch_batched_decode(
+            hidden,
+            topk_ids,
+            topk_weights,
+            gate_up_proj,
+            down_proj,
+        )
+        graph_safe_timing = measure(
+            lambda: expert_dispatch_batched_decode(
+                hidden,
+                topk_ids,
+                topk_weights,
+                gate_up_proj,
+                down_proj,
+            ),
+            device=device,
+            warmup=args.warmup,
+            iterations=args.iterations,
+            repeats=args.repeats,
+        )
+        graph_safe_timing.update(
+            {
+                "speedup_vs_current": (
+                    result["candidate"]["median_ms"]
+                    / graph_safe_timing["median_ms"]
+                ),
+                "errors_vs_current": error(graph_safe_output, output),
+                "estimated_selected_weight_mib": (
+                    args.top_k
+                    * 3
+                    * local_intermediate_size
+                    * args.hidden_size
+                    * hidden.element_size()
+                    / 1024
+                    / 1024
+                ),
+            }
+        )
+        result["graph_safe_batched_candidate"] = graph_safe_timing
     return result
 
 

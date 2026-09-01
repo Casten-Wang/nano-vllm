@@ -68,6 +68,32 @@ def test_expert_dispatch_matches_naive_route_accumulation():
     torch.testing.assert_close(actual, reference)
 
 
+def test_graph_safe_batched_decode_matches_current_single_token_path():
+    torch.manual_seed(109)
+    hidden = torch.randn(1, 4)
+    topk_ids = torch.tensor([[3, 1]])
+    topk_weights = torch.tensor([[0.25, 0.75]])
+    gate_up = torch.randn(4, 6, 4)
+    down = torch.randn(4, 4, 3)
+
+    expected = MODULE.expert_dispatch(
+        hidden,
+        topk_ids,
+        topk_weights,
+        gate_up,
+        down,
+    )
+    actual = MODULE.expert_dispatch_batched_decode(
+        hidden,
+        topk_ids,
+        topk_weights,
+        gate_up,
+        down,
+    )
+
+    torch.testing.assert_close(actual, expected)
+
+
 def test_expert_dispatch_sweep_preserves_requested_token_counts(monkeypatch):
     calls = []
 
@@ -112,3 +138,7 @@ def test_single_token_dispatch_reports_general_path_baseline():
     assert result["single_token_decode_fast_path"]
     assert result["general_dispatch_baseline"]["median_ms"] > 0
     assert result["decode_fast_path_speedup"] > 0
+    graph_safe = result["graph_safe_batched_candidate"]
+    assert graph_safe["speedup_vs_current"] > 0
+    assert graph_safe["estimated_selected_weight_mib"] > 0
+    assert graph_safe["errors_vs_current"]["max_abs_error"] < 1e-5
