@@ -487,6 +487,7 @@ def test_official_head_layout_matches_across_tp4_and_tp8():
         layer.allocate_state_cache(1, "cpu")
 
     hidden = torch.randn(3, 8)
+    decode_hidden = torch.randn(1, 8)
     context = SimpleNamespace(
         is_mixed=False,
         is_prefill=True,
@@ -496,12 +497,11 @@ def test_official_head_layout_matches_across_tp4_and_tp8():
     )
     context_module = types.ModuleType("nanovllm.utils.context")
     context_module.get_context = lambda: context
-    full = make_layer(world_size=1, layer_config=layer_config)
-    load(full)
-
     with patch.dict(sys.modules, {"nanovllm.utils.context": context_module}):
-        expected = full(hidden)
         for tp_size in (4, 8):
+            full = make_layer(world_size=1, layer_config=layer_config)
+            load(full)
+            expected = full(hidden)
             ranks = [
                 make_layer(
                     rank=rank,
@@ -519,6 +519,29 @@ def test_official_head_layout_matches_across_tp4_and_tp8():
             ):
                 actual = sum(rank_layer(hidden) for rank_layer in ranks)
             torch.testing.assert_close(actual, expected, rtol=3e-5, atol=3e-5)
+
+            context.is_prefill = False
+            context.state_token_ranges = ()
+            context.state_reset_mask = torch.tensor([False])
+            expected_decode = full(decode_hidden)
+            with patch.object(
+                qwen35_gated_delta.dist,
+                "all_reduce",
+                return_value=None,
+            ):
+                actual_decode = sum(
+                    rank_layer(decode_hidden) for rank_layer in ranks
+                )
+            torch.testing.assert_close(
+                actual_decode,
+                expected_decode,
+                rtol=3e-5,
+                atol=3e-5,
+            )
+
+            context.is_prefill = True
+            context.state_token_ranges = ((0, 3),)
+            context.state_reset_mask = torch.tensor([True])
 
 
 def test_official_state_allocations_match_tp4_and_tp8_memory_budget():
