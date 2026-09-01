@@ -28,6 +28,7 @@ class Config:
     int8_partitioned_decode_threshold: int = 8192
     int8_partitioned_decode_partition_size: int = 512
     recurrent_state_dtype: str = "float32"
+    qwen35_moe_decode_backend: str = "sorted"
     distributed_port: int | None = None
     shared_memory_name: str | None = None
 
@@ -60,6 +61,10 @@ class Config:
             raise ValueError("int8_partitioned_decode_partition_size must be positive")
         if self.recurrent_state_dtype not in ("float32", "model"):
             raise ValueError("recurrent_state_dtype must be 'float32' or 'model'")
+        if self.qwen35_moe_decode_backend not in ("sorted", "batched"):
+            raise ValueError(
+                "qwen35_moe_decode_backend must be 'sorted' or 'batched'"
+            )
         if self.distributed_port is not None and not 1 <= self.distributed_port <= 65535:
             raise ValueError("distributed_port must be in [1, 65535]")
         if self.shared_memory_name is not None and not self.shared_memory_name:
@@ -67,6 +72,9 @@ class Config:
         self.hf_config = AutoConfig.from_pretrained(self.model)
         self.model_spec = resolve_model_spec(self.hf_config)
         self.model_config = self.model_spec.text_config
+        self.model_config.qwen35_moe_decode_backend = (
+            self.qwen35_moe_decode_backend
+        )
         if not hasattr(self.model_config, "dtype"):
             torch_dtype = getattr(self.model_config, "torch_dtype", None)
             self.model_config.dtype = (

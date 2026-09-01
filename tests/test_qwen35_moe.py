@@ -4,6 +4,7 @@ import sys
 import types
 from unittest.mock import patch
 
+import pytest
 import torch
 
 
@@ -35,6 +36,7 @@ def make_experts(
     hidden_size: int = 2,
     intermediate_size: int = 4,
     num_experts: int = 2,
+    decode_backend: str = "sorted",
 ):
     with (
         patch.object(qwen35_moe.dist, "get_world_size", return_value=world_size),
@@ -44,6 +46,7 @@ def make_experts(
             hidden_size=hidden_size,
             intermediate_size=intermediate_size,
             num_experts=num_experts,
+            decode_backend=decode_backend,
         )
 
 
@@ -187,6 +190,34 @@ def test_single_token_decode_skips_general_expert_grouping():
         actual = experts(hidden, topk_ids, topk_weights)
 
     assert torch.equal(actual, expected)
+
+
+def test_batched_single_token_decode_matches_sorted_backend():
+    torch.manual_seed(47)
+    sorted_experts = make_experts(num_experts=4)
+    batched_experts = make_experts(
+        num_experts=4,
+        decode_backend="batched",
+    )
+    batched_experts.load_state_dict(sorted_experts.state_dict())
+    hidden = torch.randn(1, 2)
+    topk_ids = torch.tensor([[3, 0]])
+    topk_weights = torch.tensor([[0.4, 0.6]])
+
+    expected = sorted_experts(hidden, topk_ids, topk_weights)
+    with patch.object(
+        qwen35_moe.torch.Tensor,
+        "cpu",
+        side_effect=AssertionError("batched decode must not synchronize to CPU"),
+    ):
+        actual = batched_experts(hidden, topk_ids, topk_weights)
+
+    torch.testing.assert_close(actual, expected)
+
+
+def test_invalid_decode_backend_is_rejected():
+    with pytest.raises(ValueError, match="decode_backend"):
+        make_experts(decode_backend="unknown")
 
 
 def test_tensor_parallel_expert_outputs_sum_to_single_rank_reference():

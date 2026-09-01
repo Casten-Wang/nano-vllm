@@ -57,6 +57,7 @@ def result(
         ],
         "tensor_parallel_size": 4,
         "recurrent_state_dtype": "float32",
+        "qwen35_moe_decode_backend": "sorted",
         "kv_cache_dtype": "auto",
         "kv_dequant_backend": "fused",
         "int8_partitioned_decode_threshold": 8192,
@@ -103,6 +104,7 @@ def test_comparison_allows_explicit_optimization_variables_to_change():
     candidate = result()
     candidate["tensor_parallel_size"] = 8
     candidate["recurrent_state_dtype"] = "model"
+    candidate["qwen35_moe_decode_backend"] = "batched"
     candidate["kv_cache_dtype"] = "int8"
 
     comparison = MODULE.compare_results(
@@ -112,6 +114,7 @@ def test_comparison_allows_explicit_optimization_variables_to_change():
 
     assert comparison["runs"][1]["tensor_parallel_size"] == 8
     assert comparison["runs"][1]["recurrent_state_dtype"] == "model"
+    assert comparison["runs"][1]["qwen35_moe_decode_backend"] == "batched"
 
 
 def test_comparison_rejects_different_workloads():

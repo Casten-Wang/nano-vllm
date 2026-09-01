@@ -56,11 +56,15 @@ class Qwen35Experts(nn.Module):
         hidden_size: int,
         intermediate_size: int,
         num_experts: int,
+        decode_backend: str = "sorted",
     ) -> None:
         super().__init__()
+        if decode_backend not in ("sorted", "batched"):
+            raise ValueError("decode_backend must be 'sorted' or 'batched'")
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size
         self.num_experts = num_experts
+        self.decode_backend = decode_backend
         self.tp_size = dist.get_world_size()
         self.tp_rank = dist.get_rank()
         self.local_intermediate_size = divide(intermediate_size, self.tp_size)
@@ -174,6 +178,28 @@ class Qwen35Experts(nn.Module):
     ) -> torch.Tensor:
         output = torch.zeros_like(hidden_states)
         if hidden_states.shape[0] == 1:
+            if self.decode_backend == "batched":
+                expert_ids = topk_ids[0]
+                selected_gate_up = self.gate_up_proj.index_select(0, expert_ids)
+                expanded_hidden = hidden_states.expand(
+                    expert_ids.numel(), -1
+                ).unsqueeze(-1)
+                gate_up = torch.bmm(
+                    selected_gate_up,
+                    expanded_hidden,
+                ).squeeze(-1)
+                gate, up = gate_up.chunk(2, dim=-1)
+                selected_down = self.down_proj.index_select(0, expert_ids)
+                expert_output = torch.bmm(
+                    selected_down,
+                    (F.silu(gate) * up).unsqueeze(-1),
+                ).squeeze(-1)
+                output = (
+                    expert_output * topk_weights[0].unsqueeze(-1)
+                ).sum(dim=0, keepdim=True)
+                if self.tp_size > 1:
+                    dist.all_reduce(output)
+                return output
             # Decode has only ``top_k`` routes. Preserve the expert-sorted
             # accumulation order without building the general flattened
             # token/group metadata used by prefill batches.
@@ -266,6 +292,7 @@ class Qwen35SparseMoeBlock(nn.Module):
             self.hidden_size,
             int(config.moe_intermediate_size),
             int(config.num_experts),
+            getattr(config, "qwen35_moe_decode_backend", "sorted"),
         )
         self.shared_expert = Qwen35SharedExpert(
             self.hidden_size,
