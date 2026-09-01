@@ -2,6 +2,8 @@ from argparse import Namespace
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).parents[1]
 
@@ -153,3 +155,49 @@ def test_teacher_forcing_worker_command_forwards_tensor_parallel_size(
 
     command = captured["command"]
     assert command[command.index("--tensor-parallel-size") + 1] == "8"
+
+
+def execution_worker(mode, *, include_decode=True):
+    attention_paths = (
+        {"float_flash_prefill": 1, "float_flash_decode": 1}
+        if mode == "auto"
+        else {"int8_prefill": 1, "int8_fused_decode": 1}
+    )
+    if not include_decode:
+        attention_paths = {
+            key: value
+            for key, value in attention_paths.items()
+            if "decode" not in key
+        }
+    return {
+        "mode": mode,
+        "forced_steps": 2 if include_decode else 1,
+        "stage_records": (
+            [{"stage": "prefill"}, {"stage": "decode"}]
+            if include_decode
+            else [{"stage": "prefill"}]
+        ),
+        "execution_stats": {
+            "model_path_counts": (
+                {"prefill_eager": 1, "decode_eager": 1}
+                if include_decode
+                else {"prefill_eager": 1}
+            ),
+            "attention_path_counts": attention_paths,
+            "dropped_execution_signature_steps": 0,
+        },
+    }
+
+
+@pytest.mark.parametrize("mode", ["auto", "int8"])
+def test_teacher_forcing_execution_validation_requires_real_decode(mode):
+    valid = TEACHER_FORCING.validate_worker_execution(
+        execution_worker(mode)
+    )
+    invalid = TEACHER_FORCING.validate_worker_execution(
+        execution_worker(mode, include_decode=False)
+    )
+
+    assert valid["valid"]
+    assert not invalid["valid"]
+    assert "decode_eager" in invalid["missing_paths"]

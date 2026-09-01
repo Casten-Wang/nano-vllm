@@ -1,8 +1,10 @@
-"""Compare BF16/INT8 first-token MMLU scores on an offline subset.
+"""Measure first-token MMLU accuracy as a prefill correctness control.
 
 This is intentionally a subset evaluator. It uses the engine's prefill logits
-to score the four answer-label tokens, runs the two KV modes in separate
-processes, and records the dataset/model/template provenance.
+to score the four answer-label tokens and records dataset/model/template
+provenance. Since first-token logits do not read previously stored KV cache,
+the BF16/INT8 comparison is not evidence of KV quantization quality; use
+``measure_kv_quality_teacher_forcing.py`` for that purpose.
 """
 
 from __future__ import annotations
@@ -291,6 +293,11 @@ def main() -> None:
         "evaluation_scope": (
             "offline MMLU test-subset first-token label score, not a full "
             "official MMLU reproduction"
+        ),
+        "kv_quality_evidence": False,
+        "kv_quality_limitation": (
+            "first-token prefill logits do not read the stored KV cache; "
+            "use the teacher-forcing quality experiment for KV sensitivity"
         ),
         "auto": score_worker(questions, workers["auto"]),
         "int8": score_worker(questions, workers["int8"]),

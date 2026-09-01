@@ -487,7 +487,57 @@ def _row_metrics(left: torch.Tensor, right: torch.Tensor, targets: torch.Tensor)
     }
 
 
+def validate_worker_execution(worker: dict[str, Any]) -> dict[str, Any]:
+    mode = worker.get("mode")
+    expected_attention = {
+        "auto": {"float_flash_prefill", "float_flash_decode"},
+        "int8": {"int8_prefill", "int8_fused_decode"},
+    }
+    if mode not in expected_attention:
+        raise ValueError(f"unsupported worker mode: {mode!r}")
+    stats = worker.get("execution_stats", {})
+    model_counts = stats.get("model_path_counts", {})
+    attention_counts = stats.get("attention_path_counts", {})
+    observed = {
+        name
+        for counts in (model_counts, attention_counts)
+        for name, count in counts.items()
+        if count > 0
+    }
+    expected = {"prefill_eager", "decode_eager"} | expected_attention[mode]
+    stages = [record.get("stage") for record in worker.get("stage_records", [])]
+    missing = sorted(expected - observed)
+    valid = (
+        not missing
+        and stages[:1] == ["prefill"]
+        and "decode" in stages
+        and worker.get("forced_steps", 0) >= 2
+        and stats.get("dropped_execution_signature_steps", 0) == 0
+    )
+    return {
+        "valid": valid,
+        "expected_paths": sorted(expected),
+        "observed_paths": sorted(observed),
+        "missing_paths": missing,
+        "stages": stages,
+        "forced_steps": worker.get("forced_steps", 0),
+    }
+
+
 def compare_workers(auto: dict[str, Any], int8: dict[str, Any]) -> dict[str, Any]:
+    if auto.get("target_matrix") != int8.get("target_matrix"):
+        raise RuntimeError("BF16 and INT8 workers used different target trajectories")
+    if auto.get("tensor_parallel_size") != int8.get("tensor_parallel_size"):
+        raise RuntimeError("BF16 and INT8 workers used different tensor parallel sizes")
+    execution_validation = {
+        "auto": validate_worker_execution(auto),
+        "int8": validate_worker_execution(int8),
+    }
+    if not all(item["valid"] for item in execution_validation.values()):
+        raise RuntimeError(
+            f"quality workers did not exercise required KV paths: "
+            f"{execution_validation}"
+        )
     left = auto["logits"]
     right = int8["logits"]
     if len(left) != len(right):
@@ -530,7 +580,8 @@ def compare_workers(auto: dict[str, Any], int8: dict[str, Any]) -> dict[str, Any
             / math.exp(nll_bf16 / count)
             - 1.0,
         },
-        "execution_validation": {
+        "execution_validation": execution_validation,
+        "execution_stats": {
             "auto": auto["execution_stats"],
             "int8": int8["execution_stats"],
         },
@@ -610,8 +661,11 @@ def main() -> None:
             parser.error("worker mode requires cases and output files")
         run_worker(args)
         return
-    if args.cases_per_length <= 0 or args.continuation_len <= 0:
-        parser.error("cases-per-length and continuation-len must be positive")
+    if args.cases_per_length <= 0 or args.continuation_len < 2:
+        parser.error(
+            "cases-per-length must be positive and continuation-len must be "
+            "at least 2 so the experiment reads KV cache during decode"
+        )
     if args.trace_max_events <= 0 or args.trace_max_index_values <= 0:
         parser.error("trace limits must be positive")
     prompt_lengths = [int(item) for item in args.prompt_lengths.split(",") if item]
@@ -665,6 +719,11 @@ def main() -> None:
                 "a case in --cases-file exceeds --max-model-len"
             )
         args.continuation_len = next(iter(continuation_lengths))
+        if args.continuation_len < 2:
+            parser.error(
+                "--cases-file target_ids must contain at least two tokens so "
+                "the experiment reads KV cache during decode"
+            )
         # The batch loop uses this value as the number of cases per worker
         # process. It is also useful for corpus cases, where all prompts share
         # one target length but do not share one prompt length.
