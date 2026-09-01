@@ -72,6 +72,7 @@ class Qwen35Model(nn.Module):
 
 
 class Qwen3_5MoeForCausalLM(nn.Module):
+    strict_weight_loading = True
     packed_modules_mapping = {
         "gate_proj": ("gate_up_proj", 0),
         "up_proj": ("gate_up_proj", 1),

@@ -54,6 +54,14 @@ class MappedModel(nn.Module):
         return "model.weight"
 
 
+class StrictMappedModel(MappedModel):
+    strict_weight_loading = True
+
+    def __init__(self):
+        super().__init__()
+        self.missing = nn.Parameter(torch.zeros(1))
+
+
 def test_loader_maps_text_names_before_loading_and_skips_visual_tensors(tmp_path):
     (tmp_path / "model.safetensors").touch()
     FakeSafeFile.requested.clear()
@@ -63,3 +71,14 @@ def test_loader_maps_text_names_before_loading_and_skips_visual_tensors(tmp_path
 
     torch.testing.assert_close(model.model.weight, torch.tensor([3.0, 4.0]))
     assert FakeSafeFile.requested == ["external.text.weight"]
+
+
+def test_strict_loader_reports_parameters_absent_from_checkpoint(tmp_path):
+    (tmp_path / "model.safetensors").touch()
+
+    try:
+        loader.load_model(StrictMappedModel(), str(tmp_path))
+    except RuntimeError as error:
+        assert "checkpoint is missing model parameters: missing" in str(error)
+    else:
+        raise AssertionError("strict loading accepted a missing parameter")

@@ -12,6 +12,7 @@ def default_weight_loader(param: nn.Parameter, loaded_weight: torch.Tensor):
 def load_model(model: nn.Module, path: str):
     packed_modules_mapping = getattr(model, "packed_modules_mapping", {})
     map_weight_name = getattr(model, "map_weight_name", lambda name: name)
+    loaded_parameters: set[str] = set()
     for file in glob(os.path.join(path, "*.safetensors")):
         with safe_open(file, "pt", "cpu") as f:
             for source_weight_name in f.keys():
@@ -29,8 +30,19 @@ def load_model(model: nn.Module, path: str):
                             f.get_tensor(source_weight_name),
                             shard_id,
                         )
+                        loaded_parameters.add(param_name)
                         break
                 else:
                     param = model.get_parameter(weight_name)
                     weight_loader = getattr(param, "weight_loader", default_weight_loader)
                     weight_loader(param, f.get_tensor(source_weight_name))
+                    loaded_parameters.add(weight_name)
+    if getattr(model, "strict_weight_loading", False):
+        expected_parameters = {
+            name for name, _ in model.named_parameters(remove_duplicate=False)
+        }
+        missing = sorted(expected_parameters - loaded_parameters)
+        if missing:
+            preview = ", ".join(missing[:8])
+            suffix = "" if len(missing) <= 8 else f", ... ({len(missing)} total)"
+            raise RuntimeError(f"checkpoint is missing model parameters: {preview}{suffix}")
