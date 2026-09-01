@@ -63,6 +63,7 @@ def load_model_runner_module():
         torch_module.int32 = object()
         torch_module.int64 = object()
         torch_module.float32 = object()
+        torch_module.bool = object()
         torch_module.tensor = lambda values, **kwargs: FakeTensor(values)
         torch_module.cat = lambda tensors: FakeTensor(
             value for tensor in tensors for value in tensor.values
@@ -291,6 +292,7 @@ class HybridStateContextTest(unittest.TestCase):
             "dequant_block_ids": None,
             "dequant_block_tables": None,
             "state_slots": FakeTensor([8, 9]),
+            "state_reset_mask": FakeTensor([False, False]),
         }
         runner.build_prefill_inputs = lambda seqs: {
             "input_ids": [3, 4],
@@ -304,6 +306,7 @@ class HybridStateContextTest(unittest.TestCase):
             "dequant_block_ids": None,
             "dequant_block_tables": None,
             "state_slots": FakeTensor([3]),
+            "state_reset_mask": FakeTensor([True]),
         }
         captured = {}
         original = model_runner_module.set_context
@@ -314,6 +317,10 @@ class HybridStateContextTest(unittest.TestCase):
             model_runner_module.set_context = original
 
         self.assertEqual(captured["state_slots"].values, [8, 9, 3])
+        self.assertEqual(
+            captured["state_reset_mask"].values,
+            [False, False, True],
+        )
 
     def test_hybrid_model_disables_cuda_graph(self):
         runner = self.make_hybrid_runner()

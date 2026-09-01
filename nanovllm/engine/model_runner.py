@@ -110,6 +110,7 @@ class ModelRunner:
         self.model = create_model(model_spec.architecture, hf_config)
         load_model(self.model, config.model)
         self.sampler = Sampler()
+        self.allocate_recurrent_state_cache()
         self.warmup_model()
         self.allocate_kv_cache()
         if self.supports_cudagraph():
@@ -425,6 +426,22 @@ class ModelRunner:
         else:
             self.allocate_float_kv_cache()
 
+    def allocate_recurrent_state_cache(self):
+        model_spec = self.config.model_spec
+        if model_spec is None or not model_spec.is_hybrid:
+            return
+        allocated_layers = 0
+        for module in self.model.modules():
+            allocate = getattr(module, "allocate_state_cache", None)
+            if allocate is not None and callable(allocate):
+                allocate(self.config.max_num_seqs, torch.cuda.current_device())
+                allocated_layers += 1
+        if allocated_layers != len(model_spec.linear_attention_layers):
+            raise RuntimeError(
+                f"allocated {allocated_layers} recurrent state layers, expected "
+                f"{len(model_spec.linear_attention_layers)}"
+            )
+
     def allocate_float_kv_cache(self):
         config = self.config
         hf_config = config.model_config
@@ -558,6 +575,16 @@ class ModelRunner:
             pin_memory=True,
         ).cuda(non_blocking=True)
 
+    def prepare_state_reset_mask(self, seqs: list[Sequence]):
+        model_spec = self.config.model_spec
+        if model_spec is None or not model_spec.is_hybrid:
+            return None
+        return torch.tensor(
+            [seq.num_cached_tokens == 0 for seq in seqs],
+            dtype=torch.bool,
+            pin_memory=True,
+        ).cuda(non_blocking=True)
+
     def prepare_prefill(self, seqs: list[Sequence]):
         input_ids = []
         positions = []
@@ -624,6 +651,7 @@ class ModelRunner:
             dequant_block_tables,
             self.config.sliding_window_size,
             state_slots=self.prepare_state_slots(seqs),
+            state_reset_mask=self.prepare_state_reset_mask(seqs),
         )
         return input_ids, positions
 
@@ -687,6 +715,7 @@ class ModelRunner:
             dequant_block_ids=dequant_block_ids,
             dequant_block_tables=dequant_block_tables,
             state_slots=self.prepare_state_slots(seqs),
+            state_reset_mask=self.prepare_state_reset_mask(seqs),
         )
 
     def build_decode_inputs(self, seqs: list[Sequence]):
@@ -719,6 +748,7 @@ class ModelRunner:
             dequant_block_tables=dequant_block_tables,
             max_context_len=max(context_lens) if context_lens else 0,
             state_slots=self.prepare_state_slots(seqs),
+            state_reset_mask=self.prepare_state_reset_mask(seqs),
         )
 
     def prepare_decode(self, seqs: list[Sequence]):
@@ -756,6 +786,7 @@ class ModelRunner:
             sliding_window_size=self.config.sliding_window_size,
             max_context_len=max_context_len,
             state_slots=self.prepare_state_slots(seqs),
+            state_reset_mask=self.prepare_state_reset_mask(seqs),
         )
         return input_ids, positions
 
@@ -796,6 +827,11 @@ class ModelRunner:
                 (decode["state_slots"], prefill["state_slots"]),
             )
             if decode["state_slots"] is not None
+            else None,
+            state_reset_mask=torch.cat(
+                (decode["state_reset_mask"], prefill["state_reset_mask"]),
+            )
+            if decode["state_reset_mask"] is not None
             else None,
         )
         return input_ids, positions

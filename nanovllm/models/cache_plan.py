@@ -51,7 +51,7 @@ def plan_cache_memory(
     tensor_parallel_size: int,
     *,
     kv_dtype_bytes: int = 2,
-    recurrent_dtype_bytes: int = 2,
+    recurrent_dtype_bytes: int = 4,
     convolution_dtype_bytes: int = 2,
 ) -> CacheMemoryPlan:
     """Calculate persistent inference-state bytes allocated on each rank."""

@@ -32,6 +32,7 @@ class Context:
     prefill_block_tables: torch.Tensor | None = None
     prefill_dequant_block_ids: torch.Tensor | None = None
     prefill_dequant_block_tables: torch.Tensor | None = None
+    state_reset_mask: torch.Tensor | None = None
 
 _CONTEXT = Context()
 
@@ -67,6 +68,7 @@ def set_context(
     max_context_len=0,
     decode_max_context_len=0,
     state_slots=None,
+    state_reset_mask=None,
 ):
     global _CONTEXT
     _CONTEXT = Context(
@@ -98,6 +100,7 @@ def set_context(
         prefill_block_tables=prefill_block_tables,
         prefill_dequant_block_ids=prefill_dequant_block_ids,
         prefill_dequant_block_tables=prefill_dequant_block_tables,
+        state_reset_mask=state_reset_mask,
     )
 
 def reset_context():

@@ -1,6 +1,9 @@
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 import sys
+import types
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import torch
 import torch.nn.functional as F
@@ -19,6 +22,7 @@ sys.modules[SPEC.name] = qwen35_gated_delta
 SPEC.loader.exec_module(qwen35_gated_delta)
 
 Qwen35RecurrentStatePool = qwen35_gated_delta.Qwen35RecurrentStatePool
+Qwen35GatedDeltaNet = qwen35_gated_delta.Qwen35GatedDeltaNet
 causal_conv1d_scan = qwen35_gated_delta.causal_conv1d_scan
 recurrent_gated_delta_rule = qwen35_gated_delta.recurrent_gated_delta_rule
 
@@ -109,3 +113,79 @@ def test_state_pool_isolates_updates_and_resets_reused_slots():
     assert torch.count_nonzero(pool.recurrent[:, 3]) == 0
     assert torch.count_nonzero(pool.convolution[:, 3]) == 0
     assert torch.count_nonzero(pool.recurrent[0, 1]) > 0
+
+
+def tiny_config():
+    return SimpleNamespace(
+        hidden_size=4,
+        linear_num_key_heads=2,
+        linear_num_value_heads=4,
+        linear_key_head_dim=2,
+        linear_value_head_dim=2,
+        linear_conv_kernel_dim=2,
+        rms_norm_eps=1e-6,
+    )
+
+
+def make_layer(rank=0, world_size=1):
+    with (
+        patch.object(qwen35_gated_delta.dist, "get_world_size", return_value=world_size),
+        patch.object(qwen35_gated_delta.dist, "get_rank", return_value=rank),
+    ):
+        return Qwen35GatedDeltaNet(tiny_config(), layer_idx=0)
+
+
+def test_qkv_and_convolution_loaders_shard_each_component_independently():
+    layer = make_layer(rank=1, world_size=2)
+    global_key_dim = 4
+    global_value_dim = 8
+    rows = 2 * global_key_dim + global_value_dim
+    qkv = torch.arange(rows * 4).reshape(rows, 4).float()
+    conv = torch.arange(rows * 2).reshape(rows, 1, 2).float()
+
+    layer._load_qkv(layer.in_proj_qkv.weight, qkv)
+    layer._load_conv(layer.conv1d.weight, conv)
+
+    expected_rows = torch.cat(
+        (qkv[2:4], qkv[6:8], qkv[12:16]),
+        dim=0,
+    )
+    expected_conv = torch.cat(
+        (conv[2:4], conv[6:8], conv[12:16]),
+        dim=0,
+    )
+    torch.testing.assert_close(layer.in_proj_qkv.weight, expected_rows)
+    torch.testing.assert_close(layer.conv1d.weight, expected_conv)
+
+
+def test_gated_delta_layer_chunked_prefill_matches_one_shot():
+    torch.manual_seed(4)
+    layer = make_layer()
+    layer.allocate_state_cache(3, "cpu")
+    for parameter in layer.parameters():
+        parameter.data.normal_(mean=0.0, std=0.2)
+    hidden_states = torch.randn(5, 4)
+    current_context = SimpleNamespace(
+        is_mixed=False,
+        is_prefill=True,
+        cu_seqlens_q=torch.tensor([0, 5], dtype=torch.int32),
+        state_slots=torch.tensor([1], dtype=torch.int32),
+        state_reset_mask=torch.tensor([True]),
+    )
+    context_module = types.ModuleType("nanovllm.utils.context")
+    context_module.get_context = lambda: current_context
+
+    with patch.dict(sys.modules, {"nanovllm.utils.context": context_module}):
+        expected = layer(hidden_states)
+        expected_recurrent = layer.state_pool.recurrent[:, 1].clone()
+        expected_convolution = layer.state_pool.convolution[:, 1].clone()
+        layer.state_pool.reset(torch.tensor([1]))
+        current_context.cu_seqlens_q = torch.tensor([0, 3], dtype=torch.int32)
+        first = layer(hidden_states[:3])
+        current_context.cu_seqlens_q = torch.tensor([0, 2], dtype=torch.int32)
+        current_context.state_reset_mask = torch.tensor([False])
+        second = layer(hidden_states[3:])
+
+    torch.testing.assert_close(torch.cat((first, second)), expected)
+    torch.testing.assert_close(layer.state_pool.recurrent[:, 1], expected_recurrent)
+    torch.testing.assert_close(layer.state_pool.convolution[:, 1], expected_convolution)
