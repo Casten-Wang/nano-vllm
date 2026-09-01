@@ -28,6 +28,19 @@ class TinyMappedModel(torch.nn.Module):
         return name.removeprefix("external.")
 
 
+class TinySlicedModel(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.sharded = torch.nn.Parameter(torch.empty(1, 2, device="meta"))
+
+        def load_slice(parameter, source):
+            if tuple(source.get_shape()) != (2, 2):
+                raise ValueError("expected full checkpoint shape (2, 2)")
+            parameter.data.copy_(source[:1, :])
+
+        self.sharded.safetensors_loader = load_slice
+
+
 def write_checkpoint(path, tensors):
     save_file(tensors, str(path / "model.safetensors"))
 
@@ -59,6 +72,30 @@ def test_audit_reports_missing_and_unexpected_weights(tmp_path):
     assert result["unexpected_weights"] == [
         {"source": "external.unknown.weight", "mapped": "unknown.weight"}
     ]
+
+
+def test_audit_reports_shape_mismatch_without_reading_tensor_payload(tmp_path):
+    write_checkpoint(
+        tmp_path,
+        {"external.text.weight": torch.ones(3, 2)},
+    )
+
+    result = MODULE.audit_checkpoint_mapping(TinyMappedModel(), tmp_path)
+
+    assert not result["valid"]
+    assert result["mapped_parameter_count"] == 0
+    assert result["shape_errors"][0]["mapped"] == "text.weight"
+    assert "does not match parameter shape" in result["shape_errors"][0]["error"]
+
+
+def test_audit_exercises_shape_only_safetensors_loader(tmp_path):
+    write_checkpoint(tmp_path, {"sharded": torch.ones(2, 2)})
+
+    result = MODULE.audit_checkpoint_mapping(TinySlicedModel(), tmp_path)
+
+    assert result["valid"]
+    assert result["mapped_parameter_count"] == 1
+    assert result["shape_errors"] == []
 
 
 def test_audit_rejects_directory_without_safetensors(tmp_path):

@@ -24,6 +24,46 @@ from nanovllm.utils.loader import resolve_packed_parameter
 from nanovllm.benchmark_metadata import checkpoint_manifest_metadata
 
 
+class MetaTensorSlice:
+    """Shape-only safetensors slice that never reads checkpoint payloads."""
+
+    def __init__(self, shape: tuple[int, ...], dtype: torch.dtype) -> None:
+        self.tensor = torch.empty(shape, device="meta", dtype=dtype)
+
+    def get_shape(self) -> tuple[int, ...]:
+        return tuple(self.tensor.shape)
+
+    def __getitem__(self, key):
+        return self.tensor[key]
+
+
+def validate_weight_shape(model, checkpoint, source_name, target_name, packed):
+    parameter = model.get_parameter(target_name)
+    source_shape = tuple(checkpoint.get_slice(source_name).get_shape())
+    if packed is not None:
+        _, shard_id = packed
+        source = torch.empty(source_shape, device="meta", dtype=parameter.dtype)
+        getattr(parameter, "weight_loader")(parameter, source, shard_id)
+        return
+    safetensors_loader = getattr(parameter, "safetensors_loader", None)
+    if safetensors_loader is not None:
+        safetensors_loader(
+            parameter,
+            MetaTensorSlice(source_shape, parameter.dtype),
+        )
+        return
+    weight_loader = getattr(parameter, "weight_loader", None)
+    if weight_loader is not None:
+        source = torch.empty(source_shape, device="meta", dtype=parameter.dtype)
+        weight_loader(parameter, source)
+        return
+    if tuple(parameter.shape) != source_shape:
+        raise ValueError(
+            f"checkpoint shape {source_shape} does not match parameter "
+            f"shape {tuple(parameter.shape)}"
+        )
+
+
 def audit_checkpoint_mapping(model: torch.nn.Module, model_path: str | Path) -> dict:
     files = sorted(glob(str(Path(model_path) / "*.safetensors")))
     if not files:
@@ -37,6 +77,7 @@ def audit_checkpoint_mapping(model: torch.nn.Module, model_path: str | Path) -> 
     loaded = set()
     skipped = []
     unexpected = []
+    shape_errors = []
     source_count = 0
 
     for filename in files:
@@ -57,6 +98,23 @@ def audit_checkpoint_mapping(model: torch.nn.Module, model_path: str | Path) -> 
                         {"source": source_name, "mapped": target_name}
                     )
                     continue
+                try:
+                    validate_weight_shape(
+                        model,
+                        checkpoint,
+                        source_name,
+                        target_name,
+                        packed,
+                    )
+                except (AssertionError, IndexError, RuntimeError, ValueError) as error:
+                    shape_errors.append(
+                        {
+                            "source": source_name,
+                            "mapped": target_name,
+                            "error": str(error),
+                        }
+                    )
+                    continue
                 loaded.add(target_name)
 
     missing = sorted(expected - loaded)
@@ -69,7 +127,8 @@ def audit_checkpoint_mapping(model: torch.nn.Module, model_path: str | Path) -> 
         "skipped_tensor_count": len(skipped),
         "missing_parameters": missing,
         "unexpected_weights": unexpected,
-        "valid": not missing and not unexpected,
+        "shape_errors": shape_errors,
+        "valid": not missing and not unexpected and not shape_errors,
     }
 
 
