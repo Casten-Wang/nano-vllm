@@ -170,10 +170,28 @@ class Qwen35Experts(nn.Module):
         topk_weights: torch.Tensor,
     ) -> torch.Tensor:
         output = torch.zeros_like(hidden_states)
-        active_experts = torch.unique(topk_ids)
-        for expert_id_tensor in active_experts:
-            expert_id = int(expert_id_tensor.item())
-            topk_slot, token_index = torch.where(topk_ids == expert_id)
+        assignments = topk_ids.reshape(-1)
+        token_indices = torch.arange(
+            hidden_states.shape[0],
+            device=hidden_states.device,
+        ).repeat_interleave(topk_ids.shape[1])
+        routing_weights = topk_weights.reshape(-1)
+        order = torch.argsort(assignments, stable=True)
+        sorted_experts = assignments[order]
+        sorted_tokens = token_indices[order]
+        sorted_weights = routing_weights[order]
+        # One host synchronization replaces one .item() and one full routing
+        # mask scan per active expert in the correctness baseline.
+        counts = torch.bincount(
+            sorted_experts,
+            minlength=self.num_experts,
+        ).cpu().tolist()
+        offset = 0
+        for expert_id, count in enumerate(counts):
+            if count == 0:
+                continue
+            end = offset + count
+            token_index = sorted_tokens[offset:end]
             expert_input = hidden_states[token_index]
             gate_up = F.linear(expert_input, self.gate_up_proj[expert_id])
             gate, up = gate_up.chunk(2, dim=-1)
@@ -181,11 +199,9 @@ class Qwen35Experts(nn.Module):
                 F.silu(gate) * up,
                 self.down_proj[expert_id],
             )
-            expert_output = expert_output * topk_weights[
-                token_index,
-                topk_slot,
-            ].unsqueeze(-1)
+            expert_output = expert_output * sorted_weights[offset:end].unsqueeze(-1)
             output.index_add_(0, token_index, expert_output.to(output.dtype))
+            offset = end
         if self.tp_size > 1:
             dist.all_reduce(output)
         return output

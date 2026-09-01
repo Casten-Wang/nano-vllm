@@ -69,6 +69,34 @@ def test_expert_reference_path_matches_manual_mixture():
     assert torch.allclose(output, expected)
 
 
+def test_sorted_expert_dispatch_matches_naive_topk_accumulation():
+    torch.manual_seed(7)
+    experts = make_experts()
+    experts.gate_up_proj.data.normal_()
+    experts.down_proj.data.normal_()
+    hidden = torch.randn(5, 2)
+    topk_ids = torch.tensor([[1, 0], [0, 1], [1, 0], [0, 1], [1, 0]])
+    topk_weights = torch.rand(5, 2)
+    topk_weights /= topk_weights.sum(dim=-1, keepdim=True)
+
+    actual = experts(hidden, topk_ids, topk_weights)
+    expected = torch.zeros_like(hidden)
+    for token in range(hidden.shape[0]):
+        for slot in range(topk_ids.shape[1]):
+            expert = int(topk_ids[token, slot])
+            gate_up = torch.nn.functional.linear(
+                hidden[token], experts.gate_up_proj[expert]
+            )
+            gate, up = gate_up.chunk(2, dim=-1)
+            value = torch.nn.functional.linear(
+                torch.nn.functional.silu(gate) * up,
+                experts.down_proj[expert],
+            )
+            expected[token] += value * topk_weights[token, slot]
+
+    torch.testing.assert_close(actual, expected)
+
+
 def test_expert_weights_are_sharded_and_replicable_across_tp_ranks():
     source_gate_up = torch.arange(32, dtype=torch.float32).reshape(2, 8, 2)
     source_down = torch.arange(16, dtype=torch.float32).reshape(2, 2, 4)
