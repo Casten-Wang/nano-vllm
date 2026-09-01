@@ -14,6 +14,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 QUALITY_SCRIPT = ROOT / "scripts" / "measure_kv_quality_teacher_forcing.py"
+AUDIT_SCRIPT = ROOT / "scripts" / "audit_checkpoint_mapping.py"
 
 
 @dataclass(frozen=True)
@@ -93,6 +94,23 @@ def result_path_for_case(
     return Path(result_dir) / case_name / f"{case_name}.json"
 
 
+def checkpoint_audit_command(
+    args: argparse.Namespace,
+    run_id: str,
+) -> list[str]:
+    return [
+        sys.executable,
+        str(AUDIT_SCRIPT),
+        "--model",
+        args.model,
+        "--tp-sizes",
+        ",".join(str(size) for size in args.tp_sizes),
+        "--require-shards",
+        "--output",
+        str(Path(args.result_dir) / f"{run_id}_checkpoint_audit.json"),
+    ]
+
+
 def summarize_results(
     results: dict[QualityCase, dict],
 ) -> dict:
@@ -163,6 +181,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--result-dir", default="benchmark_results/qwen35_quality_matrix")
     parser.add_argument("--run-id")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--checkpoint-audit",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Require complete checkpoint shards and validate TP weight shapes.",
+    )
     return parser.parse_args()
 
 
@@ -198,6 +222,13 @@ def main() -> None:
     run_id = args.run_id or datetime.now(timezone.utc).strftime(
         "qwen35_quality_%Y%m%dT%H%M%S%fZ"
     )
+    if args.checkpoint_audit:
+        command = checkpoint_audit_command(args, run_id)
+        print("[preflight] checkpoint mapping audit", flush=True)
+        if args.dry_run:
+            print(subprocess.list2cmdline(command))
+        else:
+            subprocess.run(command, cwd=ROOT, check=True)
     if not args.dry_run:
         required_gpus = max(args.tp_sizes)
         available_gpus = visible_gpu_count()

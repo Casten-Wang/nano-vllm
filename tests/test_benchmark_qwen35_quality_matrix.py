@@ -30,6 +30,7 @@ def args(**overrides):
         "result_dir": "benchmark_results/quality",
         "cases_file": None,
         "run_id": "rental-a",
+        "tp_sizes": (4, 8),
     }
     values.update(overrides)
     return Namespace(**values)
@@ -92,3 +93,13 @@ def test_cases_file_is_forwarded():
     )
 
     assert command[command.index("--cases-file") + 1] == "quality_cases.json"
+
+
+def test_quality_matrix_requires_complete_checkpoint_audit():
+    command = MODULE.checkpoint_audit_command(args(), "run-1")
+
+    assert command[command.index("--tp-sizes") + 1] == "4,8"
+    assert "--require-shards" in command
+    assert command[command.index("--output") + 1].endswith(
+        "run-1_checkpoint_audit.json"
+    )
