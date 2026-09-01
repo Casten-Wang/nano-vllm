@@ -9,6 +9,24 @@ def default_weight_loader(param: nn.Parameter, loaded_weight: torch.Tensor):
     param.data.copy_(loaded_weight)
 
 
+def resolve_packed_parameter(
+    weight_name: str,
+    packed_modules_mapping: dict,
+) -> tuple[str, object] | None:
+    """Map an exact module path segment, never a substring of a packed name."""
+
+    for source_module, (target_module, shard_id) in packed_modules_mapping.items():
+        marker = f".{source_module}."
+        if marker in weight_name:
+            target = weight_name.replace(
+                marker,
+                f".{target_module}.",
+                1,
+            )
+            return target, shard_id
+    return None
+
+
 def load_model(model: nn.Module, path: str):
     packed_modules_mapping = getattr(model, "packed_modules_mapping", {})
     map_weight_name = getattr(model, "map_weight_name", lambda name: name)
@@ -19,19 +37,20 @@ def load_model(model: nn.Module, path: str):
                 weight_name = map_weight_name(source_weight_name)
                 if weight_name is None:
                     continue
-                for k in packed_modules_mapping:
-                    if k in weight_name:
-                        v, shard_id = packed_modules_mapping[k]
-                        param_name = weight_name.replace(k, v)
-                        param = model.get_parameter(param_name)
-                        weight_loader = getattr(param, "weight_loader")
-                        weight_loader(
-                            param,
-                            f.get_tensor(source_weight_name),
-                            shard_id,
-                        )
-                        loaded_parameters.add(param_name)
-                        break
+                packed_parameter = resolve_packed_parameter(
+                    weight_name,
+                    packed_modules_mapping,
+                )
+                if packed_parameter is not None:
+                    param_name, shard_id = packed_parameter
+                    param = model.get_parameter(param_name)
+                    weight_loader = getattr(param, "weight_loader")
+                    weight_loader(
+                        param,
+                        f.get_tensor(source_weight_name),
+                        shard_id,
+                    )
+                    loaded_parameters.add(param_name)
                 else:
                     param = model.get_parameter(weight_name)
                     safetensors_loader = getattr(
