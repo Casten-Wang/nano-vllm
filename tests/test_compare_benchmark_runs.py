@@ -22,6 +22,8 @@ def result(
     digest="same",
     input_len=128,
     checkpoint_digest="checkpoint",
+    device="NVIDIA H100 80GB HBM3",
+    torch_version="2.8.0",
 ):
     return {
         "model": "Qwen/Qwen3.5-35B-A3B",
@@ -32,8 +34,30 @@ def result(
         "seed": 7,
         "vocab_size": 10000,
         "max_model_len": 4096,
+        "max_num_batched_tokens": 8192,
+        "max_num_seqs": 64,
+        "warmup": True,
+        "device": device,
+        "device_capability": [9, 0],
+        "cuda_device_count": 8,
+        "torch_version": torch_version,
+        "cuda_version": "12.8",
+        "transformers_version": "4.56.0",
+        "triton_version": "3.4.0",
+        "flash_attn_version": "2.8.3",
+        "nvidia_smi_gpus": [
+            f"{rank}, NVIDIA H100 80GB HBM3, 570.00, 81559"
+            for rank in range(8)
+        ],
         "tensor_parallel_size": 4,
         "recurrent_state_dtype": "float32",
+        "kv_cache_dtype": "auto",
+        "kv_dequant_backend": "fused",
+        "int8_partitioned_decode_threshold": 8192,
+        "int8_partitioned_decode_partition_size": 512,
+        "sliding_window_size": None,
+        "enable_dynamic_chunked_prefill": False,
+        "enforce_eager": True,
         "output_throughput_tok_s": throughput,
         "peak_torch_allocated_mib": memory,
         "generated_token_ids": {"digest": digest},
@@ -61,6 +85,21 @@ def test_comparison_reports_relative_metrics_and_output_parity():
     assert comparison["all_execution_paths_valid"]
 
 
+def test_comparison_allows_explicit_optimization_variables_to_change():
+    candidate = result()
+    candidate["tensor_parallel_size"] = 8
+    candidate["recurrent_state_dtype"] = "model"
+    candidate["kv_cache_dtype"] = "int8"
+
+    comparison = MODULE.compare_results(
+        [result(), candidate],
+        ["baseline", "candidate"],
+    )
+
+    assert comparison["runs"][1]["tensor_parallel_size"] == 8
+    assert comparison["runs"][1]["recurrent_state_dtype"] == "model"
+
+
 def test_comparison_rejects_different_workloads():
     with pytest.raises(ValueError, match="candidate.input_len"):
         MODULE.compare_results(
@@ -83,6 +122,32 @@ def test_comparison_rejects_different_checkpoint_manifest():
     with pytest.raises(ValueError, match="checkpoint_manifest.digest"):
         MODULE.compare_results(
             [result(), result(checkpoint_digest="different")],
+            ["baseline", "candidate"],
+        )
+
+
+@pytest.mark.parametrize(
+    ("override", "field"),
+    [
+        ({"device": "NVIDIA H200"}, "device"),
+        ({"torch_version": "2.9.0"}, "torch_version"),
+    ],
+)
+def test_comparison_rejects_different_environments(override, field):
+    with pytest.raises(ValueError, match=rf"candidate\.{field}"):
+        MODULE.compare_results(
+            [result(), result(**override)],
+            ["baseline", "candidate"],
+        )
+
+
+def test_comparison_rejects_different_scheduler_capacity():
+    candidate = result()
+    candidate["max_num_batched_tokens"] = 4096
+
+    with pytest.raises(ValueError, match="candidate.max_num_batched_tokens"):
+        MODULE.compare_results(
+            [result(), candidate],
             ["baseline", "candidate"],
         )
 

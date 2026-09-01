@@ -14,6 +14,33 @@ WORKLOAD_FIELDS = (
     "seed",
     "vocab_size",
     "max_model_len",
+    "max_num_batched_tokens",
+    "max_num_seqs",
+    "warmup",
+)
+
+ENVIRONMENT_FIELDS = (
+    "device",
+    "device_capability",
+    "cuda_device_count",
+    "torch_version",
+    "cuda_version",
+    "transformers_version",
+    "triton_version",
+    "flash_attn_version",
+    "nvidia_smi_gpus",
+)
+
+OPTIMIZATION_FIELDS = (
+    "tensor_parallel_size",
+    "recurrent_state_dtype",
+    "kv_cache_dtype",
+    "kv_dequant_backend",
+    "int8_partitioned_decode_threshold",
+    "int8_partitioned_decode_partition_size",
+    "sliding_window_size",
+    "enable_dynamic_chunked_prefill",
+    "enforce_eager",
 )
 
 
@@ -28,10 +55,10 @@ def load_result(path: Path) -> dict:
         field
         for field in (
             *WORKLOAD_FIELDS,
+            *ENVIRONMENT_FIELDS,
             "model",
             "checkpoint_manifest",
-            "tensor_parallel_size",
-            "recurrent_state_dtype",
+            *OPTIMIZATION_FIELDS,
             "output_throughput_tok_s",
             "peak_torch_allocated_mib",
             "generated_token_ids",
@@ -57,7 +84,7 @@ def compare_results(results: list[dict], labels: list[str]) -> dict:
     baseline_checkpoint = baseline["checkpoint_manifest"]["digest"]
     mismatches = []
     for label, result in zip(labels[1:], results[1:]):
-        for field in ("model", *WORKLOAD_FIELDS):
+        for field in ("model", *WORKLOAD_FIELDS, *ENVIRONMENT_FIELDS):
             if result[field] != baseline[field]:
                 mismatches.append(
                     {
@@ -96,8 +123,7 @@ def compare_results(results: list[dict], labels: list[str]) -> dict:
         rows.append(
             {
                 "label": label,
-                "tensor_parallel_size": result["tensor_parallel_size"],
-                "recurrent_state_dtype": result["recurrent_state_dtype"],
+                **{field: result[field] for field in OPTIMIZATION_FIELDS},
                 "output_throughput_tok_s": throughput,
                 "throughput_vs_baseline": ratio(throughput, baseline_throughput),
                 "avg_ttft_s": ttft,
@@ -118,6 +144,9 @@ def compare_results(results: list[dict], labels: list[str]) -> dict:
             "model": baseline["model"],
             "checkpoint_manifest_digest": baseline_checkpoint,
             **{field: baseline[field] for field in WORKLOAD_FIELDS},
+        },
+        "environment": {
+            field: baseline[field] for field in ENVIRONMENT_FIELDS
         },
         "all_output_digests_match": all(
             row["output_digest_matches_baseline"] for row in rows
