@@ -524,6 +524,52 @@ def validate_worker_execution(worker: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def aggregate_metric_rows(rows: list[dict[str, Any]]) -> dict[str, float]:
+    if not rows:
+        raise ValueError("cannot aggregate an empty metric row list")
+    total_rows = sum(int(row["row_count"]) for row in rows)
+    if total_rows <= 0:
+        raise ValueError("metric rows must contain observations")
+    metric_names = [
+        key
+        for key in rows[0]
+        if key not in {"step", "stage", "row_count"}
+    ]
+    result = {}
+    for name in metric_names:
+        values = [float(row[name]) for row in rows]
+        if name.endswith("_max_abs"):
+            result[name] = max(values)
+        else:
+            result[name] = sum(
+                value * int(row["row_count"])
+                for value, row in zip(values, rows)
+            ) / total_rows
+    return result
+
+
+def perplexity_summary(rows: list[dict[str, Any]]) -> dict[str, float | int]:
+    if not rows:
+        raise ValueError("cannot calculate perplexity without metric rows")
+    count = sum(int(row["row_count"]) for row in rows)
+    nll_bf16 = sum(
+        float(row["target_nll_bf16"]) * int(row["row_count"])
+        for row in rows
+    )
+    nll_int8 = sum(
+        float(row["target_nll_int8"]) * int(row["row_count"])
+        for row in rows
+    )
+    bf16 = math.exp(nll_bf16 / count)
+    int8 = math.exp(nll_int8 / count)
+    return {
+        "token_count": count,
+        "bf16": bf16,
+        "int8": int8,
+        "relative_change": int8 / bf16 - 1.0,
+    }
+
+
 def compare_workers(auto: dict[str, Any], int8: dict[str, Any]) -> dict[str, Any]:
     if auto.get("target_matrix") != int8.get("target_matrix"):
         raise RuntimeError("BF16 and INT8 workers used different target trajectories")
@@ -561,25 +607,21 @@ def compare_workers(auto: dict[str, Any], int8: dict[str, Any]) -> dict[str, Any
                 ),
             }
         )
-    nll_bf16 = sum(row["target_nll_bf16"] * row["row_count"] for row in rows)
-    nll_int8 = sum(row["target_nll_int8"] * row["row_count"] for row in rows)
-    count = sum(row["row_count"] for row in rows)
+    decode_rows = [row for row in rows if row["stage"] == "decode"]
+    if not decode_rows:
+        raise RuntimeError("quality comparison produced no KV-sensitive decode rows")
     result = {
         "steps_compared": len(rows),
+        "kv_sensitive_steps_compared": len(decode_rows),
+        "quality_scope": (
+            "decode-only metrics read previously stored KV cache; prefill is "
+            "retained separately as a model-path control"
+        ),
         "rows": rows,
-        "aggregate": {
-            key: mean(float(row[key]) for row in rows)
-            for key in rows[0]
-            if key not in {"step", "stage", "row_count"}
-        },
-        "ppl": {
-            "token_count": count,
-            "bf16": math.exp(nll_bf16 / count),
-            "int8": math.exp(nll_int8 / count),
-            "relative_change": math.exp(nll_int8 / count)
-            / math.exp(nll_bf16 / count)
-            - 1.0,
-        },
+        "aggregate": aggregate_metric_rows(rows),
+        "decode_aggregate": aggregate_metric_rows(decode_rows),
+        "ppl": perplexity_summary(rows),
+        "decode_ppl": perplexity_summary(decode_rows),
         "execution_validation": execution_validation,
         "execution_stats": {
             "auto": auto["execution_stats"],

@@ -201,3 +201,63 @@ def test_teacher_forcing_execution_validation_requires_real_decode(mode):
     assert valid["valid"]
     assert not invalid["valid"]
     assert "decode_eager" in invalid["missing_paths"]
+
+
+def test_decode_only_quality_aggregate_excludes_prefill_control():
+    rows = [
+        {
+            "step": 0,
+            "stage": "prefill",
+            "row_count": 1,
+            "logits_max_abs": 100.0,
+            "logits_mean_abs": 100.0,
+            "target_nll_bf16": 10.0,
+            "target_nll_int8": 20.0,
+        },
+        {
+            "step": 1,
+            "stage": "decode",
+            "row_count": 2,
+            "logits_max_abs": 2.0,
+            "logits_mean_abs": 1.0,
+            "target_nll_bf16": 1.0,
+            "target_nll_int8": 1.1,
+        },
+    ]
+    decode_rows = [row for row in rows if row["stage"] == "decode"]
+
+    aggregate = TEACHER_FORCING.aggregate_metric_rows(decode_rows)
+    ppl = TEACHER_FORCING.perplexity_summary(decode_rows)
+
+    assert aggregate["logits_max_abs"] == 2.0
+    assert aggregate["logits_mean_abs"] == 1.0
+    assert ppl["token_count"] == 2
+    assert ppl["relative_change"] == pytest.approx(__import__("math").exp(0.1) - 1)
+
+
+def test_worker_comparison_reports_decode_only_quality_scope():
+    torch = __import__("torch")
+    auto = execution_worker("auto")
+    int8 = execution_worker("int8")
+    for worker in (auto, int8):
+        worker.update(
+            {
+                "tensor_parallel_size": 4,
+                "target_matrix": [[1, 2]],
+                "logits": [
+                    torch.tensor([[0.0, 1.0, 2.0, 3.0, 4.0]]),
+                    torch.tensor([[1.0, 2.0, 3.0, 4.0, 5.0]]),
+                ],
+                "kv_metrics": {},
+                "shape_trace": {},
+            }
+        )
+    int8["logits"][0] = int8["logits"][0] + 100.0
+
+    result = TEACHER_FORCING.compare_workers(auto, int8)
+
+    assert result["steps_compared"] == 2
+    assert result["kv_sensitive_steps_compared"] == 1
+    assert result["aggregate"]["logits_max_abs"] == 100.0
+    assert result["decode_aggregate"]["logits_max_abs"] == 0.0
+    assert result["decode_ppl"]["token_count"] == 1
