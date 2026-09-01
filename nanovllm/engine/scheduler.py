@@ -5,6 +5,7 @@ from time import perf_counter
 from nanovllm.config import Config
 from nanovllm.engine.sequence import Sequence, SequenceStatus
 from nanovllm.engine.block_manager import BlockManager
+from nanovllm.engine.state_manager import StateSlotManager
 
 
 @dataclass(slots=True)
@@ -46,6 +47,12 @@ class Scheduler:
         self.block_size = config.kvcache_block_size
         self.enable_dynamic_chunked_prefill = config.enable_dynamic_chunked_prefill
         self.block_manager = BlockManager(config.num_kvcache_blocks, config.kvcache_block_size)
+        model_spec = getattr(config, "model_spec", None)
+        self.state_manager = (
+            StateSlotManager(config.max_num_seqs)
+            if model_spec is not None and model_spec.is_hybrid
+            else None
+        )
         self.waiting: deque[Sequence] = deque()
         self.running: deque[Sequence] = deque()
 
@@ -65,8 +72,17 @@ class Scheduler:
 
     def schedule(self) -> tuple[list[Sequence], bool] | ScheduleResult:
         if self.enable_dynamic_chunked_prefill:
-            return self.schedule_dynamic_chunked_prefill()
-        return self.schedule_legacy()
+            result = self.schedule_dynamic_chunked_prefill()
+        else:
+            result = self.schedule_legacy()
+        seqs = result.seqs if isinstance(result, ScheduleResult) else result[0]
+        if self.state_manager is not None:
+            for seq in seqs:
+                slot = self.state_manager.acquire(seq.seq_id)
+                if seq.state_slot is not None and seq.state_slot != slot:
+                    raise RuntimeError("sequence recurrent state slot changed unexpectedly")
+                seq.state_slot = slot
+        return result
 
     def schedule_legacy(self) -> tuple[list[Sequence], bool]:
         scheduled_seqs = []
@@ -260,6 +276,9 @@ class Scheduler:
         seq.status = SequenceStatus.WAITING
         seq.is_prefill = True
         self.block_manager.deallocate(seq)
+        if self.state_manager is not None:
+            self.state_manager.release(seq.seq_id)
+            seq.state_slot = None
         self.waiting.appendleft(seq)
 
     def postprocess(self, seqs: list[Sequence], token_ids: list[int], is_prefill: bool):
@@ -284,4 +303,7 @@ class Scheduler:
             seq.finish_time = perf_counter()
             seq.status = SequenceStatus.FINISHED
             self.block_manager.deallocate(seq)
+            if self.state_manager is not None:
+                self.state_manager.release(seq.seq_id)
+                seq.state_slot = None
             self.running.remove(seq)

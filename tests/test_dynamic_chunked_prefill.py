@@ -34,6 +34,7 @@ MANAGED_MODULES = (
     "nanovllm.sampling_params",
     "nanovllm.engine.sequence",
     "nanovllm.engine.block_manager",
+    "nanovllm.engine.state_manager",
     "nanovllm.engine.scheduler",
     "xxhash",
 )
@@ -82,6 +83,7 @@ sys.modules["xxhash"] = xxhash_mod
 
 sequence_mod = load_module("nanovllm.engine.sequence", ROOT / "nanovllm" / "engine" / "sequence.py")
 block_manager_mod = load_module("nanovllm.engine.block_manager", ROOT / "nanovllm" / "engine" / "block_manager.py")
+load_module("nanovllm.engine.state_manager", ROOT / "nanovllm" / "engine" / "state_manager.py")
 scheduler_mod = load_module("nanovllm.engine.scheduler", ROOT / "nanovllm" / "engine" / "scheduler.py")
 
 Sequence = sequence_mod.Sequence

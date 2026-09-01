@@ -57,6 +57,7 @@ def load_lifecycle_modules():
         "nanovllm.sampling_params",
         "nanovllm.engine.sequence",
         "nanovllm.engine.block_manager",
+        "nanovllm.engine.state_manager",
         "nanovllm.engine.scheduler",
         "xxhash",
     )
@@ -87,11 +88,15 @@ def load_lifecycle_modules():
             "nanovllm.engine.block_manager",
             ROOT / "nanovllm" / "engine" / "block_manager.py",
         )
+        state_manager = load_module(
+            "nanovllm.engine.state_manager",
+            ROOT / "nanovllm" / "engine" / "state_manager.py",
+        )
         scheduler = load_module(
             "nanovllm.engine.scheduler",
             ROOT / "nanovllm" / "engine" / "scheduler.py",
         )
-        return sequence, block_manager, scheduler
+        return sequence, block_manager, state_manager, scheduler
     finally:
         for name, module in saved.items():
             if module is None:
@@ -100,11 +105,17 @@ def load_lifecycle_modules():
                 sys.modules[name] = module
 
 
-sequence_module, block_manager_module, scheduler_module = load_lifecycle_modules()
+(
+    sequence_module,
+    block_manager_module,
+    state_manager_module,
+    scheduler_module,
+) = load_lifecycle_modules()
 Sequence = sequence_module.Sequence
 SequenceStatus = sequence_module.SequenceStatus
 BlockManager = block_manager_module.BlockManager
 Scheduler = scheduler_module.Scheduler
+StateSlotManager = state_manager_module.StateSlotManager
 
 
 def assert_block_conservation(testcase, manager):
@@ -295,6 +306,30 @@ class BlockManagerLifecycleTest(unittest.TestCase):
         self.assertIs(scheduler.waiting[0], seq)
         self.assertEqual(scheduler.block_manager.num_used_blocks, 0)
         assert_block_conservation(self, scheduler.block_manager)
+
+    def test_scheduler_releases_recurrent_state_slot_on_preemption(self):
+        scheduler = Scheduler(
+            FakeConfig(
+                num_kvcache_blocks=3,
+                kvcache_block_size=4,
+            )
+        )
+        scheduler.state_manager = StateSlotManager(1)
+        seq = Sequence([1, 2, 3, 4])
+        scheduler.waiting.append(seq)
+
+        result = scheduler.schedule()
+
+        self.assertEqual(result.prefill_seqs, [seq])
+        self.assertEqual(seq.state_slot, 0)
+        self.assertEqual(scheduler.state_manager.num_used_slots, 1)
+
+        scheduler.running.remove(seq)
+        scheduler.preempt(seq)
+
+        self.assertIsNone(seq.state_slot)
+        self.assertEqual(scheduler.state_manager.num_used_slots, 0)
+        self.assertEqual(scheduler.state_manager.num_free_slots, 1)
 
     def test_dynamic_allocation_can_grow_a_sequence(self):
         manager = BlockManager(num_blocks=4, block_size=4)
