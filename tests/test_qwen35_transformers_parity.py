@@ -228,7 +228,7 @@ def tiny_config():
     return config
 
 
-def make_models(tmp_path, seed, recurrent_dtype=torch.float32):
+def make_models(tmp_path, seed, recurrent_dtype=torch.float32, state_slots=2):
     config = tiny_config()
     torch.manual_seed(seed)
     reference = TransformersQwen35(config).eval()
@@ -242,7 +242,7 @@ def make_models(tmp_path, seed, recurrent_dtype=torch.float32):
         for module in local.modules():
             allocate = getattr(module, "allocate_state_cache", None)
             if allocate is not None:
-                allocate(2, "cpu", recurrent_dtype=recurrent_dtype)
+                allocate(state_slots, "cpu", recurrent_dtype=recurrent_dtype)
         safetensors_torch.save_file(
             {
                 name: value.detach().contiguous()
@@ -391,6 +391,79 @@ def test_mixed_decode_and_prefill_matches_transformers(tmp_path):
     torch.testing.assert_close(
         local.compute_logits(actual),
         reference.lm_head(sampled_expected),
+        rtol=2e-4,
+        atol=2e-4,
+    )
+
+
+def test_multi_request_mixed_batch_matches_transformers(tmp_path):
+    reference, local = make_models(tmp_path, 71, state_slots=4)
+    decode_tokens = (
+        torch.tensor([[1, 5, 7, 2]]),
+        torch.tensor([[4, 8, 3]]),
+    )
+    prefill_tokens = (
+        torch.tensor([[6, 10]]),
+        torch.tensor([[9, 11, 13]]),
+    )
+
+    CURRENT_CONTEXT["value"] = types.SimpleNamespace(
+        is_prefill=True,
+        is_mixed=False,
+        decode_token_count=0,
+        state_slots=torch.tensor([0, 1], dtype=torch.int32),
+        state_reset_mask=torch.tensor([True, True]),
+        state_token_ranges=((0, 3), (3, 5)),
+        cu_seqlens_q=torch.tensor([0, 3, 5], dtype=torch.int32),
+    )
+    with (
+        patch.dict(sys.modules, {"nanovllm.utils.context": CONTEXT_MODULE}),
+        torch.inference_mode(),
+    ):
+        packed_prefix = torch.cat((decode_tokens[0][0, :3], decode_tokens[1][0, :2]))
+        prefix_positions = torch.tensor([0, 1, 2, 0, 1])
+        local(packed_prefix, prefix_positions)
+
+        CURRENT_CONTEXT["value"] = types.SimpleNamespace(
+            is_prefill=False,
+            is_mixed=True,
+            decode_token_count=2,
+            state_slots=torch.tensor([0, 1, 2, 3], dtype=torch.int32),
+            state_reset_mask=torch.tensor([False, False, True, True]),
+            state_token_ranges=((2, 4), (4, 7)),
+            cu_seqlens_q=torch.tensor([0, 2, 5], dtype=torch.int32),
+            prefill_cu_seqlens_q=torch.tensor([0, 2, 5], dtype=torch.int32),
+        )
+        mixed_tokens = torch.cat(
+            (
+                decode_tokens[0][0, 3:],
+                decode_tokens[1][0, 2:],
+                prefill_tokens[0][0],
+                prefill_tokens[1][0],
+            )
+        )
+        mixed_positions = torch.tensor([3, 2, 0, 1, 0, 1, 2])
+        actual = local(mixed_tokens, mixed_positions)
+
+        expected_decode = [
+            reference.model(input_ids=tokens, use_cache=False).last_hidden_state[:, -1]
+            for tokens in decode_tokens
+        ]
+        expected_prefill = [
+            reference.model(input_ids=tokens, use_cache=False).last_hidden_state.squeeze(0)
+            for tokens in prefill_tokens
+        ]
+        expected = torch.cat((*expected_decode, *expected_prefill))
+        expected_sampled = torch.cat(
+            (*expected_decode, expected_prefill[0][-1:], expected_prefill[1][-1:])
+        )
+        actual_logits = local.compute_logits(actual)
+        expected_logits = reference.lm_head(expected_sampled)
+
+    torch.testing.assert_close(actual, expected, rtol=2e-4, atol=2e-4)
+    torch.testing.assert_close(
+        actual_logits,
+        expected_logits,
         rtol=2e-4,
         atol=2e-4,
     )
