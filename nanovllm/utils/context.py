@@ -2,6 +2,49 @@ from dataclasses import dataclass
 import torch
 
 
+StatePrefillGroup = tuple[
+    int,
+    tuple[tuple[int, int], ...],
+    torch.Tensor,
+]
+
+
+def build_state_prefill_groups(
+    state_token_ranges: tuple[tuple[int, int], ...],
+    state_slots: torch.Tensor | None,
+    decode_token_count: int,
+) -> tuple[StatePrefillGroup, ...]:
+    """Group equal-length prefills once for reuse by every recurrent layer."""
+
+    if not state_token_ranges or state_slots is None:
+        return ()
+    if decode_token_count < 0:
+        raise ValueError("decode token count must be non-negative")
+    if decode_token_count + len(state_token_ranges) > state_slots.numel():
+        raise ValueError("recurrent prefill ranges exceed available state slots")
+    grouped: dict[int, list[tuple[int, int, int]]] = {}
+    for range_index, (start, end) in enumerate(state_token_ranges):
+        if end <= start:
+            raise ValueError("recurrent prefill ranges must be non-empty")
+        grouped.setdefault(end - start, []).append(
+            (start, end, decode_token_count + range_index)
+        )
+    result = []
+    for sequence_length, ranges in grouped.items():
+        slot_indices = state_slots.new_tensor(
+            [slot_index for _, _, slot_index in ranges],
+            dtype=torch.long,
+        )
+        result.append(
+            (
+                sequence_length,
+                tuple(ranges),
+                state_slots.index_select(0, slot_indices).to(torch.long),
+            )
+        )
+    return tuple(result)
+
+
 @dataclass(slots=True)
 class Context:
     is_prefill: bool = False
@@ -34,6 +77,7 @@ class Context:
     prefill_dequant_block_tables: torch.Tensor | None = None
     state_reset_mask: torch.Tensor | None = None
     state_token_ranges: tuple[tuple[int, int], ...] = ()
+    state_prefill_groups: tuple[StatePrefillGroup, ...] = ()
 
 _CONTEXT = Context()
 
@@ -73,6 +117,11 @@ def set_context(
     state_token_ranges=(),
 ):
     global _CONTEXT
+    state_prefill_groups = build_state_prefill_groups(
+        state_token_ranges,
+        state_slots,
+        decode_token_count,
+    )
     _CONTEXT = Context(
         is_prefill=is_prefill,
         cu_seqlens_q=cu_seqlens_q,
@@ -104,6 +153,7 @@ def set_context(
         prefill_dequant_block_tables=prefill_dequant_block_tables,
         state_reset_mask=state_reset_mask,
         state_token_ranges=state_token_ranges,
+        state_prefill_groups=state_prefill_groups,
     )
 
 def reset_context():

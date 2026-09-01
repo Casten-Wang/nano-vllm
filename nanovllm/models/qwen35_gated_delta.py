@@ -847,16 +847,28 @@ class Qwen35GatedDeltaNet(nn.Module):
                 decode_slots,
             )
 
-        ranges_by_length: dict[int, list[tuple[int, int, int]]] = {}
-        for range_index, (start, end) in enumerate(ranges):
-            ranges_by_length.setdefault(end - start, []).append(
-                (start, end, decode_count + range_index)
+        prefill_groups = getattr(context, "state_prefill_groups", None)
+        if prefill_groups is None:
+            ranges_by_length: dict[int, list[tuple[int, int, int]]] = {}
+            for range_index, (start, end) in enumerate(ranges):
+                ranges_by_length.setdefault(end - start, []).append(
+                    (start, end, decode_count + range_index)
+                )
+            prefill_groups = tuple(
+                (
+                    sequence_length,
+                    tuple(group),
+                    context.state_slots.index_select(
+                        0,
+                        context.state_slots.new_tensor(
+                            [slot_index for _, _, slot_index in group],
+                            dtype=torch.long,
+                        ),
+                    ).to(torch.long),
+                )
+                for sequence_length, group in ranges_by_length.items()
             )
-        for sequence_length, group in ranges_by_length.items():
-            slot_indices = context.state_slots.new_tensor(
-                [slot_index for _, _, slot_index in group], dtype=torch.long
-            )
-            group_slots = context.state_slots.index_select(0, slot_indices).to(torch.long)
+        for sequence_length, group, group_slots in prefill_groups:
             group_qkv = torch.stack(
                 [mixed_qkv[start:end] for start, end, _ in group]
             )
