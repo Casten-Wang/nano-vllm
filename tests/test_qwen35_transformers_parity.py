@@ -228,9 +228,9 @@ def tiny_config():
     return config
 
 
-def test_tiny_text_model_matches_transformers_end_to_end(tmp_path):
+def make_models(tmp_path, seed):
     config = tiny_config()
-    torch.manual_seed(29)
+    torch.manual_seed(seed)
     reference = TransformersQwen35(config).eval()
     with (
         patch.object(LINEAR.dist, "get_world_size", return_value=1),
@@ -251,6 +251,11 @@ def test_tiny_text_model_matches_transformers_end_to_end(tmp_path):
             str(tmp_path / "model.safetensors"),
         )
         LOADER.load_model(local, str(tmp_path))
+    return reference, local
+
+
+def test_tiny_text_model_matches_transformers_end_to_end(tmp_path):
+    reference, local = make_models(tmp_path, 29)
 
     tokens = torch.tensor([[1, 5, 7, 2, 9]])
     positions = torch.arange(tokens.shape[1])
@@ -284,28 +289,7 @@ def test_tiny_text_model_matches_transformers_end_to_end(tmp_path):
 
 
 def test_prefill_then_decode_matches_transformers_full_recomputation(tmp_path):
-    config = tiny_config()
-    torch.manual_seed(53)
-    reference = TransformersQwen35(config).eval()
-    with (
-        patch.object(LINEAR.dist, "get_world_size", return_value=1),
-        patch.object(LINEAR.dist, "get_rank", return_value=0),
-        patch("torch.distributed.get_world_size", return_value=1),
-        patch("torch.distributed.get_rank", return_value=0),
-    ):
-        local = LOCAL.Qwen3_5MoeForCausalLM(config).eval()
-        for module in local.modules():
-            allocate = getattr(module, "allocate_state_cache", None)
-            if allocate is not None:
-                allocate(2, "cpu")
-        safetensors_torch.save_file(
-            {
-                name: value.detach().contiguous()
-                for name, value in reference.state_dict().items()
-            },
-            str(tmp_path / "model.safetensors"),
-        )
-        LOADER.load_model(local, str(tmp_path))
+    reference, local = make_models(tmp_path, 53)
 
     tokens = torch.tensor([[1, 5, 7, 2, 9]])
     CURRENT_CONTEXT["value"] = types.SimpleNamespace(
@@ -358,3 +342,55 @@ def test_prefill_then_decode_matches_transformers_full_recomputation(tmp_path):
                 rtol=2e-4,
                 atol=2e-4,
             )
+
+
+def test_mixed_decode_and_prefill_matches_transformers(tmp_path):
+    reference, local = make_models(tmp_path, 59)
+    decode_tokens = torch.tensor([[1, 5, 7, 2]])
+    prefill_tokens = torch.tensor([[3, 6]])
+
+    CURRENT_CONTEXT["value"] = types.SimpleNamespace(
+        is_prefill=True,
+        is_mixed=False,
+        decode_token_count=0,
+        state_slots=torch.tensor([0], dtype=torch.int32),
+        state_reset_mask=torch.tensor([True]),
+        state_token_ranges=((0, 3),),
+        cu_seqlens_q=torch.tensor([0, 3], dtype=torch.int32),
+    )
+    with (
+        patch.dict(sys.modules, {"nanovllm.utils.context": CONTEXT_MODULE}),
+        torch.inference_mode(),
+    ):
+        local(decode_tokens[0, :3], torch.arange(3))
+        CURRENT_CONTEXT["value"] = types.SimpleNamespace(
+            is_prefill=False,
+            is_mixed=True,
+            decode_token_count=1,
+            state_slots=torch.tensor([0, 1], dtype=torch.int32),
+            state_reset_mask=torch.tensor([False, True]),
+            state_token_ranges=((1, 3),),
+            cu_seqlens_q=torch.tensor([0, 2], dtype=torch.int32),
+            prefill_cu_seqlens_q=torch.tensor([0, 2], dtype=torch.int32),
+        )
+        mixed_tokens = torch.cat((decode_tokens[0, 3:], prefill_tokens[0]))
+        mixed_positions = torch.tensor([3, 0, 1])
+        actual = local(mixed_tokens, mixed_positions)
+        expected_decode = reference.model(
+            input_ids=decode_tokens,
+            use_cache=False,
+        ).last_hidden_state[:, -1]
+        expected_prefill = reference.model(
+            input_ids=prefill_tokens,
+            use_cache=False,
+        ).last_hidden_state.squeeze(0)
+        expected = torch.cat((expected_decode, expected_prefill))
+
+    torch.testing.assert_close(actual, expected, rtol=2e-4, atol=2e-4)
+    sampled_expected = torch.stack((expected[0], expected[-1]))
+    torch.testing.assert_close(
+        local.compute_logits(actual),
+        reference.lm_head(sampled_expected),
+        rtol=2e-4,
+        atol=2e-4,
+    )
