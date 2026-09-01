@@ -68,6 +68,7 @@ def test_quality_worker_command_forwards_tensor_parallel_size(monkeypatch, tmp_p
     args = Namespace(
         model="/models/qwen35",
         tensor_parallel_size=8,
+        recurrent_state_dtype="model",
         output_len=8,
         max_model_len=128,
         max_num_batched_tokens=256,
@@ -87,6 +88,7 @@ def test_quality_worker_command_forwards_tensor_parallel_size(monkeypatch, tmp_p
 
     command = captured["command"]
     assert command[command.index("--tensor-parallel-size") + 1] == "8"
+    assert command[command.index("--recurrent-state-dtype") + 1] == "model"
 
 
 def test_mmlu_worker_command_forwards_tensor_parallel_size(tmp_path):
@@ -141,6 +143,7 @@ def test_teacher_forcing_worker_command_forwards_tensor_parallel_size(
     args = Namespace(
         model="/models/qwen35",
         tensor_parallel_size=8,
+        recurrent_state_dtype="model",
         max_model_len=4096,
         max_num_batched_tokens=8192,
     )
@@ -155,6 +158,7 @@ def test_teacher_forcing_worker_command_forwards_tensor_parallel_size(
 
     command = captured["command"]
     assert command[command.index("--tensor-parallel-size") + 1] == "8"
+    assert command[command.index("--recurrent-state-dtype") + 1] == "model"
 
 
 def execution_worker(mode, *, include_decode=True):
@@ -243,6 +247,7 @@ def test_worker_comparison_reports_decode_only_quality_scope():
         worker.update(
             {
                 "tensor_parallel_size": 4,
+                "recurrent_state_dtype": "float32",
                 "target_matrix": [[1, 2]],
                 "logits": [
                     torch.tensor([[0.0, 1.0, 2.0, 3.0, 4.0]]),

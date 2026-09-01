@@ -55,6 +55,8 @@ def run_in_worker_process(
         args.model,
         "--tensor-parallel-size",
         str(args.tensor_parallel_size),
+        "--recurrent-state-dtype",
+        args.recurrent_state_dtype,
         "--output-len",
         str(args.output_len),
         "--max-model-len",
@@ -135,6 +137,7 @@ def run_one_mode(
     llm = LLM(
         model,
         tensor_parallel_size=args.tensor_parallel_size,
+        recurrent_state_dtype=args.recurrent_state_dtype,
         enforce_eager=True,
         max_model_len=args.max_model_len,
         max_num_batched_tokens=args.max_num_batched_tokens,
@@ -220,6 +223,7 @@ def run_one_mode(
         result = {
             "kv_cache_dtype": kv_cache_dtype,
             "tensor_parallel_size": args.tensor_parallel_size,
+            "recurrent_state_dtype": args.recurrent_state_dtype,
             "captured_attention_layer_ids": attention_layer_ids,
             "outputs": [item["token_ids"] for item in outputs],
             "logits_records": state["logits_records"],
@@ -435,6 +439,11 @@ def main() -> None:
     )
     parser.add_argument("--model", required=True)
     parser.add_argument("--tensor-parallel-size", type=int, default=1)
+    parser.add_argument(
+        "--recurrent-state-dtype",
+        choices=("float32", "model"),
+        default="float32",
+    )
     parser.add_argument("--output-len", type=int, default=128)
     parser.add_argument("--max-model-len", type=int, default=4096)
     parser.add_argument("--max-num-batched-tokens", type=int, default=16384)
@@ -542,6 +551,7 @@ def main() -> None:
         **collect_benchmark_metadata(torch),
         "configuration": {
             "tensor_parallel_size": args.tensor_parallel_size,
+            "recurrent_state_dtype": args.recurrent_state_dtype,
             "output_len": args.output_len,
             "max_model_len": args.max_model_len,
             "max_num_batched_tokens": args.max_num_batched_tokens,

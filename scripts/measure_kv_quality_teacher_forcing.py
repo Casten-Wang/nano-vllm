@@ -327,6 +327,7 @@ def run_worker(args: argparse.Namespace) -> None:
     llm = LLM(
         model,
         tensor_parallel_size=args.tensor_parallel_size,
+        recurrent_state_dtype=args.recurrent_state_dtype,
         enforce_eager=True,
         max_model_len=args.max_model_len,
         max_num_batched_tokens=args.max_num_batched_tokens,
@@ -416,6 +417,7 @@ def run_worker(args: argparse.Namespace) -> None:
         result = {
             "mode": mode,
             "tensor_parallel_size": args.tensor_parallel_size,
+            "recurrent_state_dtype": args.recurrent_state_dtype,
             "cases": cases,
             "target_matrix": target_matrix.tolist(),
             "forced_steps": state["step"],
@@ -607,6 +609,8 @@ def compare_workers(auto: dict[str, Any], int8: dict[str, Any]) -> dict[str, Any
         raise RuntimeError("BF16 and INT8 workers used different target trajectories")
     if auto.get("tensor_parallel_size") != int8.get("tensor_parallel_size"):
         raise RuntimeError("BF16 and INT8 workers used different tensor parallel sizes")
+    if auto.get("recurrent_state_dtype") != int8.get("recurrent_state_dtype"):
+        raise RuntimeError("BF16 and INT8 workers used different recurrent state dtypes")
     execution_validation = {
         "auto": validate_worker_execution(auto),
         "int8": validate_worker_execution(int8),
@@ -694,6 +698,8 @@ def run_worker_process(
         args.model,
         "--tensor-parallel-size",
         str(args.tensor_parallel_size),
+        "--recurrent-state-dtype",
+        args.recurrent_state_dtype,
         "--max-model-len",
         str(args.max_model_len),
         "--max-num-batched-tokens",
@@ -709,6 +715,11 @@ def main() -> None:
     )
     parser.add_argument("--model", required=True)
     parser.add_argument("--tensor-parallel-size", type=int, default=1)
+    parser.add_argument(
+        "--recurrent-state-dtype",
+        choices=("float32", "model"),
+        default="float32",
+    )
     parser.add_argument(
         "--cases-file",
         default=None,
@@ -824,6 +835,7 @@ def main() -> None:
         **collect_benchmark_metadata(torch),
         "configuration": {
             "tensor_parallel_size": args.tensor_parallel_size,
+            "recurrent_state_dtype": args.recurrent_state_dtype,
             "prompt_lengths": actual_prompt_lengths,
             "cases_per_length": args.cases_per_length,
             "continuation_len": args.continuation_len,
