@@ -448,3 +448,44 @@ def test_bf16_recurrent_storage_remains_close_over_multi_step_decode(tmp_path):
 
     assert max_hidden_error < 2e-3
     assert max_logit_error < 2e-3
+
+
+def test_reused_state_slot_does_not_leak_previous_request(tmp_path):
+    reference, local = make_models(tmp_path, 67)
+    previous_tokens = torch.tensor([1, 5, 7, 2])
+    new_tokens = torch.tensor([[3, 6, 10]])
+
+    def set_prefill_context(length, reset):
+        CURRENT_CONTEXT["value"] = types.SimpleNamespace(
+            is_prefill=True,
+            is_mixed=False,
+            decode_token_count=0,
+            state_slots=torch.tensor([0], dtype=torch.int32),
+            state_reset_mask=torch.tensor([reset]),
+            state_token_ranges=((0, length),),
+            cu_seqlens_q=torch.tensor([0, length], dtype=torch.int32),
+        )
+
+    with (
+        patch.dict(sys.modules, {"nanovllm.utils.context": CONTEXT_MODULE}),
+        torch.inference_mode(),
+    ):
+        set_prefill_context(previous_tokens.numel(), True)
+        local(previous_tokens, torch.arange(previous_tokens.numel()))
+
+        set_prefill_context(new_tokens.shape[1], True)
+        actual = local(new_tokens.squeeze(0), torch.arange(new_tokens.shape[1]))
+        expected = reference.model(
+            input_ids=new_tokens,
+            use_cache=False,
+        ).last_hidden_state.squeeze(0)
+        actual_logits = local.compute_logits(actual)
+        expected_logits = reference.lm_head(expected[-1:])
+
+    torch.testing.assert_close(actual, expected, rtol=2e-4, atol=2e-4)
+    torch.testing.assert_close(
+        actual_logits,
+        expected_logits,
+        rtol=2e-4,
+        atol=2e-4,
+    )
