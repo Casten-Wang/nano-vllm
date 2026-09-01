@@ -174,14 +174,17 @@ class Qwen35Experts(nn.Module):
     ) -> torch.Tensor:
         output = torch.zeros_like(hidden_states)
         assignments = topk_ids.reshape(-1)
-        token_indices = torch.arange(
-            hidden_states.shape[0],
-            device=hidden_states.device,
-        ).repeat_interleave(topk_ids.shape[1])
         routing_weights = topk_weights.reshape(-1)
         order = torch.argsort(assignments, stable=True)
         sorted_experts = assignments[order]
-        sorted_tokens = token_indices[order]
+        # Flattened routes are token-major, so the original token index is
+        # encoded directly in the sort permutation. Avoid materializing and
+        # repeating a separate arange tensor in every MoE layer.
+        sorted_tokens = torch.div(
+            order,
+            topk_ids.shape[1],
+            rounding_mode="floor",
+        )
         sorted_weights = routing_weights[order]
         # One host synchronization replaces one .item() and one full routing
         # mask scan per active expert in the correctness baseline.
