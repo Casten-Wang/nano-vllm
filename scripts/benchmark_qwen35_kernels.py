@@ -12,6 +12,7 @@ import time
 from typing import Callable
 
 import torch
+import torch.nn.functional as F
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -168,6 +169,106 @@ def benchmark_router(args, device, dtype) -> dict:
         args.router_tokens * args.top_k * 4 / 1024 / 1024
     )
     return result
+
+
+def expert_dispatch(
+    hidden_states: torch.Tensor,
+    topk_ids: torch.Tensor,
+    topk_weights: torch.Tensor,
+    gate_up_proj: torch.Tensor,
+    down_proj: torch.Tensor,
+) -> torch.Tensor:
+    output = torch.zeros_like(hidden_states)
+    assignments = topk_ids.reshape(-1)
+    routing_weights = topk_weights.reshape(-1)
+    order = torch.argsort(assignments, stable=True)
+    sorted_experts = assignments[order]
+    sorted_tokens = torch.div(order, topk_ids.shape[1], rounding_mode="floor")
+    sorted_weights = routing_weights[order]
+    counts = torch.bincount(
+        sorted_experts,
+        minlength=gate_up_proj.shape[0],
+    ).cpu().tolist()
+    offset = 0
+    for expert_id, count in enumerate(counts):
+        if count == 0:
+            continue
+        end = offset + count
+        token_index = sorted_tokens[offset:end]
+        gate_up = F.linear(hidden_states[token_index], gate_up_proj[expert_id])
+        gate, up = gate_up.chunk(2, dim=-1)
+        expert_output = F.linear(F.silu(gate) * up, down_proj[expert_id])
+        output.index_add_(
+            0,
+            token_index,
+            expert_output * sorted_weights[offset:end].unsqueeze(-1),
+        )
+        offset = end
+    return output
+
+
+def benchmark_expert_dispatch(args, device, dtype) -> dict:
+    local_intermediate_size = args.moe_intermediate_size // args.tp_size
+    hidden = torch.randn(
+        args.expert_tokens,
+        args.hidden_size,
+        device=device,
+        dtype=dtype,
+    )
+    topk_ids = torch.randint(
+        args.num_experts,
+        (args.expert_tokens, args.top_k),
+        device=device,
+    )
+    topk_weights = torch.rand(
+        args.expert_tokens,
+        args.top_k,
+        device=device,
+        dtype=dtype,
+    )
+    topk_weights /= topk_weights.sum(dim=-1, keepdim=True)
+    gate_up_proj = torch.randn(
+        args.num_experts,
+        2 * local_intermediate_size,
+        args.hidden_size,
+        device=device,
+        dtype=dtype,
+    )
+    down_proj = torch.randn(
+        args.num_experts,
+        args.hidden_size,
+        local_intermediate_size,
+        device=device,
+        dtype=dtype,
+    )
+
+    def run():
+        return expert_dispatch(
+            hidden,
+            topk_ids,
+            topk_weights,
+            gate_up_proj,
+            down_proj,
+        )
+
+    output = run()
+    if not torch.isfinite(output).all():
+        raise RuntimeError("expert dispatch produced non-finite output")
+    timing = measure(
+        run,
+        device=device,
+        warmup=args.warmup,
+        iterations=args.iterations,
+        repeats=args.repeats,
+    )
+    return {
+        "timing": timing,
+        "tokens": args.expert_tokens,
+        "routes": args.expert_tokens * args.top_k,
+        "active_experts": torch.unique(topk_ids).numel(),
+        "local_intermediate_size": local_intermediate_size,
+        "estimated_model_moe_ms": timing["median_ms"] * args.num_hidden_layers,
+    }
 
 
 def benchmark_rmsnorm(args, device, dtype) -> dict:
@@ -409,6 +510,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-experts", type=int, default=256)
     parser.add_argument("--top-k", type=int, default=8)
     parser.add_argument("--hidden-size", type=int, default=2048)
+    parser.add_argument("--moe-intermediate-size", type=int, default=512)
+    parser.add_argument("--num-hidden-layers", type=int, default=40)
+    parser.add_argument("--expert-tokens", type=int, default=32)
     parser.add_argument("--prefill-batch", type=int, default=1)
     parser.add_argument("--prefill-tokens", type=int, default=512)
     parser.add_argument("--decode-batch", type=int, default=32)
@@ -437,6 +541,9 @@ def main() -> None:
         "num_experts": args.num_experts,
         "top_k": args.top_k,
         "hidden_size": args.hidden_size,
+        "moe_intermediate_size": args.moe_intermediate_size,
+        "num_hidden_layers": args.num_hidden_layers,
+        "expert_tokens": args.expert_tokens,
         "prefill_batch": args.prefill_batch,
         "prefill_tokens": args.prefill_tokens,
         "decode_batch": args.decode_batch,
@@ -450,6 +557,8 @@ def main() -> None:
         raise ValueError(f"benchmark values must be positive: {', '.join(invalid)}")
     if args.top_k > args.num_experts:
         raise ValueError("top_k cannot exceed num_experts")
+    if args.moe_intermediate_size % args.tp_size:
+        raise ValueError("Qwen3.5 MoE intermediate size must divide TP size")
     if args.device == "auto":
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     else:
@@ -479,6 +588,11 @@ def main() -> None:
         },
         "results": {
             "router_topk_first": benchmark_router(args, device, dtype),
+            "expert_dispatch_torch": benchmark_expert_dispatch(
+                args,
+                device,
+                dtype,
+            ),
             "rmsnorm_fp32_reuse": benchmark_rmsnorm(args, device, dtype),
             "vectorized_prefill_convolution": benchmark_convolution(
                 args,
