@@ -1,8 +1,40 @@
 from collections import deque
+from dataclasses import dataclass
+from time import perf_counter
 
 from nanovllm.config import Config
 from nanovllm.engine.sequence import Sequence, SequenceStatus
 from nanovllm.engine.block_manager import BlockManager
+
+
+@dataclass(slots=True)
+class ScheduleResult:
+    prefill_seqs: list[Sequence]
+    decode_seqs: list[Sequence]
+
+    @property
+    def is_mixed(self) -> bool:
+        return bool(self.prefill_seqs and self.decode_seqs)
+
+    @property
+    def is_prefill(self) -> bool:
+        return bool(self.prefill_seqs and not self.decode_seqs)
+
+    @property
+    def is_decode(self) -> bool:
+        return bool(self.decode_seqs and not self.prefill_seqs)
+
+    @property
+    def seqs(self) -> list[Sequence]:
+        return self.decode_seqs + self.prefill_seqs
+
+    @property
+    def num_prefill_tokens(self) -> int:
+        return sum(seq.num_scheduled_tokens for seq in self.prefill_seqs)
+
+    @property
+    def num_decode_tokens(self) -> int:
+        return len(self.decode_seqs)
 
 
 class Scheduler:
@@ -12,6 +44,7 @@ class Scheduler:
         self.max_num_batched_tokens = config.max_num_batched_tokens
         self.eos = config.eos
         self.block_size = config.kvcache_block_size
+        self.enable_dynamic_chunked_prefill = config.enable_dynamic_chunked_prefill
         self.block_manager = BlockManager(config.num_kvcache_blocks, config.kvcache_block_size)
         self.waiting: deque[Sequence] = deque()
         self.running: deque[Sequence] = deque()
@@ -19,10 +52,23 @@ class Scheduler:
     def is_finished(self):
         return not self.waiting and not self.running
 
+    @property
+    def num_waiting(self):
+        return len(self.waiting)
+
+    @property
+    def num_running(self):
+        return len(self.running)
+
     def add(self, seq: Sequence):
         self.waiting.append(seq)
 
-    def schedule(self) -> tuple[list[Sequence], bool]:
+    def schedule(self) -> tuple[list[Sequence], bool] | ScheduleResult:
+        if self.enable_dynamic_chunked_prefill:
+            return self.schedule_dynamic_chunked_prefill()
+        return self.schedule_legacy()
+
+    def schedule_legacy(self) -> tuple[list[Sequence], bool]:
         scheduled_seqs = []
         num_batched_tokens = 0
 
@@ -72,6 +118,144 @@ class Scheduler:
         self.running.extendleft(reversed(scheduled_seqs))
         return scheduled_seqs, False
 
+    def schedule_dynamic_chunked_prefill(self) -> ScheduleResult:
+        # Final serving path:
+        # 1. Decode first to protect TPOT/ITL for already-running requests.
+        # 2. Spend the remaining token and sequence budget on prefill chunks.
+        # 3. Return both groups so ModelRunner can execute one mixed forward.
+        decode_seqs = self.schedule_decode_first()
+        prefill_budget = self.max_num_batched_tokens - len(decode_seqs)
+        prefill_slots = self.max_num_seqs - len(decode_seqs)
+        prefill_seqs = self.schedule_prefill_with_budget(prefill_budget, prefill_slots)
+        if decode_seqs:
+            # Rotate decoded requests to the back. Using extendleft here
+            # repeatedly selected the same queue head when the token budget
+            # was smaller than the number of running requests.
+            self.running.extend(decode_seqs)
+        if not decode_seqs and not prefill_seqs:
+            if self.waiting:
+                seq = self.waiting[0]
+                raise RuntimeError(
+                    "unable to schedule waiting request: insufficient free KV "
+                    f"blocks for prompt length {len(seq)}"
+                )
+            raise RuntimeError("scheduler has no runnable sequence")
+        return ScheduleResult(prefill_seqs=prefill_seqs, decode_seqs=decode_seqs)
+
+    def schedule_decode_first(self) -> list[Sequence]:
+        scheduled_seqs = []
+        while self.running and len(scheduled_seqs) < self.max_num_seqs and len(scheduled_seqs) < self.max_num_batched_tokens:
+            seq = self.running.popleft()
+            while not self.block_manager.can_append(seq):
+                if self.running:
+                    self.preempt(self.running.pop())
+                else:
+                    self.preempt(seq)
+                    break
+            else:
+                seq.num_scheduled_tokens = 1
+                seq.is_prefill = False
+                self.block_manager.may_append(seq)
+                scheduled_seqs.append(seq)
+        return scheduled_seqs
+
+    def schedule_prefill_with_budget(self, token_budget: int, seq_budget: int) -> list[Sequence]:
+        scheduled_seqs = []
+        num_batched_tokens = 0
+        while self.waiting and len(scheduled_seqs) < seq_budget:
+            remaining = token_budget - num_batched_tokens
+            if remaining <= 0:
+                break
+            seq = self.waiting[0]
+            if not seq.block_table:
+                num_cached_blocks = self.block_manager.get_num_cached_blocks(seq)
+                seq.num_cached_tokens = num_cached_blocks * self.block_size
+                num_tokens = seq.num_tokens - seq.num_cached_tokens
+                if num_tokens <= 0:
+                    # A complete prefix-cache hit still needs to bind the
+                    # cached blocks to this sequence. Otherwise the next
+                    # decode step would access an empty block table.
+                    if (
+                        self.block_manager.can_allocate(
+                            seq,
+                            num_blocks=seq.num_blocks,
+                            num_cached_blocks=num_cached_blocks,
+                        )
+                        == -1
+                    ):
+                        break
+                    self.block_manager.allocate(
+                        seq,
+                        num_cached_blocks,
+                        num_blocks=seq.num_blocks,
+                    )
+                    seq.status = SequenceStatus.RUNNING
+                    self.waiting.popleft()
+                    self.running.append(seq)
+                    continue
+                scheduled_tokens = min(num_tokens, remaining)
+                target_blocks = (
+                    seq.num_cached_tokens + scheduled_tokens + self.block_size - 1
+                ) // self.block_size
+                if self.block_manager.can_allocate(
+                    seq,
+                    num_blocks=target_blocks,
+                    num_cached_blocks=num_cached_blocks,
+                ) == -1:
+                    break
+                self.block_manager.allocate(
+                    seq,
+                    num_cached_blocks,
+                    num_blocks=target_blocks,
+                )
+            else:
+                num_tokens = seq.num_tokens - seq.num_cached_tokens
+                if num_tokens <= 0:
+                    seq.status = SequenceStatus.RUNNING
+                    self.waiting.popleft()
+                    self.running.append(seq)
+                    continue
+                scheduled_tokens = min(num_tokens, remaining)
+                target_blocks = (
+                    seq.num_cached_tokens + scheduled_tokens + self.block_size - 1
+                ) // self.block_size
+                if not self.block_manager.can_grow(seq, target_blocks):
+                    break
+                self.block_manager.grow(seq, target_blocks)
+
+            # Recompute after allocation because a prefix hit may have
+            # advanced num_cached_tokens.
+            num_tokens = seq.num_tokens - seq.num_cached_tokens
+            if num_tokens <= 0:
+                # The prompt is fully covered by prefix cache. It does not need
+                # a prefill chunk; it can enter RUNNING and decode next step.
+                seq.status = SequenceStatus.RUNNING
+                self.waiting.popleft()
+                self.running.append(seq)
+                continue
+            # Dynamic chunked prefill allows every scheduled waiting request to
+            # consume only the remaining token budget instead of forcing the
+            # whole prompt into this step.
+            seq.is_prefill = True
+            seq.num_scheduled_tokens = min(num_tokens, remaining)
+            num_batched_tokens += seq.num_scheduled_tokens
+            target_blocks = (
+                seq.num_cached_tokens
+                + seq.num_scheduled_tokens
+                + self.block_size
+                - 1
+            ) // self.block_size
+            if not self.block_manager.can_grow(seq, target_blocks):
+                # The initial allocation above already covers this target;
+                # this branch only protects unusual state mutations.
+                raise RuntimeError("insufficient KV blocks for prefill chunk")
+            if seq.num_cached_tokens + seq.num_scheduled_tokens == seq.num_tokens:
+                seq.status = SequenceStatus.RUNNING
+                self.waiting.popleft()
+                self.running.append(seq)
+            scheduled_seqs.append(seq)
+        return scheduled_seqs
+
     def preempt(self, seq: Sequence):
         seq.status = SequenceStatus.WAITING
         seq.is_prefill = True
@@ -80,13 +264,24 @@ class Scheduler:
 
     def postprocess(self, seqs: list[Sequence], token_ids: list[int], is_prefill: bool):
         for seq, token_id in zip(seqs, token_ids):
-            self.block_manager.hash_blocks(seq)
-            seq.num_cached_tokens += seq.num_scheduled_tokens
-            seq.num_scheduled_tokens = 0
-            if is_prefill and seq.num_cached_tokens < seq.num_tokens:
-                continue
-            seq.append_token(token_id)
-            if (not seq.ignore_eos and token_id == self.eos) or seq.num_completion_tokens == seq.max_tokens:
-                seq.status = SequenceStatus.FINISHED
-                self.block_manager.deallocate(seq)
-                self.running.remove(seq)
+            self.postprocess_one(seq, token_id, is_prefill)
+
+    def postprocess_mixed(self, result: ScheduleResult, token_ids: list[int]):
+        seqs = result.decode_seqs + result.prefill_seqs
+        for seq, token_id in zip(seqs, token_ids):
+            self.postprocess_one(seq, token_id, seq.is_prefill)
+
+    def postprocess_one(self, seq: Sequence, token_id: int, is_prefill: bool):
+        self.block_manager.hash_blocks(seq)
+        seq.num_cached_tokens += seq.num_scheduled_tokens
+        seq.num_scheduled_tokens = 0
+        if is_prefill and seq.num_cached_tokens < seq.num_tokens:
+            return
+        if seq.num_completion_tokens == 0:
+            seq.first_token_time = perf_counter()
+        seq.append_token(token_id)
+        if (not seq.ignore_eos and token_id == self.eos) or seq.num_completion_tokens == seq.max_tokens:
+            seq.finish_time = perf_counter()
+            seq.status = SequenceStatus.FINISHED
+            self.block_manager.deallocate(seq)
+            self.running.remove(seq)

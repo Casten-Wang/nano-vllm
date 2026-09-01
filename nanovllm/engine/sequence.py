@@ -15,7 +15,15 @@ class Sequence:
     block_size = 256
     counter = count()
 
-    def __init__(self, token_ids: list[int], sampling_params = SamplingParams()):
+    def __init__(
+        self,
+        token_ids: list[int],
+        sampling_params: SamplingParams | None = None,
+    ):
+        if not token_ids:
+            raise ValueError("token_ids must contain at least one token")
+        if sampling_params is None:
+            sampling_params = SamplingParams()
         self.seq_id = next(Sequence.counter)
         self.status = SequenceStatus.WAITING
         self.token_ids = copy(token_ids)
@@ -26,7 +34,12 @@ class Sequence:
         self.num_scheduled_tokens = 0
         self.is_prefill = True
         self.block_table = []
+        self.arrival_time: float | None = None
+        self.first_token_time: float | None = None
+        self.finish_time: float | None = None
         self.temperature = sampling_params.temperature
+        self.top_k = sampling_params.top_k
+        self.top_p = sampling_params.top_p
         self.max_tokens = sampling_params.max_tokens
         self.ignore_eos = sampling_params.ignore_eos
 

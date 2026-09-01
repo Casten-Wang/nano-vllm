@@ -2,6 +2,67 @@
 __pycache__/
 *.py[cod]
 *$py.class
+.DS_Store
+
+# Repository policy: source code only
+# Keep all documentation, interviews, recordings, generated reports, offline
+# models, benchmark output, and scratch data local. Existing tracked upstream
+# files (for example README.md) are unaffected by these rules.
+docs/
+offline_bundle/
+tmp/
+output/
+benchmark_results/
+
+# Documents and media must never be added as new repository content.
+*.md
+*.pdf
+*.doc
+*.docx
+*.ppt
+*.pptx
+*.xls
+*.xlsx
+*.txt
+*.rtf
+*.m4a
+*.mp3
+*.wav
+*.flac
+*.aac
+*.ogg
+*.mp4
+*.mov
+*.avi
+*.mkv
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.gif
+*.tar
+*.tar.gz
+*.tgz
+*.zip
+*.7z
+
+# Local model/data artifacts.
+*.safetensors
+*.bin
+*.pt
+*.pth
+*.onnx
+
+# Non-project helper scripts kept locally under scripts/.
+scripts/*interview*.py
+scripts/transcribe_*.py
+scripts/generate_*_pdf.py
+scripts/generate_resume_*.py
+scripts/build_tencent_*.py
+scripts/update_interview_*.py
+
+# Ad-hoc root scratch file.
+/test.py
 
 # C extensions
 *.so
