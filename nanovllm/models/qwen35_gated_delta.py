@@ -184,7 +184,8 @@ class Qwen35RecurrentStatePool:
 class Qwen35GatedRMSNorm(nn.Module):
     def __init__(self, hidden_size: int, eps: float = 1e-6) -> None:
         super().__init__()
-        self.weight = nn.Parameter(torch.ones(hidden_size))
+        # The official checkpoint intentionally stores this weight in FP32.
+        self.weight = nn.Parameter(torch.ones(hidden_size, dtype=torch.float32))
         self.eps = eps
 
     def forward(self, hidden_states: torch.Tensor, gate: torch.Tensor) -> torch.Tensor:
@@ -257,7 +258,11 @@ class Qwen35GatedDeltaNet(nn.Module):
         self.conv1d.weight.weight_loader = self._load_conv
         self.dt_bias = nn.Parameter(torch.empty(self.num_v_heads))
         self.dt_bias.weight_loader = self._load_vector
-        self.A_log = nn.Parameter(torch.empty(self.num_v_heads))
+        # Keep the decay exponent in FP32; BF16 can turn large learned values
+        # into unstable decay factors during long recurrent scans.
+        self.A_log = nn.Parameter(
+            torch.empty(self.num_v_heads, dtype=torch.float32)
+        )
         self.A_log.weight_loader = self._load_vector
         self.norm = Qwen35GatedRMSNorm(
             self.value_head_dim,

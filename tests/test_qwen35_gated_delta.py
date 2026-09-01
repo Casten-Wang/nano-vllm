@@ -177,6 +177,19 @@ def test_qkv_and_convolution_loaders_shard_each_component_independently():
     torch.testing.assert_close(layer.conv1d.weight, expected_conv)
 
 
+def test_decay_and_gated_norm_parameters_remain_fp32_under_bf16_default():
+    original_dtype = torch.get_default_dtype()
+    try:
+        torch.set_default_dtype(torch.bfloat16)
+        layer = make_layer()
+    finally:
+        torch.set_default_dtype(original_dtype)
+
+    assert layer.A_log.dtype == torch.float32
+    assert layer.norm.weight.dtype == torch.float32
+    assert layer.dt_bias.dtype == torch.bfloat16
+
+
 def test_gated_delta_layer_chunked_prefill_matches_one_shot():
     torch.manual_seed(4)
     layer = make_layer()
