@@ -214,6 +214,10 @@ def test_matrix_summary_compares_configuration_medians_and_quality():
 
     assert comparison["runs"][0]["median"]["output_throughput_tok_s"] == 100.0
     assert comparison["runs"][1]["median"]["peak_torch_allocated_mib"] == 750.0
+    assert comparison["baseline"] == "float"
+    assert comparison["runs"][0]["vs_baseline"]["output_throughput"] == 1.0
+    assert comparison["runs"][1]["vs_baseline"]["output_throughput"] == 1.25
+    assert comparison["runs"][1]["vs_baseline"]["peak_memory"] == 0.75
     assert comparison["all_repeat_output_digests_match"]
     assert not comparison["all_output_digests_match"]
     assert comparison["all_execution_paths_valid"]

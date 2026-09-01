@@ -291,8 +291,34 @@ def compare_repeat_summaries(summaries: list[dict], labels: list[str]) -> dict:
                 },
             }
         )
+    baseline_median = rows[0]["median"]
+    for row in rows:
+        median = row["median"]
+        row["vs_baseline"] = {
+            "output_throughput": ratio(
+                median["output_throughput_tok_s"],
+                baseline_median["output_throughput_tok_s"],
+            ),
+            "ttft": ratio(
+                median["avg_ttft_s"],
+                baseline_median["avg_ttft_s"],
+            ),
+            "tpot": ratio(
+                median["avg_tpot_s"],
+                baseline_median["avg_tpot_s"],
+            ),
+            "request_latency": ratio(
+                median["avg_request_latency_s"],
+                baseline_median["avg_request_latency_s"],
+            ),
+            "peak_memory": ratio(
+                median["peak_torch_allocated_mib"],
+                baseline_median["peak_torch_allocated_mib"],
+            ),
+        }
     digests = {row["generated_token_ids_digest"] for row in rows}
     return {
+        "baseline": labels[0],
         "workload": baseline["workload"],
         "environment": baseline["environment"],
         "checkpoint_identity_strength": baseline[
