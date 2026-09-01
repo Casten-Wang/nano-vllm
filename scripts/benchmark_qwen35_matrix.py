@@ -321,6 +321,11 @@ def parse_args() -> argparse.Namespace:
         help="Reject GPUs that cannot fit local parameters plus headroom.",
     )
     parser.add_argument("--memory-headroom-gib", type=float, default=2.0)
+    parser.add_argument(
+        "--preflight-only",
+        action="store_true",
+        help="Run checkpoint, GPU-count, and memory checks without benchmarks.",
+    )
     return parser.parse_args()
 
 
@@ -386,6 +391,9 @@ def main() -> None:
                 memory_path = Path(args.result_dir) / "memory_preflight.json"
                 memory_path.write_text(json.dumps(memory_report, indent=2) + "\n")
                 print(f"[preflight] wrote {memory_path}", flush=True)
+
+    if args.preflight_only:
+        return
 
     total_runs = len(cases) * args.repeats
     run_index = 0

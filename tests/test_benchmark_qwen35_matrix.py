@@ -34,6 +34,7 @@ def args(**overrides):
         "run_id": "test-run",
         "memory_preflight": True,
         "memory_headroom_gib": 2.0,
+        "preflight_only": False,
     }
     values.update(overrides)
     return Namespace(**values)
@@ -242,6 +243,21 @@ def test_checkpoint_audit_covers_selected_tp_sizes():
     assert command[command.index("--output") + 1].endswith(
         "benchmark_results/matrix/checkpoint_mapping_audit.json"
     )
+
+
+def test_preflight_only_is_available_for_fail_fast_orchestration(monkeypatch):
+    monkeypatch.setattr(
+        MODULE.sys,
+        "argv",
+        [
+            "benchmark_qwen35_matrix.py",
+            "--model",
+            "/models/qwen35",
+            "--preflight-only",
+        ],
+    )
+
+    assert MODULE.parse_args().preflight_only
 
 
 def test_no_warmup_is_forwarded():
