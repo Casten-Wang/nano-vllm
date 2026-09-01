@@ -25,6 +25,7 @@ SPEC.loader.exec_module(qwen35_gated_delta)
 Qwen35RecurrentStatePool = qwen35_gated_delta.Qwen35RecurrentStatePool
 Qwen35GatedDeltaNet = qwen35_gated_delta.Qwen35GatedDeltaNet
 causal_conv1d_scan = qwen35_gated_delta.causal_conv1d_scan
+causal_conv1d_prefill = qwen35_gated_delta.causal_conv1d_prefill
 chunk_gated_delta_rule = qwen35_gated_delta.chunk_gated_delta_rule
 recurrent_gated_delta_rule = qwen35_gated_delta.recurrent_gated_delta_rule
 
@@ -37,6 +38,39 @@ def inputs(seed=0):
     decay = -torch.rand(2, 5, 3, generator=generator)
     beta = torch.rand(2, 5, 3, generator=generator)
     return q, k, v, decay, beta
+
+
+@pytest.mark.parametrize("batch_size", [1, 3])
+@pytest.mark.parametrize("sequence_length", [1, 2, 7, 16])
+@pytest.mark.parametrize("kernel_size", [1, 2, 4])
+def test_vectorized_causal_convolution_matches_scan(
+    batch_size,
+    sequence_length,
+    kernel_size,
+):
+    torch.manual_seed(37)
+    channels = 9
+    x = torch.randn(batch_size, sequence_length, channels)
+    state = torch.randn(batch_size, channels, kernel_size)
+    weight = torch.randn(channels, kernel_size)
+    bias = torch.randn(channels)
+
+    expected, expected_state = causal_conv1d_scan(x, state, weight, bias)
+    actual, actual_state = causal_conv1d_prefill(x, state, weight, bias)
+
+    torch.testing.assert_close(actual, expected, rtol=2e-5, atol=2e-5)
+    torch.testing.assert_close(actual_state, expected_state)
+
+
+def test_vectorized_causal_convolution_handles_empty_prefill():
+    x = torch.empty(2, 0, 5)
+    state = torch.randn(2, 5, 4)
+    weight = torch.randn(5, 4)
+
+    output, next_state = causal_conv1d_prefill(x, state, weight)
+
+    assert output.shape == x.shape
+    assert next_state is state
 
 
 def test_recurrent_rule_chunked_prefill_matches_one_shot():

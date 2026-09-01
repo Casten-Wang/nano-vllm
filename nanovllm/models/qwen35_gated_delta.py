@@ -61,6 +61,39 @@ def causal_conv1d_scan(
     return torch.stack(outputs, dim=1), next_state
 
 
+def causal_conv1d_prefill(
+    x: torch.Tensor,
+    state: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Vectorized depthwise causal convolution for a prefill batch.
+
+    The initial state contains the last ``kernel`` raw inputs. Dropping its
+    oldest entry before appending the new sequence creates exactly one valid
+    convolution window per new token.
+    """
+
+    if x.ndim != 3 or state.ndim != 3 or weight.ndim != 2:
+        raise ValueError("invalid causal convolution tensor rank")
+    if state.shape[0] != x.shape[0] or state.shape[1:] != weight.shape:
+        raise ValueError("causal convolution shapes are inconsistent")
+    if x.shape[2] != weight.shape[0]:
+        raise ValueError("causal convolution channel dimensions differ")
+    if x.shape[1] == 0:
+        return x.new_empty(x.shape), state
+
+    history = torch.cat((state[..., 1:], x.transpose(1, 2)), dim=-1)
+    output = F.conv1d(
+        history.to(weight.dtype),
+        weight.unsqueeze(1),
+        bias=bias,
+        groups=weight.shape[0],
+    )
+    next_state = history[..., -weight.shape[1] :]
+    return F.silu(output.transpose(1, 2)).to(x.dtype), next_state
+
+
 def recurrent_gated_delta_rule(
     query: torch.Tensor,
     key: torch.Tensor,
@@ -529,7 +562,7 @@ class Qwen35GatedDeltaNet(nn.Module):
     ) -> torch.Tensor:
         assert self.state_pool is not None
         recurrent_state, conv_state = self.state_pool.get(0, slots)
-        convolved, conv_state = causal_conv1d_scan(
+        convolved, conv_state = causal_conv1d_prefill(
             mixed_qkv,
             conv_state,
             self.conv1d.weight.squeeze(1),
