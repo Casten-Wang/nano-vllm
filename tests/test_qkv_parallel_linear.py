@@ -27,6 +27,19 @@ def make_layer(rank: int, world_size: int = 4):
         )
 
 
+class TrackingSlice:
+    def __init__(self, tensor):
+        self.tensor = tensor
+        self.requests = []
+
+    def get_shape(self):
+        return self.tensor.shape
+
+    def __getitem__(self, key):
+        self.requests.append(key)
+        return self.tensor[key]
+
+
 def test_kv_heads_are_replicated_when_tp_exceeds_kv_heads():
     layers = [make_layer(rank) for rank in range(4)]
 
@@ -86,3 +99,46 @@ def test_standalone_kv_projection_replicates_heads_and_bias():
     assert torch.equal(layers[3].weight, loaded_weight[2:])
     assert torch.equal(layers[0].bias, loaded_bias[:2])
     assert torch.equal(layers[3].bias, loaded_bias[2:])
+
+
+def test_lazy_kv_loader_reads_shared_source_shards_for_replica_ranks():
+    source = torch.arange(12, dtype=torch.float32).reshape(4, 3)
+    layers = []
+    for rank in range(4):
+        with (
+            patch.object(LINEAR.dist, "get_world_size", return_value=4),
+            patch.object(LINEAR.dist, "get_rank", return_value=rank),
+        ):
+            layers.append(LINEAR.KVParallelLinear(3, 2, 2))
+    slices = [TrackingSlice(source) for _ in layers]
+
+    for layer, loaded_slice in zip(layers, slices):
+        layer.safetensors_loader(layer.weight, loaded_slice)
+
+    assert torch.equal(layers[0].weight, source[:2])
+    assert torch.equal(layers[1].weight, source[:2])
+    assert torch.equal(layers[2].weight, source[2:])
+    assert torch.equal(layers[3].weight, source[2:])
+    assert slices[0].requests == [(slice(0, 2), slice(None))]
+    assert slices[1].requests == [(slice(0, 2), slice(None))]
+    assert slices[2].requests == [(slice(2, 4), slice(None))]
+    assert slices[3].requests == [(slice(2, 4), slice(None))]
+
+
+def test_lazy_column_and_row_loaders_read_only_local_tp_slices():
+    with (
+        patch.object(LINEAR.dist, "get_world_size", return_value=2),
+        patch.object(LINEAR.dist, "get_rank", return_value=1),
+    ):
+        column = LINEAR.ColumnParallelLinear(3, 8)
+        row = LINEAR.RowParallelLinear(8, 3)
+    column_source = TrackingSlice(torch.arange(24).reshape(8, 3).float())
+    row_source = TrackingSlice(torch.arange(24).reshape(3, 8).float())
+
+    column.safetensors_loader(column.weight, column_source)
+    row.safetensors_loader(row.weight, row_source)
+
+    assert torch.equal(column.weight, column_source.tensor[4:8])
+    assert torch.equal(row.weight, row_source.tensor[:, 4:8])
+    assert column_source.requests == [(slice(4, 8), slice(None))]
+    assert row_source.requests == [(slice(None), slice(4, 8))]

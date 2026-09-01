@@ -61,6 +61,9 @@ class ColumnParallelLinear(LinearBase):
     ):
         tp_size = dist.get_world_size()
         super().__init__(input_size, divide(output_size, tp_size), bias, 0)
+        self.weight.safetensors_loader = self.safetensors_loader
+        if self.bias is not None:
+            self.bias.safetensors_loader = self.safetensors_loader
 
     def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor):
         param_data = param.data
@@ -68,6 +71,21 @@ class ColumnParallelLinear(LinearBase):
         start_idx = self.tp_rank * shard_size
         loaded_weight = loaded_weight.narrow(self.tp_dim, start_idx, shard_size)
         param_data.copy_(loaded_weight)
+
+    def safetensors_loader(self, param: nn.Parameter, loaded_weight):
+        shape = tuple(loaded_weight.get_shape())
+        expected_shape = list(param.shape)
+        expected_shape[self.tp_dim] *= self.tp_size
+        if shape != tuple(expected_shape):
+            raise ValueError(
+                f"invalid column-parallel weight shape: {shape}; "
+                f"expected {tuple(expected_shape)}"
+            )
+        shard_size = param.shape[self.tp_dim]
+        start = self.tp_rank * shard_size
+        index = [slice(None)] * len(shape)
+        index[self.tp_dim] = slice(start, start + shard_size)
+        param.data.copy_(loaded_weight[tuple(index)])
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return F.linear(x, self.weight, self.bias)
@@ -156,6 +174,7 @@ class KVParallelLinear(ColumnParallelLinear):
     ):
         tp_size = dist.get_world_size()
         self.head_size = head_size
+        self.total_num_kv_heads = total_num_kv_heads
         if tp_size >= total_num_kv_heads:
             self.num_kv_heads = 1
             self.num_kv_head_replicas = divide(tp_size, total_num_kv_heads)
@@ -167,6 +186,9 @@ class KVParallelLinear(ColumnParallelLinear):
             self.num_kv_heads * head_size * tp_size,
             bias,
         )
+        self.weight.safetensors_loader = self.safetensors_loader
+        if self.bias is not None:
+            self.bias.safetensors_loader = self.safetensors_loader
 
     def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor):
         shard_size = self.num_kv_heads * self.head_size
@@ -174,6 +196,25 @@ class KVParallelLinear(ColumnParallelLinear):
         param.data.copy_(
             loaded_weight.narrow(self.tp_dim, source_rank * shard_size, shard_size)
         )
+
+    def safetensors_loader(self, param: nn.Parameter, loaded_weight):
+        shape = tuple(loaded_weight.get_shape())
+        expected_shape = (
+            self.total_num_kv_heads * self.head_size,
+            *param.shape[1:],
+        )
+        if shape != expected_shape:
+            raise ValueError(
+                f"invalid KV-parallel weight shape: {shape}; "
+                f"expected {expected_shape}"
+            )
+        shard_size = self.num_kv_heads * self.head_size
+        source_rank = self.tp_rank // self.num_kv_head_replicas
+        start = source_rank * shard_size
+        index = (slice(start, start + shard_size),) + (slice(None),) * (
+            len(shape) - 1
+        )
+        param.data.copy_(loaded_weight[index])
 
 
 class RowParallelLinear(LinearBase):
@@ -186,6 +227,9 @@ class RowParallelLinear(LinearBase):
     ):
         tp_size = dist.get_world_size()
         super().__init__(divide(input_size, tp_size), output_size, bias, 1)
+        self.weight.safetensors_loader = self.safetensors_loader
+        if self.bias is not None:
+            self.bias.safetensors_loader = self.safetensors_loader
 
     def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor):
         param_data = param.data
@@ -196,6 +240,23 @@ class RowParallelLinear(LinearBase):
         start_idx = self.tp_rank * shard_size
         loaded_weight = loaded_weight.narrow(self.tp_dim, start_idx, shard_size)
         param_data.copy_(loaded_weight)
+
+    def safetensors_loader(self, param: nn.Parameter, loaded_weight):
+        shape = tuple(loaded_weight.get_shape())
+        if param.ndim == 1:
+            if shape != tuple(param.shape):
+                raise ValueError("invalid row-parallel bias shape")
+            param.data.copy_(loaded_weight[:])
+            return
+        expected_shape = (param.shape[0], param.shape[1] * self.tp_size)
+        if shape != expected_shape:
+            raise ValueError(
+                f"invalid row-parallel weight shape: {shape}; "
+                f"expected {expected_shape}"
+            )
+        shard_size = param.shape[self.tp_dim]
+        start = self.tp_rank * shard_size
+        param.data.copy_(loaded_weight[:, start : start + shard_size])
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         y = F.linear(x, self.weight, self.bias if self.tp_rank == 0 else None)
