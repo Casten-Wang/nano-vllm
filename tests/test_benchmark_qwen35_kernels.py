@@ -778,8 +778,8 @@ def test_grouped_delta_prefill_records_reused_correction_workspace():
         chunk_size=4,
     )
 
-    # Five tokens are padded to two four-token chunks in FP32.
-    expected_mib = 2 * 2 * 8 * 3 * 4 / 1024 / 1024
+    # The peak correction workspace covers one four-token chunk in FP32.
+    expected_mib = 2 * 2 * 4 * 3 * 4 / 1024 / 1024
     assert result["reused_fp32_correction_buffer_mib"] == expected_mib
 
 
