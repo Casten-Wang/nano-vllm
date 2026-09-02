@@ -1,0 +1,224 @@
+"""Validated per-rank cache payloads for prefill/decode handoff."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+import torch
+
+
+TRANSFER_FORMAT_VERSION = 1
+
+
+@dataclass(frozen=True, slots=True)
+class RankCacheTransfer:
+    """Logical request state produced by one tensor-parallel rank."""
+
+    format_version: int
+    tensor_parallel_rank: int
+    tensor_parallel_size: int
+    block_size: int
+    cached_tokens: int
+    kv_blocks: torch.Tensor
+    kv_scales: torch.Tensor | None
+    recurrent_states: tuple[torch.Tensor, ...]
+    convolution_states: tuple[torch.Tensor, ...]
+
+    @property
+    def num_blocks(self) -> int:
+        return self.kv_blocks.shape[2]
+
+
+def _validate_cache_layout(
+    kv_cache: torch.Tensor,
+    kv_scale: torch.Tensor | None,
+) -> None:
+    if kv_cache.ndim != 6 or kv_cache.shape[0] != 2:
+        raise ValueError("KV cache must have shape [2, layers, blocks, ...]")
+    if kv_cache.dtype == torch.int8:
+        if kv_scale is None:
+            raise ValueError("INT8 KV cache requires scale storage")
+        expected = kv_cache.shape[:-1]
+        if kv_scale.shape != expected or kv_scale.dtype != torch.float16:
+            raise ValueError(
+                "INT8 KV scales must be FP16 with shape [2, layers, blocks, tokens, heads]"
+            )
+    elif kv_scale is not None:
+        raise ValueError("floating-point KV cache must not include INT8 scales")
+
+
+def _block_index(
+    block_ids: list[int],
+    *,
+    total_blocks: int,
+    device: torch.device,
+) -> torch.Tensor:
+    if not block_ids:
+        raise ValueError("cache transfer requires at least one KV block")
+    if len(block_ids) != len(set(block_ids)):
+        raise ValueError("cache transfer block ids must be unique")
+    if min(block_ids) < 0 or max(block_ids) >= total_blocks:
+        raise ValueError("cache transfer block id is out of bounds")
+    return torch.tensor(block_ids, dtype=torch.int64, device=device)
+
+
+def _validate_state_pairs(
+    recurrent_states: tuple[torch.Tensor, ...],
+    convolution_states: tuple[torch.Tensor, ...],
+) -> None:
+    if len(recurrent_states) != len(convolution_states):
+        raise ValueError(
+            "recurrent and convolution state layer counts must match"
+        )
+    if any(tensor.ndim == 0 for tensor in (*recurrent_states, *convolution_states)):
+        raise ValueError("cache transfer states must not be scalars")
+
+
+def export_rank_cache(
+    kv_cache: torch.Tensor,
+    kv_scale: torch.Tensor | None,
+    block_ids: list[int],
+    *,
+    tensor_parallel_rank: int,
+    tensor_parallel_size: int,
+    block_size: int,
+    cached_tokens: int,
+    recurrent_states: tuple[torch.Tensor, ...] = (),
+    convolution_states: tuple[torch.Tensor, ...] = (),
+) -> RankCacheTransfer:
+    """Copy one request's rank-local state in logical block order."""
+
+    _validate_cache_layout(kv_cache, kv_scale)
+    _validate_state_pairs(recurrent_states, convolution_states)
+    if not 0 <= tensor_parallel_rank < tensor_parallel_size:
+        raise ValueError("cache transfer tensor-parallel identity is invalid")
+    if block_size <= 0:
+        raise ValueError("cache transfer block size must be positive")
+    expected_blocks = (cached_tokens + block_size - 1) // block_size
+    if cached_tokens <= 0 or len(block_ids) != expected_blocks:
+        raise ValueError(
+            "cache transfer block count does not match cached token count"
+        )
+    index = _block_index(
+        block_ids,
+        total_blocks=kv_cache.shape[2],
+        device=kv_cache.device,
+    )
+    kv_blocks = kv_cache.index_select(2, index).clone()
+    kv_scales = (
+        kv_scale.index_select(2, index).clone()
+        if kv_scale is not None
+        else None
+    )
+    valid_last_block_tokens = cached_tokens % block_size
+    if valid_last_block_tokens:
+        # Physical tail slots can contain data from a previous block owner.
+        # They are not semantically part of this request and must not cross a
+        # process or host boundary.
+        kv_blocks[:, :, -1, valid_last_block_tokens:].zero_()
+        if kv_scales is not None:
+            kv_scales[:, :, -1, valid_last_block_tokens:].zero_()
+    return RankCacheTransfer(
+        format_version=TRANSFER_FORMAT_VERSION,
+        tensor_parallel_rank=tensor_parallel_rank,
+        tensor_parallel_size=tensor_parallel_size,
+        block_size=block_size,
+        cached_tokens=cached_tokens,
+        kv_blocks=kv_blocks,
+        kv_scales=kv_scales,
+        recurrent_states=tuple(tensor.clone() for tensor in recurrent_states),
+        convolution_states=tuple(
+            tensor.clone() for tensor in convolution_states
+        ),
+    )
+
+
+def import_rank_cache(
+    payload: RankCacheTransfer,
+    kv_cache: torch.Tensor,
+    kv_scale: torch.Tensor | None,
+    block_ids: list[int],
+    *,
+    tensor_parallel_rank: int,
+    tensor_parallel_size: int,
+    block_size: int,
+    recurrent_states: tuple[torch.Tensor, ...] = (),
+    convolution_states: tuple[torch.Tensor, ...] = (),
+) -> None:
+    """Validate completely, then install one request into destination slots."""
+
+    _validate_cache_layout(kv_cache, kv_scale)
+    _validate_state_pairs(recurrent_states, convolution_states)
+    _validate_state_pairs(
+        payload.recurrent_states,
+        payload.convolution_states,
+    )
+    if not 0 <= tensor_parallel_rank < tensor_parallel_size:
+        raise ValueError("cache transfer tensor-parallel identity is invalid")
+    if block_size <= 0:
+        raise ValueError("cache transfer block size must be positive")
+    if payload.format_version != TRANSFER_FORMAT_VERSION:
+        raise ValueError("unsupported cache transfer format version")
+    if (
+        payload.tensor_parallel_rank != tensor_parallel_rank
+        or payload.tensor_parallel_size != tensor_parallel_size
+    ):
+        raise ValueError("cache transfer tensor-parallel identity does not match")
+    if payload.block_size != block_size:
+        raise ValueError("source and destination KV block sizes differ")
+    if not isinstance(payload.cached_tokens, int):
+        raise ValueError("cache transfer cached token count must be an integer")
+    expected_blocks = (
+        payload.cached_tokens + payload.block_size - 1
+    ) // payload.block_size
+    if payload.cached_tokens <= 0 or payload.num_blocks != expected_blocks:
+        raise ValueError("cache transfer payload has an invalid token/block count")
+    if len(block_ids) != payload.num_blocks:
+        raise ValueError("destination KV block count does not match payload")
+    index = _block_index(
+        block_ids,
+        total_blocks=kv_cache.shape[2],
+        device=kv_cache.device,
+    )
+    expected_kv_shape = (
+        kv_cache.shape[0],
+        kv_cache.shape[1],
+        len(block_ids),
+        *kv_cache.shape[3:],
+    )
+    if payload.kv_blocks.shape != expected_kv_shape:
+        raise ValueError("cache transfer KV shape does not match destination")
+    if payload.kv_blocks.dtype != kv_cache.dtype:
+        raise ValueError("cache transfer KV dtype does not match destination")
+    if (payload.kv_scales is None) != (kv_scale is None):
+        raise ValueError("cache transfer scale presence does not match destination")
+    if kv_scale is not None and (
+        payload.kv_scales.shape != (
+            kv_scale.shape[0],
+            kv_scale.shape[1],
+            len(block_ids),
+            *kv_scale.shape[3:],
+        )
+        or payload.kv_scales.dtype != kv_scale.dtype
+    ):
+        raise ValueError("cache transfer scale layout does not match destination")
+    if len(payload.recurrent_states) != len(recurrent_states):
+        raise ValueError("cache transfer recurrent layer count does not match")
+    if len(payload.convolution_states) != len(convolution_states):
+        raise ValueError("cache transfer convolution layer count does not match")
+    for source, destination in zip(
+        (*payload.recurrent_states, *payload.convolution_states),
+        (*recurrent_states, *convolution_states),
+    ):
+        if source.shape != destination.shape or source.dtype != destination.dtype:
+            raise ValueError("cache transfer state layout does not match destination")
+
+    kv_cache.index_copy_(2, index, payload.kv_blocks.to(kv_cache.device))
+    if kv_scale is not None:
+        assert payload.kv_scales is not None
+        kv_scale.index_copy_(2, index, payload.kv_scales.to(kv_scale.device))
+    for source, destination in zip(
+        (*payload.recurrent_states, *payload.convolution_states),
+        (*recurrent_states, *convolution_states),
+    ):
+        destination.copy_(source.to(destination.device))

@@ -783,6 +783,83 @@ class ModelRunner:
             slot=slot,
         )
 
+    def _sequence_state_views(
+        self,
+        seq: Sequence,
+    ) -> tuple[tuple[torch.Tensor, ...], tuple[torch.Tensor, ...]]:
+        model_spec = self.config.model_spec
+        if model_spec is None or not model_spec.is_hybrid:
+            return (), ()
+        if seq.state_slot is None:
+            raise RuntimeError(
+                "hybrid cache transfer requires a recurrent state slot"
+            )
+        layers = [
+            (
+                module.layer_idx,
+                module.state_pool,
+            )
+            for module in self.model.modules()
+            if getattr(module, "state_pool", None) is not None
+        ]
+        layers.sort(key=lambda item: item[0])
+        if len(layers) != len(model_spec.linear_attention_layers):
+            raise RuntimeError(
+                "hybrid cache transfer found an unexpected state layer count"
+            )
+        layer_ids = tuple(layer_idx for layer_idx, _ in layers)
+        if layer_ids != tuple(sorted(model_spec.linear_attention_layers)):
+            raise RuntimeError(
+                "hybrid cache transfer layer ids do not match model spec"
+            )
+        recurrent = tuple(
+            pool.recurrent[0, seq.state_slot] for _, pool in layers
+        )
+        convolution = tuple(
+            pool.convolution[0, seq.state_slot] for _, pool in layers
+        )
+        return recurrent, convolution
+
+    def export_sequence_cache(self, seq: Sequence):
+        """Create the rank-local tensor payload needed by a decode worker."""
+
+        from nanovllm.engine.cache_transfer import export_rank_cache
+
+        recurrent, convolution = self._sequence_state_views(seq)
+        return export_rank_cache(
+            self.kv_cache,
+            self.kv_scale,
+            seq.block_table,
+            tensor_parallel_rank=self.rank,
+            tensor_parallel_size=self.world_size,
+            block_size=self.block_size,
+            cached_tokens=seq.num_cached_tokens,
+            recurrent_states=recurrent,
+            convolution_states=convolution,
+        )
+
+    def import_sequence_cache(self, seq: Sequence, payload) -> None:
+        """Install a validated rank-local payload into preallocated slots."""
+
+        from nanovllm.engine.cache_transfer import import_rank_cache
+
+        if payload.cached_tokens != seq.num_cached_tokens:
+            raise ValueError(
+                "cache transfer token count does not match destination sequence"
+            )
+        recurrent, convolution = self._sequence_state_views(seq)
+        import_rank_cache(
+            payload,
+            self.kv_cache,
+            self.kv_scale,
+            seq.block_table,
+            tensor_parallel_rank=self.rank,
+            tensor_parallel_size=self.world_size,
+            block_size=self.block_size,
+            recurrent_states=recurrent,
+            convolution_states=convolution,
+        )
+
     def prepare_state_slots(
         self,
         seqs: list[Sequence],
