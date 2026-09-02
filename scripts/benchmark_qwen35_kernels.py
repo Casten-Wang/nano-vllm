@@ -560,6 +560,82 @@ def benchmark_compact_top_k_sampling(args, device, dtype) -> dict:
     }
 
 
+def benchmark_sampling_filter_output_reuse(args, device, dtype) -> dict:
+    logits = torch.randn(
+        args.sampling_batch,
+        args.vocab_size,
+        device=device,
+        dtype=dtype,
+    )
+    temperatures = torch.full(
+        (args.sampling_batch,),
+        0.8,
+        device=device,
+    )
+    top_ks = torch.full(
+        (args.sampling_batch,),
+        -1,
+        dtype=torch.int32,
+        device=device,
+    )
+    top_ps = torch.full(
+        (args.sampling_batch,),
+        args.sampling_top_p,
+        device=device,
+    )
+    metadata = SAMPLER.build_sampling_metadata(
+        [0.8] * args.sampling_batch,
+        [-1] * args.sampling_batch,
+        [args.sampling_top_p] * args.sampling_batch,
+        args.vocab_size,
+    )
+
+    def reference():
+        # Clone models a fresh logits result on every measured sampling step
+        # and prevents the FP32 case from carrying candidate mutations into
+        # later repetitions. Both paths pay the same clone cost.
+        scaled = logits.clone().float().div(temperatures.unsqueeze(1))
+        return (
+            SAMPLER.apply_top_k_top_p(
+                scaled,
+                top_ks,
+                top_ps,
+                metadata,
+            ),
+        )
+
+    def candidate():
+        scaled = logits.clone().float()
+        scaled.div_(temperatures.unsqueeze(1))
+        return (
+            SAMPLER.apply_top_k_top_p(
+                scaled,
+                top_ks,
+                top_ps,
+                metadata,
+                inplace=True,
+            ),
+        )
+
+    result = compare(
+        reference,
+        candidate,
+        device=device,
+        warmup=args.warmup,
+        iterations=args.iterations,
+        repeats=args.repeats,
+    )
+    full_fp32_mib = logits.numel() * 4 / 1024 / 1024
+    result.update(
+        {
+            "avoided_fp32_logits_mib": 2 * full_fp32_mib,
+            "eliminated_tensor_allocations_per_sampling_step": 2,
+            "candidate_reuses_temperature_and_filter_storage": True,
+        }
+    )
+    return result
+
+
 def benchmark_greedy_sampler(args, device, dtype) -> dict:
     logits = torch.randn(
         args.sampling_batch,
@@ -3423,6 +3499,13 @@ def main() -> None:
                 args,
                 device,
                 dtype,
+            ),
+            "sampling_filter_output_reuse": (
+                benchmark_sampling_filter_output_reuse(
+                    args,
+                    device,
+                    dtype,
+                )
             ),
             "greedy_sampler_precision_fast_path": benchmark_greedy_sampler(
                 args,

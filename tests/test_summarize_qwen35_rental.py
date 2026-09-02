@@ -846,6 +846,15 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
                     "compact_fp32_logits_mib": 1.0,
                     "avoided_fp32_logits_mib": 31.0,
                 },
+                "sampling_filter_output_reuse": {
+                    "reference": {"peak_extra_mib": 64.0},
+                    "candidate": {"peak_extra_mib": 32.0},
+                    "speedup": 1.1,
+                    "errors": [{"max_abs_error": 0.0}],
+                    "avoided_fp32_logits_mib": 64.0,
+                    "eliminated_tensor_allocations_per_sampling_step": 2,
+                    "candidate_reuses_temperature_and_filter_storage": True,
+                },
                 "gated_delta_packed_projection": {
                     "reference": {"peak_extra_mib": 2.0},
                     "candidate": {"peak_extra_mib": 2.0},
@@ -1292,6 +1301,13 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     assert report["buffer_reuse"]["by_tp"]["tp4"]["sampling_compact_top_k"][
         "workspace"
     ]["avoided_fp32_logits_mib"] == 31.0
+    sampling_filter_output = report["buffer_reuse"]["by_tp"]["tp4"][
+        "sampling_filter_output"
+    ]
+    assert sampling_filter_output["workspace"]["avoided_fp32_logits_mib"] == 64.0
+    assert sampling_filter_output["metadata"][
+        "candidate_reuses_temperature_and_filter_storage"
+    ]
     assert report["buffer_reuse"]["by_tp"]["tp4"][
         "gated_delta_packed_projection"
     ]["workspace"]["avoided_gemm_launches"] == 2

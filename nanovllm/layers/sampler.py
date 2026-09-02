@@ -71,6 +71,8 @@ def apply_top_k_top_p(
     top_ps: torch.Tensor,
     metadata: SamplingBatchMetadata | None = None,
     rank_buffer: torch.Tensor | None = None,
+    *,
+    inplace: bool = False,
 ) -> torch.Tensor:
     """Mask logits according to per-request top-k and top-p settings.
 
@@ -95,6 +97,8 @@ def apply_top_k_top_p(
         raise ValueError("vocabulary dimension must be non-empty")
     if logits.size(0) == 0:
         return logits
+    if inplace and logits.requires_grad:
+        raise ValueError("in-place sampling filter is inference-only")
     vocab_size = logits.size(1)
     if metadata is None:
         if torch.any((top_ks != -1) & (top_ks <= 0)):
@@ -135,7 +139,12 @@ def apply_top_k_top_p(
             selected_remove[:, 1:] = selected_remove[:, :-1].clone()
             selected_remove[:, 0] = False
             selected_logits.masked_fill_(selected_remove, float("-inf"))
-        filtered_logits = torch.full_like(logits, float("-inf"))
+        filtered_logits = logits if inplace else torch.full_like(
+            logits,
+            float("-inf"),
+        )
+        if inplace:
+            filtered_logits.fill_(float("-inf"))
         filtered_logits.scatter_(
             dim=-1,
             index=selected_indices,
@@ -160,13 +169,18 @@ def apply_top_k_top_p(
             ranks >= effective_top_ks.unsqueeze(1),
             float("-inf"),
         )
-        filtered_logits = torch.full_like(logits, float("-inf"))
+        filtered_logits = logits if inplace else torch.full_like(
+            logits,
+            float("-inf"),
+        )
+        if inplace:
+            filtered_logits[top_k_enabled] = float("-inf")
         filtered_logits.scatter_(
             dim=-1,
             index=selected_indices,
             src=selected_logits,
         )
-        if not all_top_k_enabled:
+        if not all_top_k_enabled and not inplace:
             filtered_logits[~top_k_enabled] = logits[~top_k_enabled]
         return filtered_logits
 
@@ -216,7 +230,9 @@ def apply_top_k_top_p(
     filtered_sorted_logits = sorted_logits.masked_fill(~sorted_keep, float("-inf"))
 
     # Scatter back to the original vocabulary order expected by softmax.
-    filtered_logits = torch.empty_like(filtered_sorted_logits)
+    filtered_logits = logits if inplace else torch.empty_like(
+        filtered_sorted_logits
+    )
     filtered_logits.scatter_(dim=-1, index=sorted_indices, src=filtered_sorted_logits)
     return filtered_logits
 
@@ -336,6 +352,7 @@ class Sampler(nn.Module):
             ),
         }
 
+    @torch.inference_mode()
     def forward(
         self,
         logits: torch.Tensor,
@@ -437,9 +454,16 @@ class Sampler(nn.Module):
             greedy_tokens[sample_mask] = sample_tokens
             return greedy_tokens
 
-        sample_logits = sample_source.float().div(
-            sample_temperatures.unsqueeze(dim=1)
-        )
+        sample_logits = sample_source.float()
+        if sample_logits.requires_grad:
+            sample_logits = sample_logits.div(
+                sample_temperatures.unsqueeze(dim=1)
+            )
+        else:
+            # The promoted logits are private to this sampling call (or the
+            # model logits are dead after sampling when already FP32). Reuse
+            # that storage for temperature scaling and the filtered logits.
+            sample_logits.div_(sample_temperatures.unsqueeze(dim=1))
         sample_logits = apply_top_k_top_p(
             sample_logits,
             sample_top_ks,
@@ -453,6 +477,7 @@ class Sampler(nn.Module):
                 if any_top_p_enabled or any_top_k_enabled
                 else None
             ),
+            inplace=not sample_logits.requires_grad,
         )
         probs = torch.softmax(sample_logits, dim=-1)
         sample_tokens = probs.div_(

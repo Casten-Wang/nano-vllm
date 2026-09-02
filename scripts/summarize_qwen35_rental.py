@@ -1923,6 +1923,14 @@ def summarize(run_dir: Path, run_id: str) -> dict:
                 result["results"]["compact_top_k_sampling"],
                 ("avoided_fp32_logits_mib",),
             ),
+            "sampling_filter_output": summarize_buffer_reuse_candidate(
+                result["results"]["sampling_filter_output_reuse"],
+                ("avoided_fp32_logits_mib",),
+                {
+                    "eliminated_tensor_allocations_per_sampling_step": 2,
+                    "candidate_reuses_temperature_and_filter_storage": True,
+                },
+            ),
             "gated_delta_packed_projection": summarize_buffer_reuse_candidate(
                 result["results"]["gated_delta_packed_projection"],
                 ("avoided_gemm_launches",),

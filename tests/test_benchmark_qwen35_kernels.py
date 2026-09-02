@@ -177,6 +177,28 @@ def test_compact_top_k_sampling_benchmark_tracks_fp32_reduction():
     assert result["avoided_fp32_logits_mib"] == 4 * 13 * 4 / 1024 / 1024
 
 
+def test_sampling_filter_output_reuse_tracks_eliminated_workspaces():
+    args = SimpleNamespace(
+        sampling_batch=4,
+        vocab_size=16,
+        sampling_top_p=0.9,
+        warmup=0,
+        iterations=1,
+        repeats=1,
+    )
+
+    result = MODULE.benchmark_sampling_filter_output_reuse(
+        args,
+        torch.device("cpu"),
+        torch.bfloat16,
+    )
+
+    assert result["errors"][0]["max_abs_error"] == 0
+    assert result["avoided_fp32_logits_mib"] == 2 * 4 * 16 * 4 / 1024 / 1024
+    assert result["eliminated_tensor_allocations_per_sampling_step"] == 2
+    assert result["candidate_reuses_temperature_and_filter_storage"]
+
+
 def test_sampling_input_benchmark_tracks_persistent_storage():
     args = SimpleNamespace(
         sampling_batch=4,

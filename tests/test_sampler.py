@@ -227,10 +227,13 @@ class SamplerTest(unittest.TestCase):
             sample_top_ps,
             sample_metadata,
             rank_buffer,
+            *,
+            inplace,
         ):
             observed.append((sample_logits.shape, sample_logits.dtype))
             self.assertIs(sample_metadata, metadata)
             self.assertIsNone(rank_buffer)
+            self.assertTrue(inplace)
             return sample_logits
 
         with unittest.mock.patch.object(
@@ -242,6 +245,71 @@ class SamplerTest(unittest.TestCase):
 
         self.assertEqual(observed, [(torch.Size([1, 3]), torch.float32)])
         self.assertEqual(actual[0].item(), 1)
+
+    def test_inplace_filter_reuses_logits_for_every_full_vocab_path(self):
+        cases = (
+            ([2, 2], [1.0, 1.0]),
+            ([2, -1], [1.0, 1.0]),
+            ([-1, -1], [0.8, 0.9]),
+            ([2, -1], [0.8, 0.9]),
+        )
+        source = torch.tensor(
+            [[4.0, 3.0, 2.0, 1.0], [1.0, 4.0, 3.0, 2.0]]
+        )
+        for top_k_values, top_p_values in cases:
+            with self.subTest(top_ks=top_k_values, top_ps=top_p_values):
+                top_ks = torch.tensor(top_k_values, dtype=torch.int32)
+                top_ps = torch.tensor(top_p_values)
+                expected = apply_top_k_top_p(
+                    source.clone(),
+                    top_ks,
+                    top_ps,
+                )
+                reusable = source.clone()
+                actual = apply_top_k_top_p(
+                    reusable,
+                    top_ks,
+                    top_ps,
+                    inplace=True,
+                )
+
+                self.assertIs(actual, reusable)
+                self.assertTrue(torch.equal(actual, expected))
+
+    def test_inplace_filter_rejects_autograd_tensor(self):
+        logits = torch.tensor(
+            [[4.0, 3.0, 2.0, 1.0]],
+            requires_grad=True,
+        )
+
+        with self.assertRaisesRegex(ValueError, "inference-only"):
+            apply_top_k_top_p(
+                logits,
+                torch.tensor([-1], dtype=torch.int32),
+                torch.tensor([0.8]),
+                inplace=True,
+            )
+
+    def test_sampler_can_reuse_fp32_inference_logits(self):
+        sampler = Sampler()
+        with torch.inference_mode():
+            logits = torch.tensor([[4.0, 3.0, 2.0, 1.0]])
+        metadata = build_sampling_metadata(
+            [0.8],
+            [-1],
+            [0.9],
+            vocab_size=4,
+        )
+
+        result = sampler(
+            logits,
+            torch.tensor([0.8]),
+            torch.tensor([-1], dtype=torch.int32),
+            torch.tensor([0.9]),
+            metadata,
+        )
+
+        self.assertEqual(result.shape, torch.Size([1]))
 
     def test_host_metadata_avoids_device_scalar_reads(self):
         sampler = Sampler()
