@@ -221,9 +221,16 @@ class SamplerTest(unittest.TestCase):
         )
         observed = []
 
-        def record_dtype(sample_logits, sample_top_ks, sample_top_ps, sample_metadata):
+        def record_dtype(
+            sample_logits,
+            sample_top_ks,
+            sample_top_ps,
+            sample_metadata,
+            rank_buffer,
+        ):
             observed.append((sample_logits.shape, sample_logits.dtype))
             self.assertIs(sample_metadata, metadata)
+            self.assertIsNone(rank_buffer)
             return sample_logits
 
         with unittest.mock.patch.object(
@@ -408,6 +415,34 @@ class SamplerTest(unittest.TestCase):
             )
 
         self.assertTrue(torch.equal(actual, torch.tensor([1, 0])))
+
+    def test_sampler_reuses_rank_buffer_across_top_k_steps(self):
+        sampler = Sampler()
+        logits = torch.tensor([[1.0, 4.0, 3.0, 2.0]])
+        temperatures = torch.ones(1)
+        top_ks = torch.tensor([3], dtype=torch.int32)
+        top_ps = torch.ones(1)
+        metadata = build_sampling_metadata(
+            temperatures.tolist(),
+            top_ks.tolist(),
+            top_ps.tolist(),
+            vocab_size=logits.size(1),
+        )
+        with unittest.mock.patch.object(
+            torch.Tensor,
+            "exponential_",
+            new=lambda tensor, *args, **kwargs: tensor.fill_(1),
+        ):
+            sampler(logits, temperatures, top_ks, top_ps, metadata)
+            storage = sampler._rank_buffer.data_ptr()
+            with unittest.mock.patch.object(
+                sampler_module.torch,
+                "arange",
+                side_effect=AssertionError("rank buffer must be reused"),
+            ):
+                sampler(logits, temperatures, top_ks, top_ps, metadata)
+
+        self.assertEqual(sampler._rank_buffer.data_ptr(), storage)
 
 
 if __name__ == "__main__":

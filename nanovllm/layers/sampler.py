@@ -49,11 +49,28 @@ def build_sampling_metadata(
     )
 
 
+def _sampling_ranks(
+    logits: torch.Tensor,
+    width: int,
+    rank_buffer: torch.Tensor | None,
+) -> torch.Tensor:
+    if rank_buffer is None:
+        return torch.arange(width, device=logits.device).unsqueeze(0)
+    if (
+        rank_buffer.ndim != 1
+        or rank_buffer.numel() < width
+        or rank_buffer.device != logits.device
+    ):
+        raise ValueError("sampling rank buffer is incompatible with logits")
+    return rank_buffer[:width].unsqueeze(0)
+
+
 def apply_top_k_top_p(
     logits: torch.Tensor,
     top_ks: torch.Tensor,
     top_ps: torch.Tensor,
     metadata: SamplingBatchMetadata | None = None,
+    rank_buffer: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Mask logits according to per-request top-k and top-p settings.
 
@@ -108,7 +125,7 @@ def apply_top_k_top_p(
             max_top_k,
             dim=-1,
         )
-        ranks = torch.arange(max_top_k, device=logits.device).unsqueeze(0)
+        ranks = _sampling_ranks(logits, max_top_k, rank_buffer)
         top_k_keep = ranks < top_ks.unsqueeze(1)
         selected_logits.masked_fill_(~top_k_keep, float("-inf"))
         if any_top_p_enabled:
@@ -138,7 +155,7 @@ def apply_top_k_top_p(
             top_ks,
             torch.full_like(top_ks, max_top_k),
         )
-        ranks = torch.arange(max_top_k, device=logits.device).unsqueeze(0)
+        ranks = _sampling_ranks(logits, max_top_k, rank_buffer)
         selected_logits.masked_fill_(
             ranks >= effective_top_ks.unsqueeze(1),
             float("-inf"),
@@ -169,7 +186,7 @@ def apply_top_k_top_p(
 
         # Apply top-k before calculating top-p probabilities. This is important:
         # top-p is defined over the distribution that remains after top-k.
-        ranks = torch.arange(vocab_size, device=logits.device).unsqueeze(0)
+        ranks = _sampling_ranks(logits, vocab_size, rank_buffer)
         top_k_keep = ranks < effective_top_ks.unsqueeze(1)
         probability_logits = sorted_logits.masked_fill(
             ~top_k_keep,
@@ -211,6 +228,7 @@ def compact_top_k_logits(
     top_ps: torch.Tensor,
     max_top_k: int,
     any_top_p_enabled: bool,
+    rank_buffer: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Build filtered FP32 logits only for selected top-k candidates."""
 
@@ -220,7 +238,7 @@ def compact_top_k_logits(
         dim=-1,
     )
     selected_logits = selected_logits.float().div_(temperatures.unsqueeze(1))
-    ranks = torch.arange(max_top_k, device=logits.device).unsqueeze(0)
+    ranks = _sampling_ranks(logits, max_top_k, rank_buffer)
     selected_logits.masked_fill_(
         ranks >= top_ks.unsqueeze(1),
         float("-inf"),
@@ -242,6 +260,7 @@ def sample_top_k_compact(
     top_ps: torch.Tensor,
     max_top_k: int,
     any_top_p_enabled: bool,
+    rank_buffer: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Sample from top-k candidates without materializing FP32 full logits."""
 
@@ -252,6 +271,7 @@ def sample_top_k_compact(
         top_ps,
         max_top_k,
         any_top_p_enabled,
+        rank_buffer,
     )
     probabilities = torch.softmax(selected_logits, dim=-1)
     selected_offsets = probabilities.div_(
@@ -261,6 +281,19 @@ def sample_top_k_compact(
 
 
 class Sampler(nn.Module):
+
+    def __init__(self):
+        super().__init__()
+        self.register_buffer(
+            "_rank_buffer",
+            torch.empty(0, dtype=torch.long),
+            persistent=False,
+        )
+
+    def _ranks(self, width: int, device: torch.device) -> torch.Tensor:
+        if self._rank_buffer.device != device or self._rank_buffer.numel() < width:
+            self._rank_buffer = torch.arange(width, device=device)
+        return self._rank_buffer
 
     def forward(
         self,
@@ -327,6 +360,7 @@ class Sampler(nn.Module):
         sample_top_ps = top_ps if all_sampling else top_ps[sample_mask]
         if metadata is not None:
             all_top_k_enabled = metadata.all_top_k_enabled
+            any_top_k_enabled = metadata.any_top_k_enabled
             any_top_p_enabled = metadata.any_top_p_enabled
             max_top_k = metadata.max_top_k
         else:
@@ -334,10 +368,11 @@ class Sampler(nn.Module):
                 (sample_top_ks > 0) & (sample_top_ks < logits.size(1))
             )
             all_top_k_enabled = bool(sample_top_k_enabled.all())
+            any_top_k_enabled = bool(sample_top_k_enabled.any())
             any_top_p_enabled = bool((sample_top_ps < 1.0).any())
             max_top_k = (
-                int(sample_top_ks.max().item())
-                if all_top_k_enabled
+                int(sample_top_ks[sample_top_k_enabled].max().item())
+                if any_top_k_enabled
                 else 0
             )
         if all_top_k_enabled:
@@ -348,6 +383,7 @@ class Sampler(nn.Module):
                 sample_top_ps,
                 max_top_k,
                 any_top_p_enabled,
+                self._ranks(max_top_k, logits.device),
             )
             if all_sampling:
                 return sample_tokens
@@ -363,6 +399,14 @@ class Sampler(nn.Module):
             sample_top_ks,
             sample_top_ps,
             metadata,
+            (
+                self._ranks(
+                    logits.size(1) if any_top_p_enabled else max_top_k,
+                    logits.device,
+                )
+                if any_top_p_enabled or any_top_k_enabled
+                else None
+            ),
         )
         probs = torch.softmax(sample_logits, dim=-1)
         sample_tokens = probs.div_(
