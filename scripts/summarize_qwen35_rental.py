@@ -22,9 +22,11 @@ ATTENTION_MAX_CONTEXT = 262143
 ATTENTION_MAX_ABS_ERROR = 0.05
 PRODUCTION_PARTITION_SIZE = 512
 ATTENTION_WORKSPACE_REUSE_MIN_SPEEDUP = 1.0
-PRESSURE_KV_BLOCKS = 12
-PRESSURE_INITIAL_SEQUENCES = 4
-PRESSURE_INJECTED_SEQUENCES = 4
+PRESSURE_KV_BLOCKS = 5
+PRESSURE_INITIAL_SEQUENCES = 2
+PRESSURE_INJECTED_SEQUENCES = 2
+PRESSURE_INITIAL_LENGTHS = [256, 1024]
+PRESSURE_INJECTED_LENGTHS = [512, 512]
 LONG_PREFILL_TOKENS = 8192
 LONG_PREFILL_MAX_ABS_ERROR = 0.05
 MIXED_MAX_COEFFICIENT_OF_VARIATION = 0.10
@@ -606,19 +608,26 @@ def summarize_attention_case(result: dict, *, partitioned: bool) -> dict:
     }
 
 
-def summarize_kv_pressure_case(result: dict, *, expected_tp_size: int) -> dict:
+def summarize_kv_pressure_case(
+    result: dict,
+    *,
+    expected_tp_size: int,
+    expected_policy: str,
+) -> dict:
     metrics = result.get("metrics", {})
     expected_requests = PRESSURE_INITIAL_SEQUENCES + PRESSURE_INJECTED_SEQUENCES
     configuration_valid = (
         result.get("tensor_parallel_size") == expected_tp_size
         and result.get("initial_seqs") == PRESSURE_INITIAL_SEQUENCES
         and result.get("injected_seqs") == PRESSURE_INJECTED_SEQUENCES
-        and result.get("initial_input_len") == 256
-        and result.get("injected_input_len") == 1024
+        and result.get("initial_input_lens") == PRESSURE_INITIAL_LENGTHS
+        and result.get("injected_input_lens") == PRESSURE_INJECTED_LENGTHS
         and result.get("output_len") == 16
         and result.get("num_kvcache_blocks_override") == PRESSURE_KV_BLOCKS
         and result.get("num_kvcache_blocks") == PRESSURE_KV_BLOCKS
         and result.get("enable_dynamic_chunked_prefill") is True
+        and result.get("preemption_policy") == expected_policy
+        and result.get("cuda_available") is True
     )
     preemption_observed = (
         metrics.get("preemption_count", 0) > 0
@@ -646,6 +655,14 @@ def summarize_kv_pressure_case(result: dict, *, expected_tp_size: int) -> dict:
         "reclaimed_kv_blocks": metrics.get("reclaimed_kv_blocks"),
         "total_time_s": result.get("total_time_s"),
         "peak_torch_allocated_mib": result.get("peak_torch_allocated_mib"),
+        "step_count": result.get("step_count"),
+        "generated_token_ids_digest": result.get("generated_token_ids", {}).get(
+            "digest"
+        ),
+        "avg_ttft_s": metrics.get("avg_ttft_s"),
+        "max_ttft_s": metrics.get("max_ttft_s"),
+        "avg_request_latency_s": metrics.get("avg_request_latency_s"),
+        "max_request_latency_s": metrics.get("max_request_latency_s"),
     }
 
 
@@ -890,7 +907,7 @@ def summarize(run_dir: Path, run_id: str) -> dict:
     mixed_paths = sorted((run_dir / "mixed").glob("tp*/r*.json"))
     if not mixed_paths:
         raise ValueError("no mixed-workload benchmark artifacts were found")
-    pressure_paths = sorted((run_dir / "pressure").glob("tp*.json"))
+    pressure_paths = sorted((run_dir / "pressure").glob("tp*/*.json"))
     if not pressure_paths:
         raise ValueError("no KV-pressure benchmark artifacts were found")
     cudagraph_paths = sorted(
@@ -1353,20 +1370,53 @@ def summarize(run_dir: Path, run_id: str) -> dict:
 
     for path in pressure_paths:
         result = load_json(path)
-        tp_size = int(path.stem.removeprefix("tp"))
+        tp_size = int(path.parent.name.removeprefix("tp"))
         tp_name = f"tp{tp_size}"
-        if tp_name in kv_pressure:
-            raise ValueError(f"duplicate KV-pressure result for {tp_name}")
-        kv_pressure[tp_name] = summarize_kv_pressure_case(
+        policy = path.stem
+        by_policy = kv_pressure.setdefault(tp_name, {})
+        if policy in by_policy:
+            raise ValueError(
+                f"duplicate KV-pressure result for {tp_name}/{policy}"
+            )
+        by_policy[policy] = summarize_kv_pressure_case(
             result,
             expected_tp_size=tp_size,
+            expected_policy=policy,
         )
         commits.add(result["commit"])
         clean_worktrees = clean_worktrees and not result["git_dirty"]
-        commits.add(result["commit"])
-        clean_worktrees = clean_worktrees and not result["git_dirty"]
         cuda_measurements = cuda_measurements and result["cuda_available"]
-
+    kv_pressure_comparisons = {}
+    for tp_name, by_policy in kv_pressure.items():
+        if set(by_policy) != {"fcfs", "min_recompute"}:
+            continue
+        baseline = by_policy["fcfs"]
+        candidate = by_policy["min_recompute"]
+        output_parity = (
+            baseline["generated_token_ids_digest"] is not None
+            and baseline["generated_token_ids_digest"]
+            == candidate["generated_token_ids_digest"]
+        )
+        baseline_progress = baseline["preempted_token_progress"]
+        candidate_progress = candidate["preempted_token_progress"]
+        kv_pressure_comparisons[tp_name] = {
+            "valid": (
+                baseline["valid"]
+                and candidate["valid"]
+                and output_parity
+                and candidate_progress < baseline_progress
+            ),
+            "output_parity": output_parity,
+            "recomputed_token_reduction": baseline_progress - candidate_progress,
+            "recomputed_token_reduction_ratio": (
+                1.0 - candidate_progress / baseline_progress
+            ),
+            "elapsed_speedup": (
+                baseline["total_time_s"] / candidate["total_time_s"]
+                if baseline["total_time_s"] and candidate["total_time_s"]
+                else None
+            ),
+        }
     for path in mixed_paths:
         result = load_json(path)
         tp_name = path.parent.name
@@ -1573,7 +1623,12 @@ def summarize(run_dir: Path, run_id: str) -> dict:
         ),
         "kv_pressure_evidence": (
             set(kv_pressure) == expected_tp_names
-            and all(item["valid"] for item in kv_pressure.values())
+            and all(
+                set(by_policy) == {"fcfs", "min_recompute"}
+                and all(item["valid"] for item in by_policy.values())
+                and kv_pressure_comparisons.get(tp_name, {}).get("valid") is True
+                for tp_name, by_policy in kv_pressure.items()
+            )
         ),
         "normalization_workspace_evidence": (
             set(normalization) == expected_tp_names
@@ -1722,6 +1777,7 @@ def summarize(run_dir: Path, run_id: str) -> dict:
         "kv_pressure": {
             "configured_kv_blocks": PRESSURE_KV_BLOCKS,
             "by_tp": kv_pressure,
+            "comparisons": kv_pressure_comparisons,
         },
     }
 

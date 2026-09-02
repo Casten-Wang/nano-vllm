@@ -413,6 +413,46 @@ def test_min_recompute_tie_preserves_older_request():
     assert not scheduler.running
 
 
+def test_min_recompute_reduces_progress_loss_for_heterogeneous_prompts():
+    def run(policy):
+        scheduler = make_scheduler(
+            max_tokens=2048,
+            max_seqs=4,
+            block_size=256,
+            num_blocks=5,
+            preemption_policy=policy,
+        )
+        for token, length in ((1, 256), (2, 1024)):
+            seq = Sequence([token] * length)
+            seq.max_tokens = 16
+            scheduler.add(seq)
+        injected = False
+        for _ in range(100):
+            if scheduler.is_finished():
+                break
+            result = scheduler.schedule()
+            scheduler.postprocess_mixed(result, [100] * len(result.seqs))
+            if result.decode_seqs and not injected:
+                for token in (3, 4):
+                    seq = Sequence([token] * 512)
+                    seq.max_tokens = 16
+                    scheduler.add(seq)
+                injected = True
+        else:
+            raise AssertionError("heterogeneous KV-pressure workload did not terminate")
+        assert scheduler.is_finished()
+        return scheduler
+
+    fcfs = run("fcfs")
+    min_recompute = run("min_recompute")
+
+    assert fcfs.preemption_count == 2
+    assert min_recompute.preemption_count == 1
+    assert fcfs.preempted_token_progress == 1536
+    assert min_recompute.preempted_token_progress == 256
+    assert min_recompute.preempted_token_progress < fcfs.preempted_token_progress
+
+
 def test_dynamic_prefill_only_result_uses_prefill_mode():
     scheduler = make_scheduler(max_tokens=8, max_seqs=8, block_size=4)
     waiting = Sequence([10] * 6)

@@ -30,6 +30,74 @@ def build_prompts(num_seqs: int, input_len: int, vocab_size: int, seed: int) -> 
     return [[rng.randint(0, vocab_size - 1) for _ in range(input_len)] for _ in range(num_seqs)]
 
 
+def parse_positive_int_list(value: str) -> tuple[int, ...]:
+    try:
+        values = tuple(int(item.strip()) for item in value.split(",") if item.strip())
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(
+            "expected comma-separated positive integers"
+        ) from error
+    if not values or any(value <= 0 for value in values):
+        raise argparse.ArgumentTypeError("expected comma-separated positive integers")
+    return values
+
+
+def resolve_prompt_lengths(
+    count: int,
+    default_length: int,
+    explicit_lengths: tuple[int, ...] | None,
+    label: str,
+) -> tuple[int, ...]:
+    lengths = explicit_lengths or (default_length,) * count
+    if len(lengths) != count:
+        raise ValueError(f"{label} prompt lengths must contain exactly {count} values")
+    return lengths
+
+
+def build_prompts_for_lengths(
+    lengths: tuple[int, ...],
+    vocab_size: int,
+    seed: int,
+) -> list[list[int]]:
+    rng = random.Random(seed)
+    return [
+        [rng.randint(0, vocab_size - 1) for _ in range(length)]
+        for length in lengths
+    ]
+
+
+def validate_workload(args: argparse.Namespace) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    numeric = (
+        args.initial_seqs,
+        args.injected_seqs,
+        args.initial_input_len,
+        args.injected_input_len,
+        args.output_len,
+        args.inject_after_decode_steps,
+        args.max_model_len,
+        args.max_num_batched_tokens,
+        args.max_num_seqs,
+        args.vocab_size,
+    )
+    if any(value <= 0 for value in numeric):
+        raise ValueError("workload sizes must be positive")
+    initial = resolve_prompt_lengths(
+        args.initial_seqs,
+        args.initial_input_len,
+        args.initial_input_lens,
+        "initial",
+    )
+    injected = resolve_prompt_lengths(
+        args.injected_seqs,
+        args.injected_input_len,
+        args.injected_input_lens,
+        "injected",
+    )
+    if max((*initial, *injected)) + args.output_len > args.max_model_len:
+        raise ValueError("prompt length plus output length exceeds max_model_len")
+    return initial, injected
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Benchmark online mixed decode/prefill scheduling.")
     parser.add_argument("--model", default=os.path.expanduser("~/huggingface/Qwen3-0.6B/"))
@@ -37,6 +105,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--injected-seqs", type=int, default=8)
     parser.add_argument("--initial-input-len", type=int, default=128)
     parser.add_argument("--injected-input-len", type=int, default=1024)
+    parser.add_argument("--initial-input-lens", type=parse_positive_int_list)
+    parser.add_argument("--injected-input-lens", type=parse_positive_int_list)
     parser.add_argument("--output-len", type=int, default=64)
     parser.add_argument("--inject-after-decode-steps", type=int, default=8)
     parser.add_argument("--max-model-len", type=int, default=2048)
@@ -100,18 +170,20 @@ def request_group(seq_id: int, initial_ids: set[int]) -> str:
 
 def main() -> None:
     args = parse_args()
+    try:
+        initial_input_lens, injected_input_lens = validate_workload(args)
+    except ValueError as error:
+        raise SystemExit(str(error)) from error
     result_dir = Path(args.result_dir)
     result_dir.mkdir(parents=True, exist_ok=True)
 
-    initial_prompts = build_prompts(
-        args.initial_seqs,
-        args.initial_input_len,
+    initial_prompts = build_prompts_for_lengths(
+        initial_input_lens,
         args.vocab_size,
         args.seed,
     )
-    injected_prompts = build_prompts(
-        args.injected_seqs,
-        args.injected_input_len,
+    injected_prompts = build_prompts_for_lengths(
+        injected_input_lens,
         args.vocab_size,
         args.seed + 1,
     )
@@ -285,6 +357,8 @@ def main() -> None:
         "injected_seqs": args.injected_seqs,
         "initial_input_len": args.initial_input_len,
         "injected_input_len": args.injected_input_len,
+        "initial_input_lens": list(initial_input_lens),
+        "injected_input_lens": list(injected_input_lens),
         "output_len": args.output_len,
         "inject_after_decode_steps": args.inject_after_decode_steps,
         "max_model_len": args.max_model_len,

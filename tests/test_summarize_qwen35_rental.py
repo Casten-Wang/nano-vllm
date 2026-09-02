@@ -199,36 +199,47 @@ def write_mixed_case(root):
 
 
 def write_pressure_case(root):
-    write(
-        root / "pressure/tp4.json",
-        {
+    for policy, token_progress, max_progress, reclaimed in (
+        ("fcfs", 1536, 1024, 6),
+        ("min_recompute", 256, 256, 1),
+    ):
+        write(
+            root / f"pressure/tp4/{policy}.json",
+            {
             "commit": "abc",
             "git_dirty": False,
             "cuda_available": True,
             "tensor_parallel_size": 4,
             "initial_seqs": MODULE.PRESSURE_INITIAL_SEQUENCES,
             "injected_seqs": MODULE.PRESSURE_INJECTED_SEQUENCES,
-            "initial_input_len": 256,
-            "injected_input_len": 1024,
+            "initial_input_lens": MODULE.PRESSURE_INITIAL_LENGTHS,
+            "injected_input_lens": MODULE.PRESSURE_INJECTED_LENGTHS,
             "output_len": 16,
             "num_kvcache_blocks_override": MODULE.PRESSURE_KV_BLOCKS,
             "num_kvcache_blocks": MODULE.PRESSURE_KV_BLOCKS,
             "enable_dynamic_chunked_prefill": True,
+            "preemption_policy": policy,
             "injected": True,
-            "expected_requests": 8,
-            "finished_requests": 8,
-            "total_time_s": 10.0,
+            "expected_requests": 4,
+            "finished_requests": 4,
+            "total_time_s": 10.0 if policy == "fcfs" else 8.0,
+            "step_count": 63 if policy == "fcfs" else 48,
             "peak_torch_allocated_mib": 12_000.0,
+            "generated_token_ids": {"digest": "pressure-tokens"},
             "metrics": {
-                "preemption_count": 1,
-                "preempted_token_progress": 1024,
-                "max_preempted_token_progress": 1024,
-                "reclaimed_kv_blocks": 4,
+                "preemption_count": 2 if policy == "fcfs" else 1,
+                "preempted_token_progress": token_progress,
+                "max_preempted_token_progress": max_progress,
+                "reclaimed_kv_blocks": reclaimed,
+                "avg_ttft_s": 1.0,
+                "max_ttft_s": 2.0,
+                "avg_request_latency_s": 5.0,
+                "max_request_latency_s": 10.0,
             },
             "execution_validation": {"valid": True},
             "generation_validation": {"valid": True},
-        },
-    )
+            },
+        )
 
 
 def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
@@ -808,7 +819,9 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
 
     report = MODULE.summarize(tmp_path, run_id)
 
-    assert report["valid"]
+    assert report["valid"], {
+        key: value for key, value in report["evidence"].items() if not value
+    }
     assert report["evidence"]["official_checkpoint_headers_valid"]
     assert report["evidence"]["local_checkpoint_matches_official"]
     assert (
@@ -962,9 +975,25 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
         "promote_to_runtime"
     ]
     pressure = report["kv_pressure"]["by_tp"]["tp4"]
-    assert pressure["valid"]
-    assert pressure["preemption_count"] == 1
-    assert pressure["preempted_token_progress"] == 1024
+    assert pressure["fcfs"]["valid"]
+    assert pressure["min_recompute"]["valid"]
+    assert pressure["fcfs"]["preemption_count"] == 2
+    assert pressure["min_recompute"]["preempted_token_progress"] == 256
+    comparison = report["kv_pressure"]["comparisons"]["tp4"]
+    assert comparison["valid"]
+    assert comparison["recomputed_token_reduction"] == 1280
+    assert comparison["elapsed_speedup"] == 1.25
+    candidate_pressure_path = tmp_path / "pressure/tp4/min_recompute.json"
+    candidate_pressure = json.loads(candidate_pressure_path.read_text())
+    candidate_pressure["generated_token_ids"]["digest"] = "different"
+    write(candidate_pressure_path, candidate_pressure)
+    parity_failure = MODULE.summarize(tmp_path, run_id)
+    assert not parity_failure["evidence"]["kv_pressure_evidence"]
+    assert not parity_failure["kv_pressure"]["comparisons"]["tp4"][
+        "output_parity"
+    ]
+    candidate_pressure["generated_token_ids"]["digest"] = "pressure-tokens"
+    write(candidate_pressure_path, candidate_pressure)
     memory = report["memory"]["by_tp"]["tp4"]
     assert memory["int8_kv_reduction_ratio"] == 0.49609375
     assert memory["minimum_budget_margin_bytes"] == 5_000
