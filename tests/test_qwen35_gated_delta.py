@@ -30,6 +30,7 @@ causal_conv1d_prefill = qwen35_gated_delta.causal_conv1d_prefill
 chunk_gated_delta_rule = qwen35_gated_delta.chunk_gated_delta_rule
 effective_chunk_size = qwen35_gated_delta.effective_chunk_size
 gather_prefill_group = qwen35_gated_delta._gather_prefill_group
+l2_normalize = qwen35_gated_delta.l2_normalize
 recurrent_gated_delta_rule = qwen35_gated_delta.recurrent_gated_delta_rule
 recurrent_gated_delta_step = qwen35_gated_delta.recurrent_gated_delta_step
 
@@ -42,6 +43,34 @@ def inputs(seed=0):
     decay = -torch.rand(2, 5, 3, generator=generator)
     beta = torch.rand(2, 5, 3, generator=generator)
     return q, k, v, decay, beta
+
+
+def test_l2_normalize_reuses_private_inference_workspace():
+    workspace = torch.randn(7, 16, dtype=torch.float32)
+    original = workspace.clone()
+    storage = workspace.data_ptr()
+
+    with torch.inference_mode():
+        actual = l2_normalize(workspace, inplace_output=True)
+
+    assert actual.data_ptr() == storage
+    torch.testing.assert_close(
+        actual,
+        original
+        * torch.rsqrt((original * original).sum(dim=-1, keepdim=True) + 1e-6),
+    )
+
+
+def test_l2_normalize_inplace_request_preserves_autograd():
+    value = torch.randn(7, 16, requires_grad=True)
+    original = value.detach().clone()
+
+    actual = l2_normalize(value, inplace_output=True)
+    actual.square().sum().backward()
+
+    assert actual.data_ptr() != value.data_ptr()
+    torch.testing.assert_close(value.detach(), original)
+    assert value.grad is not None
 
 
 @pytest.mark.parametrize(

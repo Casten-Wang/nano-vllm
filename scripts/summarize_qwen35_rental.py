@@ -1021,6 +1021,10 @@ def summarize(run_dir: Path, run_id: str) -> dict:
                 result["results"]["router_topk_first"],
                 ("reused_selected_logits_mib",),
             ),
+            "delta_l2_normalization": summarize_buffer_reuse_candidate(
+                result["results"]["delta_l2_normalization_reuse"],
+                ("reused_query_key_fp32_mib",),
+            ),
             "attention_norm_output": summarize_buffer_reuse_candidate(
                 result["results"]["attention_norm_output_reuse"],
                 ("reused_projection_output_mib",),

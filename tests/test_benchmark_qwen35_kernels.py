@@ -214,6 +214,28 @@ def test_attention_norm_benchmark_compares_projection_output_reuse():
     assert all(item["max_abs_error"] == 0 for item in result["errors"])
 
 
+def test_delta_l2_benchmark_tracks_reused_fp32_workspaces():
+    args = SimpleNamespace(
+        router_tokens=4,
+        key_head_dim=8,
+        warmup=0,
+        iterations=1,
+        repeats=1,
+    )
+
+    result = MODULE.benchmark_delta_l2_normalization(
+        args,
+        torch.device("cpu"),
+        torch.bfloat16,
+        local_key_heads=2,
+    )
+
+    assert result["reused_query_key_fp32_mib"] == (
+        2 * 4 * 2 * 8 * 4 / 1024 / 1024
+    )
+    assert all(item["max_abs_error"] == 0 for item in result["errors"])
+
+
 def test_rotary_benchmark_compares_query_key_output_reuse():
     args = SimpleNamespace(
         router_tokens=4,

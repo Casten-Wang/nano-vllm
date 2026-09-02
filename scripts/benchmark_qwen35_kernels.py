@@ -1331,6 +1331,48 @@ def benchmark_rmsnorm(args, device, dtype) -> dict:
     return result
 
 
+def benchmark_delta_l2_normalization(
+    args,
+    device,
+    dtype,
+    local_key_heads: int,
+) -> dict:
+    shape = (
+        args.router_tokens,
+        local_key_heads,
+        args.key_head_dim,
+    )
+    query = torch.randn(shape, device=device, dtype=dtype)
+    key = torch.randn_like(query)
+
+    def reference():
+        return (
+            GDN.l2_normalize(query.float()),
+            GDN.l2_normalize(key.float()),
+        )
+
+    def candidate():
+        query_workspace = query.float()
+        key_workspace = key.float()
+        return (
+            GDN.l2_normalize(query_workspace, inplace_output=True),
+            GDN.l2_normalize(key_workspace, inplace_output=True),
+        )
+
+    result = compare(
+        reference,
+        candidate,
+        device=device,
+        warmup=args.warmup,
+        iterations=args.iterations,
+        repeats=args.repeats,
+    )
+    result["reused_query_key_fp32_mib"] = (
+        2 * query.numel() * 4 / 1024 / 1024
+    )
+    return result
+
+
 def benchmark_attention_norm_output_reuse(args, device, dtype) -> dict:
     x = torch.randn(
         args.router_tokens,
@@ -2661,6 +2703,14 @@ def main() -> None:
                 dtype,
             ),
             "rmsnorm_fp32_reuse": benchmark_rmsnorm(args, device, dtype),
+            "delta_l2_normalization_reuse": (
+                benchmark_delta_l2_normalization(
+                    args,
+                    device,
+                    dtype,
+                    local_key_heads,
+                )
+            ),
             "attention_norm_output_reuse": benchmark_attention_norm_output_reuse(
                 args,
                 device,

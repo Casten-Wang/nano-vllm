@@ -10,10 +10,18 @@ from torch import nn
 from nanovllm.layers.linear import MergedColumnParallelLinear
 
 
-def l2_normalize(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
+def l2_normalize(
+    x: torch.Tensor,
+    eps: float = 1e-6,
+    *,
+    inplace_output: bool = False,
+) -> torch.Tensor:
     """Match the FLA/Qwen3.5 L2 normalization convention."""
 
-    return x * torch.rsqrt((x * x).sum(dim=-1, keepdim=True) + eps)
+    inverse_norm = torch.rsqrt((x * x).sum(dim=-1, keepdim=True) + eps)
+    if inplace_output and not torch.is_grad_enabled():
+        return x.mul_(inverse_norm)
+    return x * inverse_norm
 
 
 def causal_conv1d_step(
@@ -211,10 +219,22 @@ def recurrent_gated_delta_step(
         key_dim,
         value_dim,
     )
-    normalized_query = (
-        l2_normalize(query.float()).unsqueeze(2) / (key_dim**0.5)
-    )
-    normalized_key = l2_normalize(key.float()).unsqueeze(2)
+    query_float = query.float()
+    key_float = key.float()
+    reuse_query = query_float is not query and not torch.is_grad_enabled()
+    reuse_key = key_float is not key and not torch.is_grad_enabled()
+    normalized_query = l2_normalize(
+        query_float,
+        inplace_output=reuse_query,
+    ).unsqueeze(2)
+    if normalized_query.requires_grad:
+        normalized_query = normalized_query / (key_dim**0.5)
+    else:
+        normalized_query.div_(key_dim**0.5)
+    normalized_key = l2_normalize(
+        key_float,
+        inplace_output=reuse_key,
+    ).unsqueeze(2)
     grouped_decay = log_decay.float().reshape(batch_size, key_heads, groups)
     grouped_beta = beta.float().reshape(batch_size, key_heads, groups)
     grouped_value = value.float().reshape(
@@ -363,8 +383,18 @@ def chunk_gated_delta_rule(
         sequence_length,
     )
     decay = log_decay.transpose(1, 2).float().reshape_as(beta)
-    query = l2_normalize(query) / (key_dim**0.5)
-    key = l2_normalize(key)
+    query = l2_normalize(
+        query,
+        inplace_output=not torch.is_grad_enabled(),
+    )
+    if not query.requires_grad:
+        query.div_(key_dim**0.5)
+    else:
+        query = query / (key_dim**0.5)
+    key = l2_normalize(
+        key,
+        inplace_output=not torch.is_grad_enabled(),
+    )
 
     pad_size = (-sequence_length) % chunk_size
     query, key = (
