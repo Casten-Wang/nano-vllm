@@ -788,6 +788,7 @@ def summarize(run_dir: Path, run_id: str) -> dict:
     buffer_reuse = {}
     mixed_moe_dispatch = {}
     moe_route_input_broadcast = {}
+    moe_device_scalar = {}
     long_prefill = {}
     mixed_runs = {}
     configured_max_decode_batch = performance["workload"]["max_num_seqs"]
@@ -966,6 +967,25 @@ def summarize(run_dir: Path, run_id: str) -> dict:
         }
         candidate = candidates_by_batch["1"]
         tp_name = path.stem
+        device_scalar = dispatch_results["1"].get("device_scalar_candidate")
+        moe_device_scalar[tp_name] = (
+            {
+                "available": True,
+                "promotion": device_scalar["promotion"],
+                "median_ms": device_scalar["median_ms"],
+                "speedup_vs_current": device_scalar["speedup_vs_current"],
+                "peak_extra_mib": device_scalar["peak_extra_mib"],
+                "errors_vs_current": device_scalar["errors_vs_current"],
+                "avoids_host_route_sync": device_scalar[
+                    "avoids_host_route_sync"
+                ],
+                "estimated_selected_weight_mib": device_scalar[
+                    "estimated_selected_weight_mib"
+                ],
+            }
+            if device_scalar is not None
+            else {"available": False}
+        )
         moe_route_input_broadcast[tp_name] = {
             batch: item["broadcast_route_input"]
             for batch, item in candidates_by_batch.items()
@@ -1435,6 +1455,10 @@ def summarize(run_dir: Path, run_id: str) -> dict:
         for item in by_kv.values()
     )
     same_tp_coverage = set(kernels) == set(moe_runtime)
+    device_scalar_all_tp_promoted = bool(moe_device_scalar) and all(
+        item["available"] and item["promotion"]["promote_to_runtime"]
+        for item in moe_device_scalar.values()
+    )
     return {
         "run_id": run_id,
         "model": quality["model"],
@@ -1495,6 +1519,8 @@ def summarize(run_dir: Path, run_id: str) -> dict:
             "runtime_by_tp": moe_runtime,
             "mixed_dispatch_by_tp": mixed_moe_dispatch,
             "route_input_broadcast_by_tp": moe_route_input_broadcast,
+            "device_scalar_all_tp_promoted": device_scalar_all_tp_promoted,
+            "device_scalar_by_tp": moe_device_scalar,
         },
         "normalization": {
             "by_tp": normalization,

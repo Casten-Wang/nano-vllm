@@ -543,22 +543,39 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
                     "reused_selected_logits_mib": 0.1,
                 },
                 "expert_dispatch_torch": {
-                    batch: {"graph_safe_batched_candidate": {
-                        "promotion": {"promote_to_runtime": True},
-                        "median_ms": 1.0,
-                        "speedup_vs_current": 1.2,
-                        "peak_extra_mib": 4.0,
-                        "errors_vs_current": {"max_abs_error": 0.01},
-                        "reused_weighted_route_mib": 0.25,
-                        "broadcast_route_input": {
-                            "valid": True,
-                            "measured_on_cuda": True,
-                            "speedup_vs_repeated_input": 1.05,
-                            "peak_extra_mib_delta": -0.25,
-                            "errors": {"max_abs_error": 0.0},
-                            "reference": {"median_ms": 1.05},
+                    batch: {
+                        "graph_safe_batched_candidate": {
+                            "promotion": {"promote_to_runtime": True},
+                            "median_ms": 1.0,
+                            "speedup_vs_current": 1.2,
+                            "peak_extra_mib": 4.0,
+                            "errors_vs_current": {"max_abs_error": 0.01},
+                            "reused_weighted_route_mib": 0.25,
+                            "broadcast_route_input": {
+                                "valid": True,
+                                "measured_on_cuda": True,
+                                "speedup_vs_repeated_input": 1.05,
+                                "peak_extra_mib_delta": -0.25,
+                                "errors": {"max_abs_error": 0.0},
+                                "reference": {"median_ms": 1.05},
+                            },
                         },
-                    }}
+                        **(
+                            {
+                                "device_scalar_candidate": {
+                                    "promotion": {"promote_to_runtime": True},
+                                    "median_ms": 0.9,
+                                    "speedup_vs_current": 1.1,
+                                    "peak_extra_mib": 3.0,
+                                    "errors_vs_current": {"max_abs_error": 0.0},
+                                    "avoids_host_route_sync": True,
+                                    "estimated_selected_weight_mib": 2.0,
+                                }
+                            }
+                            if batch == "1"
+                            else {}
+                        ),
+                    }
                     for batch in ("1", "64")
                 },
                 "mixed_expert_dispatch": {
@@ -852,6 +869,12 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     ]["tp4"]["1"]
     assert route_input["valid"]
     assert route_input["speedup_vs_repeated_input"] == 1.05
+    device_scalar = report["graph_safe_moe"]["device_scalar_by_tp"]["tp4"]
+    assert report["graph_safe_moe"]["device_scalar_all_tp_promoted"]
+    assert device_scalar["available"]
+    assert device_scalar["avoids_host_route_sync"]
+    assert device_scalar["speedup_vs_current"] == 1.1
+    assert device_scalar["estimated_selected_weight_mib"] == 2.0
     runtime = report["graph_safe_moe"]["runtime_by_tp"]["tp4"]["auto"]
     assert runtime["output_digest_matches"]
     assert runtime["throughput_speedup"] == 2.0
