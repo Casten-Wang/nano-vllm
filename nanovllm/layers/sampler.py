@@ -266,6 +266,7 @@ class Sampler(nn.Module):
         if all_sampling:
             return sample_tokens
         greedy_tokens = logits.argmax(dim=-1)
-        output = greedy_tokens.clone()
-        output[sample_mask] = sample_tokens
-        return output
+        # Argmax already returns fresh storage. Reuse it for sampled rows
+        # instead of cloning the whole mixed-batch result.
+        greedy_tokens[sample_mask] = sample_tokens
+        return greedy_tokens
