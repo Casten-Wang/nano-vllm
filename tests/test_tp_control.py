@@ -113,6 +113,7 @@ def load_model_runner_module():
         execution_module.select_model_path = lambda *args, **kwargs: ""
         execution_module.supports_cudagraph_policy = lambda **kwargs: False
         decode_input_module.DecodeInputBatch = object
+        decode_input_module.TokenInputBatch = object
         sampling_input_module.SamplingInputBatch = object
         sequence_module.Sequence = object
         packing_module.PackedBlockMetadata = object
@@ -540,6 +541,18 @@ class HybridStateContextTest(unittest.TestCase):
 
         runner.build_decode_inputs = build_decode_inputs
         runner.build_prefill_inputs = build_prefill_inputs
+        runner.token_inputs = SimpleNamespace(
+            update_tokens=lambda input_ids, positions, slots: (
+                FakeTensor(input_ids),
+                FakeTensor(positions),
+                FakeTensor(slots),
+            ),
+            update_decode_context_lens=lambda values: FakeTensor(values),
+            update_cu_seqlens=lambda query, key: (
+                FakeTensor(query),
+                FakeTensor(key),
+            ),
+        )
         decode_seqs = [object(), object()]
         prefill_seqs = [object()]
         state_metadata_calls = []

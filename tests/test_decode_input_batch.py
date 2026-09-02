@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from nanovllm.engine.decode_input_batch import DecodeInputBatch
+from nanovllm.engine.decode_input_batch import DecodeInputBatch, TokenInputBatch
 
 
 def make_batch(capacity=4, max_num_blocks=4):
@@ -96,3 +96,55 @@ def test_decode_input_batch_rejects_invalid_sizes(values):
 def test_decode_input_batch_rejects_invalid_block_tables(values):
     with pytest.raises(ValueError):
         make_batch(capacity=2, max_num_blocks=2).update_block_tables(values)
+
+
+def make_token_batch(token_capacity=6, sequence_capacity=3):
+    return TokenInputBatch(
+        token_capacity,
+        sequence_capacity,
+        device="cpu",
+        pin_memory=False,
+    )
+
+
+def test_token_input_batch_preserves_prefill_metadata():
+    batch = make_token_batch()
+
+    ids, positions, slots = batch.update_tokens(
+        [11, 12, 13],
+        [0, 1, 2],
+        [20, 21, 22],
+    )
+    cu_q, cu_k = batch.update_cu_seqlens([0, 2, 3], [0, 4, 7])
+
+    assert torch.equal(ids, torch.tensor([11, 12, 13]))
+    assert torch.equal(positions, torch.tensor([0, 1, 2]))
+    assert torch.equal(slots, torch.tensor([20, 21, 22], dtype=torch.int32))
+    assert torch.equal(cu_q, torch.tensor([0, 2, 3], dtype=torch.int32))
+    assert torch.equal(cu_k, torch.tensor([0, 4, 7], dtype=torch.int32))
+
+
+def test_token_input_batch_handles_warmup_and_reuses_storage():
+    batch = make_token_batch()
+    first = batch.update_tokens([1], [0], [])
+    pointers = tuple(value.data_ptr() for value in first[:2])
+
+    second = batch.update_tokens([2, 3], [4, 5], [8, 9])
+    lengths = batch.update_decode_context_lens([5, 6])
+
+    assert first[2].numel() == 0
+    assert pointers == tuple(value.data_ptr() for value in second[:2])
+    assert torch.equal(lengths, torch.tensor([5, 6], dtype=torch.int32))
+
+
+def test_token_input_batch_rejects_invalid_sizes():
+    batch = make_token_batch(token_capacity=2, sequence_capacity=1)
+
+    with pytest.raises(ValueError):
+        batch.update_tokens([1], [], [2])
+    with pytest.raises(ValueError):
+        batch.update_tokens([1, 2, 3], [1, 2, 3], [1, 2, 3])
+    with pytest.raises(ValueError):
+        batch.update_cu_seqlens([0, 1], [0])
+    with pytest.raises(ValueError):
+        batch.update_decode_context_lens([1, 2])

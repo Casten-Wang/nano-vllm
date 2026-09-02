@@ -152,3 +152,89 @@ class DecodeInputBatch:
 
     def update_reset_slots(self, values: list[int]) -> torch.Tensor:
         return self._update_slots(values, reset=True)
+
+
+class TokenInputBatch:
+    """Persistent transfer buffers for prefill and mixed token batches."""
+
+    def __init__(
+        self,
+        token_capacity: int,
+        sequence_capacity: int,
+        *,
+        device: torch.device | str = "cuda",
+        pin_memory: bool = True,
+    ) -> None:
+        if token_capacity <= 0 or sequence_capacity <= 0:
+            raise ValueError("token input capacities must be positive")
+        self.token_capacity = token_capacity
+        self.sequence_capacity = sequence_capacity
+        specs = {
+            "input_ids": (token_capacity, torch.int64),
+            "positions": (token_capacity, torch.int64),
+            "slot_mapping": (token_capacity, torch.int32),
+            "cu_seqlens_q": (sequence_capacity + 1, torch.int32),
+            "cu_seqlens_k": (sequence_capacity + 1, torch.int32),
+            "decode_context_lens": (sequence_capacity, torch.int32),
+        }
+        self.host = {
+            name: torch.empty(
+                capacity,
+                dtype=dtype,
+                device="cpu",
+                pin_memory=pin_memory,
+            )
+            for name, (capacity, dtype) in specs.items()
+        }
+        self.device = {
+            name: torch.empty(capacity, dtype=dtype, device=device)
+            for name, (capacity, dtype) in specs.items()
+        }
+        self._arrays = {
+            name: tensor.numpy() for name, tensor in self.host.items()
+        }
+
+    def _update(self, name: str, values: list[int]) -> torch.Tensor:
+        size = len(values)
+        capacity = self.host[name].numel()
+        if not 0 < size <= capacity:
+            raise ValueError(f"{name} size must be in [1, {capacity}]")
+        self._arrays[name][:size] = values
+        self.device[name][:size].copy_(
+            self.host[name][:size],
+            non_blocking=True,
+        )
+        return self.device[name][:size]
+
+    def update_tokens(
+        self,
+        input_ids: list[int],
+        positions: list[int],
+        slot_mapping: list[int],
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        size = len(input_ids)
+        if len(positions) != size or len(slot_mapping) not in (0, size):
+            raise ValueError("token input batch sizes must match")
+        ids = self._update("input_ids", input_ids)
+        position_tensor = self._update("positions", positions)
+        slots = (
+            self._update("slot_mapping", slot_mapping)
+            if slot_mapping
+            else self.device["slot_mapping"][:0]
+        )
+        return ids, position_tensor, slots
+
+    def update_cu_seqlens(
+        self,
+        cu_seqlens_q: list[int],
+        cu_seqlens_k: list[int],
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if len(cu_seqlens_q) != len(cu_seqlens_k):
+            raise ValueError("query and key sequence counts must match")
+        return (
+            self._update("cu_seqlens_q", cu_seqlens_q),
+            self._update("cu_seqlens_k", cu_seqlens_k),
+        )
+
+    def update_decode_context_lens(self, values: list[int]) -> torch.Tensor:
+        return self._update("decode_context_lens", values)

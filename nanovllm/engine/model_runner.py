@@ -7,7 +7,7 @@ from multiprocessing.synchronize import Event
 from multiprocessing.shared_memory import SharedMemory
 
 from nanovllm.config import Config
-from nanovllm.engine.decode_input_batch import DecodeInputBatch
+from nanovllm.engine.decode_input_batch import DecodeInputBatch, TokenInputBatch
 from nanovllm.engine.execution import (
     ExecutionStats,
     cuda_graph_buckets,
@@ -149,6 +149,10 @@ class ModelRunner:
         self.decode_inputs = DecodeInputBatch(
             config.max_num_seqs,
             (config.max_model_len + self.block_size - 1) // self.block_size,
+        )
+        self.token_inputs = TokenInputBatch(
+            config.max_num_batched_tokens,
+            config.max_num_seqs,
         )
         self.allocate_recurrent_state_cache()
         self.warmup_model()
@@ -872,11 +876,15 @@ class ModelRunner:
                 )
                 dequant_block_ids, dequant_block_tables = self.prepare_packed_block_metadata(metadata)
         state_token_ranges = tuple(zip(cu_seqlens_q[:-1], cu_seqlens_q[1:]))
-        input_ids = torch.tensor(input_ids, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
-        positions = torch.tensor(positions, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
-        cu_seqlens_q = torch.tensor(cu_seqlens_q, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
-        cu_seqlens_k = torch.tensor(cu_seqlens_k, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
-        slot_mapping = torch.tensor(slot_mapping, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
+        input_ids, positions, slot_mapping = self.token_inputs.update_tokens(
+            input_ids,
+            positions,
+            slot_mapping,
+        )
+        cu_seqlens_q, cu_seqlens_k = self.token_inputs.update_cu_seqlens(
+            cu_seqlens_q,
+            cu_seqlens_k,
+        )
         set_context(
             True,
             cu_seqlens_q,
@@ -1095,12 +1103,20 @@ class ModelRunner:
         positions = decode["positions"] + prefill["positions"]
         slot_mapping = decode["slot_mapping"] + prefill["slot_mapping"]
 
-        input_ids = torch.tensor(input_ids, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
-        positions = torch.tensor(positions, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
-        slot_mapping = torch.tensor(slot_mapping, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
-        decode_context_lens = torch.tensor(decode["context_lens"], dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
-        prefill_cu_seqlens_q = torch.tensor(prefill["cu_seqlens_q"], dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
-        prefill_cu_seqlens_k = torch.tensor(prefill["cu_seqlens_k"], dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
+        input_ids, positions, slot_mapping = self.token_inputs.update_tokens(
+            input_ids,
+            positions,
+            slot_mapping,
+        )
+        decode_context_lens = self.token_inputs.update_decode_context_lens(
+            decode["context_lens"]
+        )
+        prefill_cu_seqlens_q, prefill_cu_seqlens_k = (
+            self.token_inputs.update_cu_seqlens(
+                prefill["cu_seqlens_q"],
+                prefill["cu_seqlens_k"],
+            )
+        )
 
         set_context(
             False,
