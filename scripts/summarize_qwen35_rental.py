@@ -178,6 +178,13 @@ def summarize_delta_causal_mask_cache(
         "available": True,
         "measured_on_cuda": measured_on_cuda,
         "valid": all(item["valid"] for item in summaries.values()),
+        "all_cuda_beneficial": (
+            measured_on_cuda
+            and all(
+                item["valid"] and item["speedup"] >= 1.0
+                for item in summaries.values()
+            )
+        ),
         "cache_max_entries": result["cache_max_entries"],
         "maximum_cached_chunk_size": result["maximum_cached_chunk_size"],
         "by_chunk_size": summaries,

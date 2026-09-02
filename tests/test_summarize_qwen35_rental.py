@@ -878,6 +878,7 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     assert delta_mask["available"]
     assert delta_mask["measured_on_cuda"]
     assert delta_mask["valid"]
+    assert delta_mask["all_cuda_beneficial"]
     assert set(delta_mask["by_chunk_size"]) == {"32", "64", "128"}
     assert report["graph_safe_moe"]["by_tp"]["tp4"]["promotion"][
         "selected_decode_batches"
@@ -1217,6 +1218,32 @@ def test_buffer_reuse_summary_rejects_peak_memory_regression():
     assert summary["measurement_valid"]
     assert not summary["memory_non_regression"]
     assert not summary["valid"]
+
+
+def test_delta_causal_mask_summary_requires_cuda_for_benefit_claim():
+    result = {
+        "cache_max_entries": 32,
+        "maximum_cached_chunk_size": 1024,
+        "candidates": {
+            "64": {
+                "reference": {"peak_extra_mib": 1.0},
+                "candidate": {"peak_extra_mib": 0.0},
+                "speedup": 1.5,
+                "errors": [{"max_abs_error": 0.0}],
+                "persistent_mask_mib": 0.01,
+                "cache_reuses_storage": True,
+                "eliminated_allocations_per_additional_layer": 1,
+            }
+        },
+    }
+
+    summary = MODULE.summarize_delta_causal_mask_cache(
+        result,
+        measured_on_cuda=False,
+    )
+
+    assert summary["valid"]
+    assert not summary["all_cuda_beneficial"]
 
 
 def test_mixed_moe_summary_requires_cuda_and_non_regressing_speed():
