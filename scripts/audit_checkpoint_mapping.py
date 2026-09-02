@@ -353,6 +353,11 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--verify-shard-hashes",
+        action="store_true",
+        help="Stream every local shard once and record its SHA-256 identity.",
+    )
+    parser.add_argument(
         "--output",
         type=Path,
         default=Path("benchmark_results/checkpoint_mapping_audit.json"),
@@ -368,7 +373,7 @@ def main() -> None:
     if not isinstance(model_dtype, torch.dtype):
         model_dtype = torch.bfloat16
     model_dtype_bytes = torch.empty((), dtype=model_dtype).element_size()
-    checkpoint_manifest = checkpoint_manifest_metadata(
+    initial_checkpoint_manifest = checkpoint_manifest_metadata(
         args.model,
         require_shards=args.require_shards,
     )
@@ -383,9 +388,34 @@ def main() -> None:
     final_checkpoint_manifest = checkpoint_manifest_metadata(
         args.model,
         require_shards=args.require_shards,
+        hash_shards=args.verify_shard_hashes,
     )
-    if final_checkpoint_manifest["digest"] != checkpoint_manifest["digest"]:
+    stable_fields = ("config_sha256", "index_sha256", "files")
+    initial_stability = {
+        "config_sha256": initial_checkpoint_manifest["config_sha256"],
+        "index_sha256": initial_checkpoint_manifest["index_sha256"],
+        "files": [
+            {
+                key: item[key]
+                for key in ("name", "size_bytes", "mtime_ns", "present")
+            }
+            for item in initial_checkpoint_manifest["files"]
+        ],
+    }
+    final_stability = {
+        "config_sha256": final_checkpoint_manifest["config_sha256"],
+        "index_sha256": final_checkpoint_manifest["index_sha256"],
+        "files": [
+            {
+                key: item[key]
+                for key in ("name", "size_bytes", "mtime_ns", "present")
+            }
+            for item in final_checkpoint_manifest["files"]
+        ],
+    }
+    if any(initial_stability[key] != final_stability[key] for key in stable_fields):
         raise RuntimeError("checkpoint files changed during the mapping audit")
+    checkpoint_manifest = final_checkpoint_manifest
 
     report = {
         "model": str(Path(args.model).expanduser().resolve()),

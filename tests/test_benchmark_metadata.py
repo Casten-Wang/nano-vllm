@@ -64,6 +64,23 @@ class BenchmarkMetadataTest(unittest.TestCase):
         self.assertNotEqual(first["config_sha256"], second["config_sha256"])
         self.assertNotEqual(first["digest"], second["digest"])
 
+    def test_checkpoint_manifest_can_hash_regular_shards(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            shard = root / "model.safetensors"
+            shard.write_bytes(b"weights")
+
+            result = module.checkpoint_manifest_metadata(
+                root,
+                hash_shards=True,
+            )
+
+        self.assertEqual(result["strength"], "sha256")
+        self.assertEqual(
+            result["files"][0]["content_sha256"],
+            module.hashlib.sha256(b"weights").hexdigest(),
+        )
+
     def test_checkpoint_manifest_can_describe_index_without_local_shards(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

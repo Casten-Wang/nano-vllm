@@ -215,6 +215,7 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
                         "name": f"model-{index:05d}-of-00014.safetensors",
                         "size_bytes": index,
                         "content_id": f"{index:064x}",
+                        "content_sha256": f"{index:064x}",
                         "present": True,
                     }
                     for index in range(1, 15)

@@ -31,6 +31,7 @@ def args(**overrides):
         "repeats": 3,
         "tp_sizes": (4, 8),
         "checkpoint_audit": True,
+        "verify_checkpoint_shards": True,
         "run_id": "test-run",
         "memory_preflight": True,
         "memory_headroom_gib": 2.0,
@@ -404,6 +405,7 @@ def test_checkpoint_audit_covers_selected_tp_sizes():
     assert command[command.index("--model") + 1] == "/models/qwen35"
     assert command[command.index("--tp-sizes") + 1] == "4,8"
     assert "--require-shards" in command
+    assert "--verify-shard-hashes" in command
     assert command[command.index("--output") + 1].endswith(
         "benchmark_results/matrix/checkpoint_mapping_audit.json"
     )

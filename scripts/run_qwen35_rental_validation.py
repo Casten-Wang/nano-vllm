@@ -98,6 +98,7 @@ def commands(args: argparse.Namespace) -> list[tuple[str, list[str]]]:
                 str(root / "preflight"),
                 "--preflight-only",
                 "--include-moe-candidate",
+                "--verify-checkpoint-shards",
             ],
         )
     ]

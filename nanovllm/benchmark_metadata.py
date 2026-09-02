@@ -19,10 +19,26 @@ def _sha256_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
 
+def _sha256_file(path: Path) -> str:
+    before = path.stat()
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(8 * 1024 * 1024), b""):
+            digest.update(chunk)
+    after = path.stat()
+    if (before.st_size, before.st_mtime_ns) != (
+        after.st_size,
+        after.st_mtime_ns,
+    ):
+        raise RuntimeError(f"checkpoint shard changed while hashing: {path}")
+    return digest.hexdigest()
+
+
 def checkpoint_manifest_metadata(
     model_path: str | Path,
     *,
     require_shards: bool = True,
+    hash_shards: bool = False,
 ) -> dict:
     """Fingerprint checkpoint identity without reading tensor payloads."""
 
@@ -71,6 +87,7 @@ def checkpoint_manifest_metadata(
             and all(character in "0123456789abcdefABCDEF" for character in resolved_name)
             else None
         )
+        content_sha256 = _sha256_file(path) if hash_shards else None
         all_content_addressed &= content_id is not None
         files.append(
             {
@@ -78,10 +95,21 @@ def checkpoint_manifest_metadata(
                 "size_bytes": stat.st_size,
                 "mtime_ns": stat.st_mtime_ns,
                 "content_id": content_id,
+                "content_sha256": content_sha256,
                 "present": True,
             }
         )
     identity_files = (
+        [
+            {
+                "name": item["name"],
+                "size_bytes": item["size_bytes"],
+                "content_sha256": item["content_sha256"],
+            }
+            for item in files
+        ]
+        if hash_shards and not missing_shards
+        else
         [
             {
                 "name": item["name"],
@@ -105,7 +133,11 @@ def checkpoint_manifest_metadata(
         "strength": (
             "index-only"
             if missing_shards
-            else "content-addressed" if all_content_addressed else "metadata-only"
+            else "sha256"
+            if hash_shards
+            else "content-addressed"
+            if all_content_addressed
+            else "metadata-only"
         ),
         "config_sha256": config_sha256,
         "index_sha256": index_sha256,

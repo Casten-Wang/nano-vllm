@@ -67,6 +67,7 @@ def test_commands_are_fail_fast_and_cover_complete_validation_suite():
     )
     assert official[official.index("--tp-sizes") + 1] == "4,8"
     assert "--preflight-only" in stages[1][1]
+    assert "--verify-checkpoint-shards" in stages[1][1]
     assert stages[1][1][stages[1][1].index("--max-model-len") + 1] == "16384"
     assert stages[2][1][stages[2][1].index("--tp-size") + 1] == "4"
     commands = dict(stages)

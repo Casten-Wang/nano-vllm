@@ -196,7 +196,7 @@ def required_paths(
 
 
 def checkpoint_audit_command(args: argparse.Namespace) -> list[str]:
-    return [
+    command = [
         sys.executable,
         str(AUDIT_SCRIPT),
         "--model",
@@ -207,6 +207,9 @@ def checkpoint_audit_command(args: argparse.Namespace) -> list[str]:
         "--output",
         str(Path(args.result_dir) / "checkpoint_mapping_audit.json"),
     ]
+    if args.verify_checkpoint_shards:
+        command.append("--verify-shard-hashes")
+    return command
 
 
 def visible_gpu_count() -> int:
@@ -431,6 +434,7 @@ def parse_args() -> argparse.Namespace:
         description="Run the reproducible Qwen3.5 TP4/TP8 benchmark matrix."
     )
     parser.add_argument("--model", required=True)
+    parser.add_argument("--verify-checkpoint-shards", action="store_true")
     parser.add_argument("--tp-sizes", type=comma_separated_ints, default=(4, 8))
     parser.add_argument("--num-seqs", type=int, default=64)
     parser.add_argument("--input-len", type=int, default=512)

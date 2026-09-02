@@ -614,7 +614,10 @@ def summarize(run_dir: Path, run_id: str) -> dict:
             local_shards[name].get("present") is True
             and local_shards[name].get("size_bytes")
             == official_shards[name].get("size_bytes")
-            and local_shards[name].get("content_id")
+            and (
+                local_shards[name].get("content_sha256")
+                or local_shards[name].get("content_id")
+            )
             == official_shards[name].get("sha256")
             for name in official_shards
         )
