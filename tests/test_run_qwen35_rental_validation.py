@@ -13,6 +13,13 @@ SPEC = spec_from_file_location(
 assert SPEC is not None and SPEC.loader is not None
 MODULE = module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
+SUMMARY_SPEC = spec_from_file_location(
+    "summarize_qwen35_rental_contract",
+    ROOT / "scripts" / "summarize_qwen35_rental.py",
+)
+assert SUMMARY_SPEC is not None and SUMMARY_SPEC.loader is not None
+SUMMARY_MODULE = module_from_spec(SUMMARY_SPEC)
+SUMMARY_SPEC.loader.exec_module(SUMMARY_MODULE)
 
 
 def args():
@@ -108,6 +115,27 @@ def test_commands_are_fail_fast_and_cover_complete_validation_suite():
         "128,1024,3072,8192"
     )
     assert stages[-1][1][-1].endswith("summary.json")
+
+
+def test_attention_commands_match_summary_contract():
+    stages = dict(MODULE.commands(args()))
+    for tp_size in (4, 8):
+        for name, expected_context in (
+            ("short", SUMMARY_MODULE.ATTENTION_SHORT_CONTEXT),
+            ("long", SUMMARY_MODULE.ATTENTION_LONG_CONTEXT),
+        ):
+            command = stages[f"attention-{name}-tp{tp_size}"]
+            def value(flag):
+                return int(command[command.index(flag) + 1])
+
+            assert value("--context-len") == expected_context
+            assert value("--num-heads") == (
+                SUMMARY_MODULE.QWEN35_TOTAL_QUERY_HEADS // tp_size
+            )
+            assert value("--num-kv-heads") == (
+                SUMMARY_MODULE.QWEN35_KV_HEADS_PER_RANK
+            )
+            assert value("--head-dim") == SUMMARY_MODULE.QWEN35_HEAD_DIM
 
 
 @pytest.mark.parametrize("value", ["", "../run", "run id", "a/b"])
