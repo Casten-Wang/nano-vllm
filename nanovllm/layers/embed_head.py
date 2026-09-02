@@ -78,7 +78,31 @@ class ParallelLMHead(VocabParallelEmbedding):
             x = x[last_indices].contiguous()
         logits = F.linear(x, self.weight)
         if self.tp_size > 1:
-            all_logits = [torch.empty_like(logits) for _ in range(self.tp_size)] if self.tp_rank == 0 else None
-            dist.gather(logits, all_logits, 0)
-            logits = torch.cat(all_logits, -1) if self.tp_rank == 0 else None
+            # Gather vocabulary-major shards into one allocation. Transposing
+            # the result exposes the expected [batch, vocabulary] layout as a
+            # view and avoids both a list of full-size shard buffers and the
+            # second full-vocabulary allocation previously created by cat.
+            local_logits = logits.transpose(0, 1).contiguous()
+            if self.tp_rank == 0:
+                gathered_logits = torch.empty(
+                    self.num_embeddings,
+                    logits.shape[0],
+                    dtype=logits.dtype,
+                    device=logits.device,
+                )
+                all_logits = list(
+                    gathered_logits.split(
+                        self.num_embeddings_per_partition,
+                        dim=0,
+                    )
+                )
+            else:
+                gathered_logits = None
+                all_logits = None
+            dist.gather(local_logits, all_logits, 0)
+            logits = (
+                gathered_logits.transpose(0, 1)
+                if gathered_logits is not None
+                else None
+            )
         return logits

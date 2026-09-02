@@ -141,6 +141,27 @@ def test_rotary_benchmark_compares_query_key_output_reuse():
     assert all(item["max_abs_error"] == 0 for item in result["errors"])
 
 
+def test_vocab_gather_layout_benchmark_tracks_avoided_full_copy():
+    args = SimpleNamespace(
+        vocab_size=16,
+        tp_size=4,
+        sampling_batch=3,
+        warmup=0,
+        iterations=1,
+        repeats=1,
+    )
+
+    result = MODULE.benchmark_vocab_gather_layout(
+        args,
+        torch.device("cpu"),
+        torch.bfloat16,
+    )
+
+    assert result["avoided_full_vocab_copy_mib"] == 3 * 16 * 2 / 1024 / 1024
+    assert result["candidate_returns_transpose_view"]
+    assert all(item["max_abs_error"] == 0 for item in result["errors"])
+
+
 def test_decode_convolution_benchmark_tracks_reused_state():
     args = SimpleNamespace(
         decode_batch=4,

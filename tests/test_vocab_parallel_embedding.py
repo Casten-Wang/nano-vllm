@@ -1,9 +1,11 @@
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 import torch
 
-from nanovllm.layers.embed_head import VocabParallelEmbedding
+from nanovllm.layers import embed_head
+from nanovllm.layers.embed_head import ParallelLMHead, VocabParallelEmbedding
 
 
 class TrackingSlice:
@@ -43,3 +45,82 @@ def test_safetensors_loader_rejects_invalid_vocabulary_shape():
 
     with pytest.raises(ValueError, match="invalid vocabulary weight shape"):
         embedding.safetensors_loader(embedding.weight, source)
+
+
+def make_lm_head(rank=0, world_size=2):
+    with (
+        patch("torch.distributed.get_rank", return_value=rank),
+        patch("torch.distributed.get_world_size", return_value=world_size),
+    ):
+        return ParallelLMHead(8, 2)
+
+
+def test_lm_head_gathers_tp_logits_into_one_vocab_buffer():
+    head = make_lm_head()
+    head.weight.data.copy_(torch.tensor([[1.0, 0.0]] * 4))
+    hidden = torch.tensor([[1.0, 0.0], [2.0, 0.0]])
+    remote_logits = torch.tensor(
+        [[10.0, 11.0, 12.0, 13.0], [20.0, 21.0, 22.0, 23.0]]
+    )
+    observed = {}
+
+    def gather(local, gather_list, dst):
+        observed["local_contiguous"] = local.is_contiguous()
+        observed["destinations_contiguous"] = all(
+            tensor.is_contiguous() for tensor in gather_list
+        )
+        gather_list[0].copy_(local)
+        gather_list[1].copy_(remote_logits.transpose(0, 1))
+
+    context = SimpleNamespace(is_mixed=False, is_prefill=False)
+    with (
+        torch.inference_mode(),
+        patch.object(embed_head, "get_context", return_value=context),
+        patch.object(embed_head.dist, "gather", side_effect=gather),
+        patch.object(
+            embed_head.torch,
+            "cat",
+            side_effect=AssertionError("TP logits must not be concatenated"),
+        ),
+    ):
+        logits = head(hidden)
+
+    expected_local = torch.tensor(
+        [[1.0, 1.0, 1.0, 1.0], [2.0, 2.0, 2.0, 2.0]]
+    )
+    torch.testing.assert_close(
+        logits,
+        torch.cat((expected_local, remote_logits), dim=-1),
+    )
+    assert observed == {
+        "local_contiguous": True,
+        "destinations_contiguous": True,
+    }
+    assert not logits.is_contiguous()
+
+
+def test_nonzero_lm_head_rank_does_not_allocate_gather_output():
+    head = make_lm_head(rank=1)
+    context = SimpleNamespace(is_mixed=False, is_prefill=False)
+    observed = {}
+
+    def gather(local, gather_list, dst):
+        observed.update(
+            local_shape=tuple(local.shape),
+            gather_list=gather_list,
+            dst=dst,
+        )
+
+    with (
+        torch.inference_mode(),
+        patch.object(embed_head, "get_context", return_value=context),
+        patch.object(embed_head.dist, "gather", side_effect=gather),
+    ):
+        logits = head(torch.randn(3, 2))
+
+    assert logits is None
+    assert observed == {
+        "local_shape": (4, 3),
+        "gather_list": None,
+        "dst": 0,
+    }

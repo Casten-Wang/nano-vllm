@@ -1314,6 +1314,57 @@ def benchmark_rotary_output_reuse(args, device, dtype) -> dict:
     return result
 
 
+def benchmark_vocab_gather_layout(args, device, dtype) -> dict:
+    if args.vocab_size % args.tp_size:
+        raise ValueError("vocabulary size must divide TP size")
+    local_vocab_size = args.vocab_size // args.tp_size
+    shards = tuple(
+        torch.randn(
+            args.sampling_batch,
+            local_vocab_size,
+            device=device,
+            dtype=dtype,
+        )
+        for _ in range(args.tp_size)
+    )
+
+    def reference():
+        gathered = [shard.clone() for shard in shards]
+        return (torch.cat(gathered, dim=-1),)
+
+    def candidate():
+        gathered = torch.empty(
+            args.vocab_size,
+            args.sampling_batch,
+            device=device,
+            dtype=dtype,
+        )
+        for destination, shard in zip(
+            gathered.split(local_vocab_size, dim=0),
+            shards,
+        ):
+            destination.copy_(shard.transpose(0, 1))
+        return (gathered.transpose(0, 1),)
+
+    result = compare(
+        reference,
+        candidate,
+        device=device,
+        warmup=args.warmup,
+        iterations=args.iterations,
+        repeats=args.repeats,
+    )
+    result["avoided_full_vocab_copy_mib"] = (
+        args.sampling_batch
+        * args.vocab_size
+        * torch.empty((), dtype=dtype).element_size()
+        / 1024
+        / 1024
+    )
+    result["candidate_returns_transpose_view"] = True
+    return result
+
+
 def benchmark_beta_gate(args, device, dtype, local_value_heads: int) -> dict:
     hidden = torch.randn(
         args.router_tokens,
@@ -2305,6 +2356,11 @@ def main() -> None:
                 dtype,
             ),
             "rotary_output_reuse": benchmark_rotary_output_reuse(
+                args,
+                device,
+                dtype,
+            ),
+            "vocab_gather_layout": benchmark_vocab_gather_layout(
                 args,
                 device,
                 dtype,

@@ -942,6 +942,11 @@ def summarize(run_dir: Path, run_id: str) -> dict:
                 result["results"]["rotary_output_reuse"],
                 ("reused_query_key_output_mib",),
             ),
+            "vocab_gather": summarize_buffer_reuse_candidate(
+                result["results"]["vocab_gather_layout"],
+                ("avoided_full_vocab_copy_mib",),
+                {"candidate_returns_transpose_view": True},
+            ),
             "moe_output_merge": summarize_buffer_reuse_candidate(
                 result["results"]["moe_output_buffer_reuse"],
                 (

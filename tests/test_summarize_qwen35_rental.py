@@ -541,6 +541,14 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
                     "errors": [{"max_abs_error": 0.0}],
                     "reused_query_key_output_mib": 4.0,
                 },
+                "vocab_gather_layout": {
+                    "reference": {"peak_extra_mib": 16.0},
+                    "candidate": {"peak_extra_mib": 8.0},
+                    "speedup": 1.05,
+                    "errors": [{"max_abs_error": 0.0}],
+                    "avoided_full_vocab_copy_mib": 8.0,
+                    "candidate_returns_transpose_view": True,
+                },
                 "torch_kv_dequant_buffer_reuse": {
                     "reference": {"peak_extra_mib": 32.0},
                     "candidate": {"peak_extra_mib": 16.0},
@@ -635,6 +643,9 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     assert report["buffer_reuse"]["by_tp"]["tp4"]["rotary_output"][
         "workspace"
     ]["reused_query_key_output_mib"] == 4.0
+    assert report["buffer_reuse"]["by_tp"]["tp4"]["vocab_gather"][
+        "workspace"
+    ]["avoided_full_vocab_copy_mib"] == 8.0
     assert report["buffer_reuse"]["by_tp"]["tp4"]["recurrent_decode"][
         "metadata"
     ]["avoided_full_state_intermediates"] == 2

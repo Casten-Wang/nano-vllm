@@ -269,6 +269,42 @@ class SamplerTest(unittest.TestCase):
 
             self.assertTrue(torch.equal(actual, expected))
 
+    def test_sampling_accepts_vocab_gather_transpose_view(self):
+        sampler = Sampler()
+        contiguous = torch.tensor(
+            [[5.0, 4.0, 3.0, 2.0], [2.0, 3.0, 4.0, 5.0]]
+        )
+        noncontiguous = contiguous.t().contiguous().t()
+        self.assertFalse(noncontiguous.is_contiguous())
+        temperatures = torch.tensor([0.0, 0.8])
+        top_ks = torch.tensor([-1, 3], dtype=torch.int32)
+        top_ps = torch.tensor([1.0, 0.9])
+        metadata = build_sampling_metadata(
+            temperatures.tolist(),
+            top_ks.tolist(),
+            top_ps.tolist(),
+            vocab_size=contiguous.size(1),
+        )
+
+        torch.manual_seed(79)
+        expected = sampler(
+            contiguous,
+            temperatures,
+            top_ks,
+            top_ps,
+            metadata,
+        )
+        torch.manual_seed(79)
+        actual = sampler(
+            noncontiguous,
+            temperatures,
+            top_ks,
+            top_ps,
+            metadata,
+        )
+
+        self.assertTrue(torch.equal(actual, expected))
+
 
 if __name__ == "__main__":
     unittest.main()
