@@ -355,6 +355,40 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
                         "auto": {"float32": 40_000, "model": 36_000},
                         "int8": {"float32": 24_000, "model": 20_000},
                     },
+                    "pd_transfer_components_per_sequence_by_dtype": {
+                        "auto": {
+                            "float32": {
+                                "kv": 8_000,
+                                "kv_scales": 0,
+                                "recurrent": 1_500,
+                                "convolution": 500,
+                                "total": 10_000,
+                            },
+                            "model": {
+                                "kv": 8_000,
+                                "kv_scales": 0,
+                                "recurrent": 500,
+                                "convolution": 500,
+                                "total": 9_000,
+                            },
+                        },
+                        "int8": {
+                            "float32": {
+                                "kv": 4_000,
+                                "kv_scales": 500,
+                                "recurrent": 1_000,
+                                "convolution": 500,
+                                "total": 6_000,
+                            },
+                            "model": {
+                                "kv": 4_000,
+                                "kv_scales": 500,
+                                "recurrent": 0,
+                                "convolution": 500,
+                                "total": 5_000,
+                            },
+                        },
+                    },
                     "kv_capacity_by_dtype": {
                         "auto": {
                             "memory_limited_total_token_slots": 100_000,
@@ -850,6 +884,58 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     write_long_prefill_case(tmp_path)
     write_mixed_case(tmp_path)
     write_pressure_case(tmp_path)
+    for profile_name, kv_dtype, state_dtype, components in (
+        (
+            "auto-float32",
+            "auto",
+            "float32",
+            {
+                "kv": 8_000,
+                "kv_scales": 0,
+                "recurrent": 1_500,
+                "convolution": 500,
+                "total": 10_000,
+            },
+        ),
+        (
+            "int8-model",
+            "int8",
+            "model",
+            {
+                "kv": 4_000,
+                "kv_scales": 500,
+                "recurrent": 0,
+                "convolution": 500,
+                "total": 5_000,
+            },
+        ),
+    ):
+        write(
+            tmp_path / f"pd_transfer/tp4/{profile_name}.json",
+            {
+                "schema_version": 1,
+                "scope": "single-rank synchronous TCP loopback correctness baseline",
+                "profile": {
+                    "memory_preflight": "memory_preflight.json",
+                    "tp_size": 4,
+                    "kv_dtype": kv_dtype,
+                    "state_dtype": state_dtype,
+                },
+                "workload": {
+                    "repeats": 10,
+                    "components_bytes": components,
+                    "payload_frame_bytes_sent": components["total"] + 400,
+                    "receiver_ack_bytes": 1,
+                },
+                "results": {
+                    "latency_ms_samples": [1.0] * 10,
+                    "latency_ms_p50": 1.0,
+                    "latency_ms_p95": 1.0,
+                    "effective_payload_gib_s_p50": 1.0,
+                },
+                "limitations": ["loopback TCP is not cross-node network evidence"],
+            },
+        )
 
     report = MODULE.summarize(tmp_path, run_id)
 
@@ -881,6 +967,17 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     assert report["evidence"]["rotary_storage_matches_preflight"]
     assert report["evidence"]["recurrent_storage_matches_preflight"]
     assert report["evidence"]["kv_storage_matches_preflight"]
+    assert report["evidence"]["pd_transfer_baseline_valid"]
+    assert report["pd_transfer"]["by_tp"]["tp4"]["int8-model"]["valid"]
+    transfer_path = tmp_path / "pd_transfer/tp4/int8-model.json"
+    transfer_result = json.loads(transfer_path.read_text())
+    transfer_result["workload"]["components_bytes"]["kv"] += 1
+    write(transfer_path, transfer_result)
+    invalid_transfer_report = MODULE.summarize(tmp_path, run_id)
+    assert not invalid_transfer_report["evidence"]["pd_transfer_baseline_valid"]
+    assert not invalid_transfer_report["valid"]
+    transfer_result["workload"]["components_bytes"]["kv"] -= 1
+    write(transfer_path, transfer_result)
     assert report["long_prefill"]["by_tp"]["tp4"]["valid"]
     chunk_sweep = report["long_prefill"]["by_tp"]["tp4"]["chunk_sweep"]
     assert chunk_sweep["fastest_chunk_size"] == 64

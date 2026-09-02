@@ -919,6 +919,65 @@ def summarize_memory_preflight(report: dict) -> dict[str, dict]:
     return summaries
 
 
+def summarize_pd_transfer(
+    result: dict,
+    *,
+    expected_tp_size: int,
+    expected_kv_dtype: str,
+    expected_state_dtype: str,
+    expected_components: dict,
+) -> dict:
+    profile = result.get("profile", {})
+    workload = result.get("workload", {})
+    measurements = result.get("results", {})
+    samples = measurements.get("latency_ms_samples", [])
+    repeats = workload.get("repeats")
+    components = workload.get("components_bytes")
+    valid = (
+        result.get("schema_version") == 1
+        and result.get("scope")
+        == "single-rank synchronous TCP loopback correctness baseline"
+        and profile.get("tp_size") == expected_tp_size
+        and profile.get("kv_dtype") == expected_kv_dtype
+        and profile.get("state_dtype") == expected_state_dtype
+        and components == expected_components
+        and isinstance(repeats, int)
+        and repeats >= 2
+        and isinstance(samples, list)
+        and len(samples) == repeats
+        and all(
+            isinstance(value, (int, float))
+            and math.isfinite(value)
+            and value > 0
+            for value in samples
+        )
+        and isinstance(measurements.get("latency_ms_p50"), (int, float))
+        and measurements["latency_ms_p50"] > 0
+        and isinstance(measurements.get("latency_ms_p95"), (int, float))
+        and measurements["latency_ms_p95"] > 0
+        and isinstance(
+            measurements.get("effective_payload_gib_s_p50"),
+            (int, float),
+        )
+        and measurements["effective_payload_gib_s_p50"] > 0
+        and workload.get("receiver_ack_bytes") == 1
+        and workload.get("payload_frame_bytes_sent", 0)
+        > expected_components["total"]
+    )
+    return {
+        "valid": valid,
+        "profile": profile,
+        "components_bytes": components,
+        "repeat_count": len(samples) if isinstance(samples, list) else 0,
+        "latency_ms_p50": measurements.get("latency_ms_p50"),
+        "latency_ms_p95": measurements.get("latency_ms_p95"),
+        "effective_payload_gib_s_p50": measurements.get(
+            "effective_payload_gib_s_p50"
+        ),
+        "limitations": result.get("limitations", []),
+    }
+
+
 def summarize_long_prefill(result: dict, *, expected_tp_size: int) -> dict:
     configuration = result.get("configuration", {})
     configuration_valid = (
@@ -1195,6 +1254,30 @@ def summarize(run_dir: Path, run_id: str) -> dict:
         and local_shards_match_official
     )
     memory_by_tp = summarize_memory_preflight(memory)
+    pd_transfer = {}
+    for tp_name in sorted(expected_tp_names):
+        tp_size = int(tp_name.removeprefix("tp"))
+        expected_profiles = (
+            ("auto", "float32"),
+            ("int8", "model"),
+        )
+        for kv_dtype, state_dtype in expected_profiles:
+            profile_name = f"{kv_dtype}-{state_dtype}"
+            result = load_json(
+                run_dir / "pd_transfer" / tp_name / f"{profile_name}.json"
+            )
+            expected_components = memory["results"][tp_name][
+                "pd_transfer_components_per_sequence_by_dtype"
+            ][kv_dtype][state_dtype]
+            pd_transfer.setdefault(tp_name, {})[profile_name] = (
+                summarize_pd_transfer(
+                    result,
+                    expected_tp_size=tp_size,
+                    expected_kv_dtype=kv_dtype,
+                    expected_state_dtype=state_dtype,
+                    expected_components=expected_components,
+                )
+            )
     def rank_storage_matches(row, field, expected):
         tp_size = row["tensor_parallel_size"]
         ranks = row.get("storage", {}).get(
@@ -1814,6 +1897,14 @@ def summarize(run_dir: Path, run_id: str) -> dict:
         "memory_preflight_valid": (
             memory["valid"] and set(memory_by_tp) == expected_tp_names
         ),
+        "pd_transfer_baseline_valid": (
+            set(pd_transfer) == expected_tp_names
+            and all(
+                set(profiles) == {"auto-float32", "int8-model"}
+                and all(item["valid"] for item in profiles.values())
+                for profiles in pd_transfer.values()
+            )
+        ),
         "rotary_storage_matches_preflight": rotary_storage_matches_preflight,
         "recurrent_storage_matches_preflight": (
             recurrent_storage_matches_preflight
@@ -1948,6 +2039,10 @@ def summarize(run_dir: Path, run_id: str) -> dict:
         },
         "memory": {
             "by_tp": memory_by_tp,
+        },
+        "pd_transfer": {
+            "scope": "single-rank TCP loopback; not cross-node GPU evidence",
+            "by_tp": pd_transfer,
         },
         "quality": {
             "scope": quality["quality_scope"],
