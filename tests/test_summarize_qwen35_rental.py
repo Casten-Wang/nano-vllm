@@ -444,6 +444,14 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
                         "peak_extra_mib": 4.0,
                         "errors_vs_current": {"max_abs_error": 0.01},
                         "reused_weighted_route_mib": 0.25,
+                        "broadcast_route_input": {
+                            "valid": True,
+                            "measured_on_cuda": True,
+                            "speedup_vs_repeated_input": 1.05,
+                            "peak_extra_mib_delta": -0.25,
+                            "errors": {"max_abs_error": 0.0},
+                            "reference": {"median_ms": 1.05},
+                        },
                     }}
                     for batch in ("1", "64")
                 },
@@ -569,6 +577,7 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     assert report["evidence"]["long_prefill_kernel_evidence"]
     assert report["evidence"]["mixed_workload_evidence"]
     assert report["evidence"]["mixed_moe_dispatch_evidence"]
+    assert report["evidence"]["moe_route_input_broadcast_evidence"]
     assert report["evidence"]["normalization_workspace_evidence"]
     assert report["evidence"]["buffer_reuse_evidence"]
     assert report["evidence"]["rotary_storage_matches_preflight"]
@@ -606,6 +615,11 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     assert mixed_dispatch["minimum_speedup_vs_grouped"] == 1.1
     assert mixed_dispatch["maximum_peak_extra_mib_delta"] == 4.0
     assert mixed_dispatch["case_count"] == 1
+    route_input = report["graph_safe_moe"][
+        "route_input_broadcast_by_tp"
+    ]["tp4"]["1"]
+    assert route_input["valid"]
+    assert route_input["speedup_vs_repeated_input"] == 1.05
     runtime = report["graph_safe_moe"]["runtime_by_tp"]["tp4"]["auto"]
     assert runtime["output_digest_matches"]
     assert runtime["throughput_speedup"] == 2.0

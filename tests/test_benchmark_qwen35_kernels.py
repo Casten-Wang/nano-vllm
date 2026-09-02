@@ -375,6 +375,25 @@ def test_graph_safe_batched_decode_matches_multi_token_path():
     torch.testing.assert_close(actual, expected)
 
 
+def test_broadcast_batched_decode_matches_repeated_input_oracle():
+    torch.manual_seed(119)
+    hidden = torch.randn(5, 4)
+    topk_ids = torch.randint(0, 4, (5, 2))
+    topk_weights = torch.rand(5, 2)
+    topk_weights /= topk_weights.sum(dim=-1, keepdim=True)
+    gate_up = torch.randn(4, 6, 4)
+    down = torch.randn(4, 4, 3)
+
+    expected = MODULE.expert_dispatch_batched_repeated_input(
+        hidden, topk_ids, topk_weights, gate_up, down, chunk_size=2
+    )
+    actual = MODULE.expert_dispatch_batched_decode(
+        hidden, topk_ids, topk_weights, gate_up, down, chunk_size=2
+    )
+
+    torch.testing.assert_close(actual, expected)
+
+
 def test_mixed_expert_dispatch_matches_whole_batch_grouped_path():
     torch.manual_seed(127)
     hidden = torch.randn(7, 4)

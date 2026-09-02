@@ -699,6 +699,7 @@ def summarize(run_dir: Path, run_id: str) -> dict:
     normalization = {}
     buffer_reuse = {}
     mixed_moe_dispatch = {}
+    moe_route_input_broadcast = {}
     long_prefill = {}
     mixed_runs = {}
     configured_max_decode_batch = performance["workload"]["max_num_seqs"]
@@ -871,6 +872,10 @@ def summarize(run_dir: Path, run_id: str) -> dict:
         }
         candidate = candidates_by_batch["1"]
         tp_name = path.stem
+        moe_route_input_broadcast[tp_name] = {
+            batch: item["broadcast_route_input"]
+            for batch, item in candidates_by_batch.items()
+        }
         mixed_moe_dispatch[tp_name] = summarize_mixed_moe_dispatch_sweep(
             result["results"]["mixed_expert_dispatch"]
         )
@@ -1216,6 +1221,14 @@ def summarize(run_dir: Path, run_id: str) -> dict:
             set(mixed_moe_dispatch) == expected_tp_names
             and all(item["valid"] for item in mixed_moe_dispatch.values())
         ),
+        "moe_route_input_broadcast_evidence": (
+            set(moe_route_input_broadcast) == expected_tp_names
+            and all(
+                item["valid"]
+                for by_batch in moe_route_input_broadcast.values()
+                for item in by_batch.values()
+            )
+        ),
         "quality_reads_stored_kv": all(
             row["kv_sensitive_token_rows"] > 0 for row in quality["cases"]
         ),
@@ -1298,6 +1311,7 @@ def summarize(run_dir: Path, run_id: str) -> dict:
             "by_tp": kernels,
             "runtime_by_tp": moe_runtime,
             "mixed_dispatch_by_tp": mixed_moe_dispatch,
+            "route_input_broadcast_by_tp": moe_route_input_broadcast,
         },
         "normalization": {
             "by_tp": normalization,

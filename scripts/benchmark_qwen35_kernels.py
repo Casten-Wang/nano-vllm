@@ -625,6 +625,43 @@ def expert_dispatch_batched_decode(
     )
 
 
+def expert_dispatch_batched_repeated_input(
+    hidden_states: torch.Tensor,
+    topk_ids: torch.Tensor,
+    topk_weights: torch.Tensor,
+    gate_up_proj: torch.Tensor,
+    down_proj: torch.Tensor,
+    chunk_size: int = 8,
+) -> torch.Tensor:
+    """Previous batched path that materialized one hidden row per route."""
+
+    output = torch.empty_like(hidden_states)
+    top_k = topk_ids.shape[1]
+    for start in range(0, hidden_states.shape[0], chunk_size):
+        end = min(start + chunk_size, hidden_states.shape[0])
+        expert_ids = topk_ids[start:end].reshape(-1)
+        selected_gate_up = gate_up_proj.index_select(0, expert_ids)
+        route_hidden = (
+            hidden_states[start:end]
+            .unsqueeze(1)
+            .expand(-1, top_k, -1)
+            .reshape(expert_ids.numel(), -1, 1)
+        )
+        gate_up = torch.bmm(selected_gate_up, route_hidden).squeeze(-1)
+        gate, up = gate_up.chunk(2, dim=-1)
+        activated = MOE_DISPATCH.silu_and_mul(gate, up)
+        selected_down = down_proj.index_select(0, expert_ids)
+        expert_output = torch.bmm(
+            selected_down,
+            activated.unsqueeze(-1),
+        ).squeeze(-1)
+        output[start:end] = MOE_DISPATCH.weighted_route_sum(
+            expert_output,
+            topk_weights[start:end],
+        )
+    return output
+
+
 def evaluate_graph_safe_moe_candidate(
     *,
     device_type: str,
@@ -814,6 +851,52 @@ def benchmark_expert_dispatch(args, device, dtype, token_count: int) -> dict:
                 iterations=args.iterations,
                 repeats=args.repeats,
             )
+            repeated_output = expert_dispatch_batched_repeated_input(
+                hidden,
+                topk_ids,
+                topk_weights,
+                gate_up_proj,
+                down_proj,
+                chunk_size,
+            )
+            repeated_timing = measure(
+                lambda chunk_size=chunk_size: (
+                    expert_dispatch_batched_repeated_input(
+                        hidden,
+                        topk_ids,
+                        topk_weights,
+                        gate_up_proj,
+                        down_proj,
+                        chunk_size,
+                    )
+                ),
+                device=device,
+                warmup=args.warmup,
+                iterations=args.iterations,
+                repeats=args.repeats,
+            )
+            broadcast_error = error(graph_safe_output, repeated_output)
+            broadcast_speedup = (
+                repeated_timing["median_ms"] / graph_safe_timing["median_ms"]
+            )
+            broadcast_peak_delta = (
+                graph_safe_timing["peak_extra_mib"]
+                - repeated_timing["peak_extra_mib"]
+            )
+            graph_safe_timing["broadcast_route_input"] = {
+                "valid": (
+                    device.type == "cuda"
+                    and broadcast_speedup >= 1.0
+                    and broadcast_peak_delta <= 0.0
+                    and broadcast_error["max_abs_error"]
+                    <= args.moe_graph_safe_max_abs_error
+                ),
+                "measured_on_cuda": device.type == "cuda",
+                "speedup_vs_repeated_input": broadcast_speedup,
+                "peak_extra_mib_delta": broadcast_peak_delta,
+                "errors": broadcast_error,
+                "reference": repeated_timing,
+            }
             graph_safe_timing.update(
                 {
                     "chunk_size": chunk_size,
