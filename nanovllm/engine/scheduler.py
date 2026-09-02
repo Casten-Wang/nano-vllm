@@ -52,6 +52,7 @@ class Scheduler:
             "prefill_starvation_threshold",
             0,
         )
+        self.preemption_policy = getattr(config, "preemption_policy", "fcfs")
         self.block_manager = BlockManager(config.num_kvcache_blocks, config.kvcache_block_size)
         model_spec = getattr(config, "model_spec", None)
         self.state_manager = (
@@ -167,10 +168,9 @@ class Scheduler:
         while self.running and len(scheduled_seqs) < self.max_num_seqs:
             seq = self.running.popleft()
             while not self.block_manager.can_append(seq):
-                if self.running:
-                    self.preempt(self.running.pop())
-                else:
-                    self.preempt(seq)
+                victim = self.select_preemption_victim(seq)
+                self.preempt(victim)
+                if victim is seq:
                     break
             else:
                 seq.num_scheduled_tokens = 1
@@ -253,10 +253,9 @@ class Scheduler:
         ):
             seq = self.running.popleft()
             while not self.block_manager.can_append(seq):
-                if self.running:
-                    self.preempt(self.running.pop())
-                else:
-                    self.preempt(seq)
+                victim = self.select_preemption_victim(seq)
+                self.preempt(victim)
+                if victim is seq:
                     break
             else:
                 seq.num_scheduled_tokens = 1
@@ -264,6 +263,26 @@ class Scheduler:
                 self.block_manager.may_append(seq)
                 scheduled_seqs.append(seq)
         return scheduled_seqs
+
+    def select_preemption_victim(self, current: Sequence) -> Sequence:
+        """Remove and return the request to evict under the configured policy."""
+
+        if self.preemption_policy == "fcfs":
+            return self.running.pop() if self.running else current
+        if self.preemption_policy != "min_recompute":
+            raise RuntimeError(f"unsupported preemption policy: {self.preemption_policy}")
+        candidates = [current, *self.running]
+        victim = min(
+            candidates,
+            key=lambda seq: (
+                seq.num_cached_tokens,
+                len(seq.block_table),
+                -seq.seq_id,
+            ),
+        )
+        if victim is not current:
+            self.running.remove(victim)
+        return victim
 
     def schedule_prefill_with_budget(self, token_budget: int, seq_budget: int) -> list[Sequence]:
         scheduled_seqs = []

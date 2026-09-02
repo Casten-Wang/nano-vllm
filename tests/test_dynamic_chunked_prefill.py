@@ -25,6 +25,7 @@ class FakeConfig:
     kvcache_block_size: int = 4
     num_kvcache_blocks: int = 32
     enable_dynamic_chunked_prefill: bool = True
+    preemption_policy: str = "fcfs"
 
 
 MANAGED_MODULES = (
@@ -98,7 +99,13 @@ for name, module in SAVED_MODULES.items():
         sys.modules[name] = module
 
 
-def make_scheduler(max_tokens=8, max_seqs=8, block_size=4, num_blocks=32):
+def make_scheduler(
+    max_tokens=8,
+    max_seqs=8,
+    block_size=4,
+    num_blocks=32,
+    preemption_policy="fcfs",
+):
     Sequence.block_size = block_size
     return Scheduler(
         FakeConfig(
@@ -106,6 +113,7 @@ def make_scheduler(max_tokens=8, max_seqs=8, block_size=4, num_blocks=32):
             max_num_batched_tokens=max_tokens,
             kvcache_block_size=block_size,
             num_kvcache_blocks=num_blocks,
+            preemption_policy=preemption_policy,
         )
     )
 
@@ -374,6 +382,35 @@ def test_kv_pressure_workload_preempts_and_eventually_completes():
     assert scheduler.preempted_token_progress > 0
     assert scheduler.reclaimed_kv_blocks > 0
     assert scheduler.block_manager.num_used_blocks == 0
+
+
+def test_min_recompute_preemption_selects_less_advanced_request():
+    scheduler = make_scheduler(preemption_policy="min_recompute")
+    current = Sequence([1] * 20)
+    expensive = Sequence([2] * 16)
+    cheap = Sequence([3] * 4)
+    current.num_cached_tokens = 20
+    expensive.num_cached_tokens = 16
+    cheap.num_cached_tokens = 4
+    scheduler.running.extend((expensive, cheap))
+
+    victim = scheduler.select_preemption_victim(current)
+
+    assert victim is cheap
+    assert list(scheduler.running) == [expensive]
+
+
+def test_min_recompute_tie_preserves_older_request():
+    scheduler = make_scheduler(preemption_policy="min_recompute")
+    older = Sequence([1] * 4)
+    newer = Sequence([2] * 4)
+    older.num_cached_tokens = newer.num_cached_tokens = 4
+    scheduler.running.append(newer)
+
+    victim = scheduler.select_preemption_victim(older)
+
+    assert victim is newer
+    assert not scheduler.running
 
 
 def test_dynamic_prefill_only_result_uses_prefill_mode():

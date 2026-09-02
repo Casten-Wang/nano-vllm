@@ -56,6 +56,7 @@ class Config:
     sliding_window_size: int | None = None
     enable_dynamic_chunked_prefill: bool = False
     prefill_starvation_threshold: int = 0
+    preemption_policy: str = "fcfs"
     int8_partitioned_decode_threshold: int = 8192
     int8_partitioned_decode_partition_size: int = 512
     recurrent_state_dtype: str = "float32"
@@ -95,6 +96,8 @@ class Config:
             raise ValueError("sliding_window_size must be positive when provided")
         if self.prefill_starvation_threshold < 0:
             raise ValueError("prefill_starvation_threshold must be non-negative")
+        if self.preemption_policy not in ("fcfs", "min_recompute"):
+            raise ValueError("preemption_policy must be 'fcfs' or 'min_recompute'")
         if self.int8_partitioned_decode_threshold <= 0:
             raise ValueError("int8_partitioned_decode_threshold must be positive")
         if self.int8_partitioned_decode_partition_size <= 0:

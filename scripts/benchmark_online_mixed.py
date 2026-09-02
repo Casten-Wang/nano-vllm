@@ -78,6 +78,11 @@ def parse_args() -> argparse.Namespace:
             "for waiting prefill work; zero disables the fairness policy."
         ),
     )
+    parser.add_argument(
+        "--preemption-policy",
+        choices=("fcfs", "min_recompute"),
+        default="fcfs",
+    )
     parser.add_argument("--name", default=None)
     parser.add_argument("--result-dir", default="benchmark_results")
     parser.add_argument("--output", type=Path)
@@ -132,6 +137,7 @@ def main() -> None:
         sliding_window_size=args.sliding_window_size,
         enable_dynamic_chunked_prefill=args.enable_dynamic_chunked_prefill,
         prefill_starvation_threshold=args.prefill_starvation_threshold,
+        preemption_policy=args.preemption_policy,
     )
     llm.model_runner.call("reset_execution_stats")
     llm.model_runner.call("reset_shape_trace")
@@ -303,6 +309,7 @@ def main() -> None:
         "sliding_window_size": args.sliding_window_size,
         "enable_dynamic_chunked_prefill": args.enable_dynamic_chunked_prefill,
         "prefill_starvation_threshold": args.prefill_starvation_threshold,
+        "preemption_policy": args.preemption_policy,
         "require_paths": required_paths,
         "injected": injected,
         "expected_requests": expected_requests,
