@@ -721,6 +721,30 @@ class HybridStateContextTest(unittest.TestCase):
             [{"rank": 0, "data_bytes": 20, "scale_bytes": 8, "total_bytes": 28}],
         )
 
+    def test_runtime_buffer_stats_count_shared_pool_once(self):
+        runner = object.__new__(ModelRunner)
+        pool = SimpleNamespace(
+            storage_stats=lambda: {
+                "workspace_bytes": 32,
+                "output_bytes": 8,
+                "total_bytes": 40,
+            }
+        )
+        runner.model = SimpleNamespace(
+            modules=lambda: [
+                SimpleNamespace(int8_partitioned_decode_pool=pool),
+                SimpleNamespace(int8_partitioned_decode_pool=pool),
+                SimpleNamespace(int8_partitioned_decode_pool=None),
+            ]
+        )
+
+        stats = runner.get_runtime_buffer_stats()
+
+        self.assertEqual(stats["int8_partitioned_decode_pool_count"], 1)
+        self.assertEqual(stats["int8_partitioned_workspace_bytes"], 32)
+        self.assertEqual(stats["int8_partitioned_output_bytes"], 8)
+        self.assertEqual(stats["total_bytes_local_rank"], 40)
+
     def test_multi_rank_kv_cache_stats_are_gathered(self):
         runner = object.__new__(ModelRunner)
         runner.rank = 0

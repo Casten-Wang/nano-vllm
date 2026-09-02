@@ -114,6 +114,17 @@ def result(
             for rank in range(4)
         ],
         "recurrent_state_total_all_ranks_bytes": 8192,
+        "runtime_buffer_storage": {
+            "int8_partitioned_decode_pool_count": 1,
+            "int8_partitioned_workspace_bytes": 4096,
+            "int8_partitioned_output_bytes": 512,
+            "total_bytes_local_rank": 4608,
+        },
+        "runtime_buffer_storage_by_rank": [
+            {"rank": rank, "total_bytes_local_rank": 4608}
+            for rank in range(4)
+        ],
+        "runtime_buffer_total_all_ranks_bytes": 18432,
     }
 
 
@@ -267,6 +278,9 @@ def test_repeat_summary_reports_distribution_and_stability():
     assert summary["storage"]["recurrent_state_storage"][
         "rotary_cache_bytes_local_rank"
     ] == 512
+    assert summary["storage"]["runtime_buffer_storage"][
+        "total_bytes_local_rank"
+    ] == 4608
 
 
 def test_matrix_summary_compares_configuration_medians_and_quality():

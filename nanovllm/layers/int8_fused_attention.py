@@ -837,6 +837,24 @@ class PartitionedDecodeBufferPool:
         output = self.output_storage[: q.numel()].view_as(q)
         return (partial_acc, partial_m, partial_l), output
 
+    def storage_stats(self) -> dict[str, int]:
+        workspace_bytes = (
+            0
+            if self.workspace_storage is None
+            else self.workspace_storage.numel()
+            * self.workspace_storage.element_size()
+        )
+        output_bytes = (
+            0
+            if self.output_storage is None
+            else self.output_storage.numel() * self.output_storage.element_size()
+        )
+        return {
+            "workspace_bytes": workspace_bytes,
+            "output_bytes": output_bytes,
+            "total_bytes": workspace_bytes + output_bytes,
+        }
+
 
 def validate_partitioned_workspace(
     workspace: tuple[torch.Tensor, torch.Tensor, torch.Tensor],

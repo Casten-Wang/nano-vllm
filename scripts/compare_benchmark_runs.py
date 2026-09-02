@@ -56,6 +56,9 @@ STORAGE_FIELDS = (
     "recurrent_state_storage",
     "recurrent_state_storage_by_rank",
     "recurrent_state_total_all_ranks_bytes",
+    "runtime_buffer_storage",
+    "runtime_buffer_storage_by_rank",
+    "runtime_buffer_total_all_ranks_bytes",
 )
 
 LATENCY_METRIC_NAMES = (

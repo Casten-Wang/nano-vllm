@@ -110,6 +110,13 @@ class PartitionedWorkspaceTest(unittest.TestCase):
         )
         self.assertEqual(same_output.untyped_storage().data_ptr(), first_output_ptr)
 
+        stats = pool.storage_stats()
+        self.assertEqual(
+            stats["total_bytes"],
+            stats["workspace_bytes"] + stats["output_bytes"],
+        )
+        self.assertEqual(stats["output_bytes"], q.numel() * q.element_size())
+
     def test_partial_workspace_views_share_one_allocation(self):
         q = torch.empty(2, 3, 4)
         num_partitions = 5

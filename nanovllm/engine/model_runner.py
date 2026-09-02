@@ -327,6 +327,32 @@ class ModelRunner:
         dist.all_gather_object(gathered, local)
         return gathered
 
+    def get_runtime_buffer_stats(self):
+        pools = {}
+        for module in self.model.modules():
+            pool = getattr(module, "int8_partitioned_decode_pool", None)
+            if pool is not None:
+                pools[id(pool)] = pool
+        stats = [pool.storage_stats() for pool in pools.values()]
+        return {
+            "int8_partitioned_decode_pool_count": len(stats),
+            "int8_partitioned_workspace_bytes": sum(
+                item["workspace_bytes"] for item in stats
+            ),
+            "int8_partitioned_output_bytes": sum(
+                item["output_bytes"] for item in stats
+            ),
+            "total_bytes_local_rank": sum(item["total_bytes"] for item in stats),
+        }
+
+    def get_runtime_buffer_stats_by_rank(self):
+        local = {"rank": self.rank, **self.get_runtime_buffer_stats()}
+        if self.world_size == 1:
+            return [local]
+        gathered = [None] * self.world_size
+        dist.all_gather_object(gathered, local)
+        return gathered
+
     def get_kv_cache_stats_by_rank(self):
         scale = getattr(self, "kv_scale", None)
         data_bytes = self.kv_cache.numel() * self.kv_cache.element_size()
