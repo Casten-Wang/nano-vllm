@@ -749,6 +749,12 @@ class HybridStateContextTest(unittest.TestCase):
                 ),
             ]
         )
+        runner.sampler = SimpleNamespace(
+            storage_stats=lambda: {
+                "rank_buffer_bytes": 4,
+                "noise_buffer_bytes": 8,
+            }
+        )
 
         stats = runner.get_runtime_buffer_stats()
 
@@ -757,7 +763,9 @@ class HybridStateContextTest(unittest.TestCase):
         self.assertEqual(stats["int8_partitioned_output_bytes"], 8)
         self.assertEqual(stats["int8_dequant_pool_count"], 1)
         self.assertEqual(stats["int8_dequant_buffer_bytes"], 24)
-        self.assertEqual(stats["total_bytes_local_rank"], 64)
+        self.assertEqual(stats["sampling_rank_buffer_bytes"], 4)
+        self.assertEqual(stats["sampling_noise_buffer_bytes"], 8)
+        self.assertEqual(stats["total_bytes_local_rank"], 76)
 
     def test_multi_rank_kv_cache_stats_are_gathered(self):
         runner = object.__new__(ModelRunner)

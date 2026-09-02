@@ -261,6 +261,7 @@ def sample_top_k_compact(
     max_top_k: int,
     any_top_p_enabled: bool,
     rank_buffer: torch.Tensor | None = None,
+    noise_buffer: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Sample from top-k candidates without materializing FP32 full logits."""
 
@@ -274,8 +275,13 @@ def sample_top_k_compact(
         rank_buffer,
     )
     probabilities = torch.softmax(selected_logits, dim=-1)
+    noise = (
+        torch.empty_like(probabilities)
+        if noise_buffer is None
+        else noise_buffer
+    )
     selected_offsets = probabilities.div_(
-        torch.empty_like(probabilities).exponential_(1).clamp_min_(1e-10)
+        noise.exponential_(1).clamp_min_(1e-10)
     ).argmax(dim=-1)
     return selected_indices.gather(1, selected_offsets.unsqueeze(1)).squeeze(1)
 
@@ -289,11 +295,46 @@ class Sampler(nn.Module):
             torch.empty(0, dtype=torch.long),
             persistent=False,
         )
+        self.register_buffer(
+            "_noise_buffer",
+            torch.empty(0),
+            persistent=False,
+        )
 
     def _ranks(self, width: int, device: torch.device) -> torch.Tensor:
         if self._rank_buffer.device != device or self._rank_buffer.numel() < width:
             self._rank_buffer = torch.arange(width, device=device)
         return self._rank_buffer
+
+    def _noise(
+        self,
+        shape: tuple[int, int],
+        *,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> torch.Tensor:
+        required = shape[0] * shape[1]
+        if (
+            self._noise_buffer.device != device
+            or self._noise_buffer.dtype != dtype
+            or self._noise_buffer.numel() < required
+        ):
+            self._noise_buffer = torch.empty(
+                required,
+                dtype=dtype,
+                device=device,
+            )
+        return self._noise_buffer[:required].view(shape)
+
+    def storage_stats(self) -> dict[str, int]:
+        return {
+            "rank_buffer_bytes": (
+                self._rank_buffer.numel() * self._rank_buffer.element_size()
+            ),
+            "noise_buffer_bytes": (
+                self._noise_buffer.numel() * self._noise_buffer.element_size()
+            ),
+        }
 
     def forward(
         self,
@@ -384,6 +425,11 @@ class Sampler(nn.Module):
                 max_top_k,
                 any_top_p_enabled,
                 self._ranks(max_top_k, logits.device),
+                self._noise(
+                    (sample_source.size(0), max_top_k),
+                    dtype=torch.float32,
+                    device=logits.device,
+                ),
             )
             if all_sampling:
                 return sample_tokens
@@ -410,7 +456,11 @@ class Sampler(nn.Module):
         )
         probs = torch.softmax(sample_logits, dim=-1)
         sample_tokens = probs.div_(
-            torch.empty_like(probs).exponential_(1).clamp_min_(1e-10)
+            self._noise(
+                (probs.size(0), probs.size(1)),
+                dtype=probs.dtype,
+                device=probs.device,
+            ).exponential_(1).clamp_min_(1e-10)
         ).argmax(dim=-1)
         if all_sampling:
             return sample_tokens

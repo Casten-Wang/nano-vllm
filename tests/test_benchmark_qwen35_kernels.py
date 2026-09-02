@@ -200,6 +200,27 @@ def test_sampling_input_benchmark_tracks_persistent_storage():
     assert result["errors"][0]["max_abs_error"] <= 1e-7
 
 
+def test_sampling_noise_benchmark_tracks_reused_storage():
+    args = SimpleNamespace(
+        sampling_batch=4,
+        sampling_top_k=3,
+        seed=47,
+        warmup=0,
+        iterations=1,
+        repeats=1,
+    )
+
+    result = MODULE.benchmark_sampling_noise_reuse(
+        args,
+        torch.device("cpu"),
+    )
+
+    assert result["errors"][0]["max_abs_error"] == 0
+    assert result["eliminated_tensor_allocations_per_sampling_step"] == 1
+    assert result["persistent_sampling_noise_mib"] == 4 * 3 * 4 / 1024 / 1024
+    assert result["candidate_reuses_noise_storage"]
+
+
 def test_gated_delta_packed_projection_replaces_three_gemms():
     args = SimpleNamespace(
         decode_batch=2,

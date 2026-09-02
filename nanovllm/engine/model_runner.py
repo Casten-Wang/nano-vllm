@@ -343,6 +343,8 @@ class ModelRunner:
         ]
         partitioned_total = sum(item["total_bytes"] for item in stats)
         dequant_total = sum(item["total_bytes"] for item in dequant_stats)
+        sampler_stats = self.sampler.storage_stats()
+        sampler_total = sum(sampler_stats.values())
         return {
             "int8_partitioned_decode_pool_count": len(stats),
             "int8_partitioned_workspace_bytes": sum(
@@ -353,7 +355,11 @@ class ModelRunner:
             ),
             "int8_dequant_pool_count": len(dequant_stats),
             "int8_dequant_buffer_bytes": dequant_total,
-            "total_bytes_local_rank": partitioned_total + dequant_total,
+            "sampling_rank_buffer_bytes": sampler_stats["rank_buffer_bytes"],
+            "sampling_noise_buffer_bytes": sampler_stats["noise_buffer_bytes"],
+            "total_bytes_local_rank": (
+                partitioned_total + dequant_total + sampler_total
+            ),
         }
 
     def get_runtime_buffer_stats_by_rank(self):

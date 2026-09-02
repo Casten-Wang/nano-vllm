@@ -659,6 +659,55 @@ def benchmark_sampling_input_reuse(args, device, dtype) -> dict:
     return result
 
 
+def benchmark_sampling_noise_reuse(args, device) -> dict:
+    shape = (args.sampling_batch, args.sampling_top_k)
+    sampler = SAMPLER.Sampler()
+    candidate_noise = sampler._noise(
+        shape,
+        dtype=torch.float32,
+        device=device,
+    )
+
+    def reference():
+        return (torch.empty(shape, dtype=torch.float32, device=device).exponential_(1),)
+
+    def candidate():
+        return (candidate_noise.exponential_(1),)
+
+    torch.manual_seed(args.seed)
+    expected = reference()[0].clone()
+    torch.manual_seed(args.seed)
+    actual = candidate()[0].clone()
+    result = {
+        "reference": measure(
+            reference,
+            device=device,
+            warmup=args.warmup,
+            iterations=args.iterations,
+            repeats=args.repeats,
+        ),
+        "candidate": measure(
+            candidate,
+            device=device,
+            warmup=args.warmup,
+            iterations=args.iterations,
+            repeats=args.repeats,
+        ),
+        "errors": [error(actual, expected)],
+        "eliminated_tensor_allocations_per_sampling_step": 1,
+        "persistent_sampling_noise_mib": (
+            candidate_noise.numel() * candidate_noise.element_size()
+            / 1024
+            / 1024
+        ),
+        "candidate_reuses_noise_storage": True,
+    }
+    result["speedup"] = (
+        result["reference"]["median_ms"] / result["candidate"]["median_ms"]
+    )
+    return result
+
+
 def benchmark_packed_block_metadata_reuse(args, device) -> dict:
     block_size = 256
     sequence_count = args.sampling_batch
@@ -3316,6 +3365,10 @@ def main() -> None:
                 args,
                 device,
                 dtype,
+            ),
+            "sampling_noise_buffer_reuse": benchmark_sampling_noise_reuse(
+                args,
+                device,
             ),
             "packed_block_metadata_buffer_reuse": (
                 benchmark_packed_block_metadata_reuse(args, device)

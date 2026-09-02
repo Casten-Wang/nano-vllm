@@ -1921,6 +1921,14 @@ def summarize(run_dir: Path, run_id: str) -> dict:
                 ),
                 {"candidate_reuses_host_device_storage": True},
             ),
+            "sampling_noise": summarize_buffer_reuse_candidate(
+                result["results"]["sampling_noise_buffer_reuse"],
+                ("persistent_sampling_noise_mib",),
+                {
+                    "eliminated_tensor_allocations_per_sampling_step": 1,
+                    "candidate_reuses_noise_storage": True,
+                },
+            ),
             "packed_block_metadata": summarize_buffer_reuse_candidate(
                 result["results"]["packed_block_metadata_buffer_reuse"],
                 ("persistent_metadata_buffers_mib",),

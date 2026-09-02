@@ -444,6 +444,29 @@ class SamplerTest(unittest.TestCase):
 
         self.assertEqual(sampler._rank_buffer.data_ptr(), storage)
 
+    def test_sampler_reuses_random_noise_buffer_across_steps(self):
+        sampler = Sampler()
+        logits = torch.tensor([[1.0, 4.0, 3.0, 2.0]])
+        temperatures = torch.ones(1)
+        top_ks = torch.tensor([3], dtype=torch.int32)
+        top_ps = torch.ones(1)
+        metadata = build_sampling_metadata(
+            temperatures.tolist(),
+            top_ks.tolist(),
+            top_ps.tolist(),
+            vocab_size=logits.size(1),
+        )
+
+        sampler(logits, temperatures, top_ks, top_ps, metadata)
+        storage = sampler._noise_buffer.data_ptr()
+        sampler(logits, temperatures, top_ks, top_ps, metadata)
+
+        self.assertEqual(sampler._noise_buffer.data_ptr(), storage)
+        self.assertEqual(
+            sampler.storage_stats()["noise_buffer_bytes"],
+            3 * torch.empty((), dtype=torch.float32).element_size(),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
