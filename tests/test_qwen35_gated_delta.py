@@ -548,6 +548,28 @@ def test_state_pool_isolates_updates_and_resets_reused_slots():
     assert torch.count_nonzero(pool.recurrent[0, 1]) > 0
 
 
+def test_state_pool_contiguous_get_returns_writable_cache_views():
+    pool = Qwen35RecurrentStatePool(1, 4, 2, 3, 4, 5, 2, device="cpu")
+
+    recurrent, convolution = pool.get_contiguous(0, 1, 2)
+    recurrent.add_(1)
+    convolution.add_(2)
+
+    assert recurrent.data_ptr() == pool.recurrent[0, 1].data_ptr()
+    assert convolution.data_ptr() == pool.convolution[0, 1].data_ptr()
+    assert torch.count_nonzero(pool.recurrent[0, 0]) == 0
+    assert torch.all(pool.recurrent[0, 1:3] == 1)
+    assert torch.all(pool.convolution[0, 1:3] == 2)
+
+
+@pytest.mark.parametrize("start,count", [(-1, 1), (0, 0), (3, 2)])
+def test_state_pool_rejects_invalid_contiguous_spans(start, count):
+    pool = Qwen35RecurrentStatePool(1, 4, 2, 3, 4, 5, 2, device="cpu")
+
+    with pytest.raises(ValueError, match="contiguous state span is out of bounds"):
+        pool.get_contiguous(0, start, count)
+
+
 def test_state_pool_can_store_recurrent_state_in_model_dtype():
     pool = Qwen35RecurrentStatePool(
         2,
@@ -1141,6 +1163,85 @@ def test_decode_padding_scratch_slot_does_not_change_real_states():
     )
 
 
+def test_contiguous_decode_updates_state_cache_without_gather_scatter():
+    torch.manual_seed(31)
+    layer = make_layer()
+    layer.allocate_state_cache(4, "cpu")
+    for parameter in layer.parameters():
+        parameter.data.normal_(mean=0.0, std=0.2)
+    hidden = torch.randn(2, 4)
+    context = SimpleNamespace(
+        is_mixed=False,
+        is_prefill=False,
+        state_slots=torch.tensor([1, 2], dtype=torch.int64),
+        state_reset_mask=torch.tensor([True, True]),
+        state_token_ranges=(),
+        decode_state_span=(1, 2),
+    )
+    context_module = types.ModuleType("nanovllm.utils.context")
+    context_module.get_context = lambda: context
+
+    with (
+        torch.inference_mode(),
+        patch.dict(sys.modules, {"nanovllm.utils.context": context_module}),
+        patch.object(
+            layer.state_pool,
+            "get_contiguous",
+            wraps=layer.state_pool.get_contiguous,
+        ) as get_contiguous,
+        patch.object(layer.state_pool, "update", wraps=layer.state_pool.update) as update,
+    ):
+        contiguous_output = layer(hidden)
+
+    assert get_contiguous.call_count == 1
+    assert update.call_count == 0
+    contiguous_state = layer.state_pool.recurrent[:, 1:3].clone()
+
+    layer.state_pool.reset(torch.tensor([1, 2]))
+    context.decode_state_span = None
+    with (
+        torch.inference_mode(),
+        patch.dict(sys.modules, {"nanovllm.utils.context": context_module}),
+    ):
+        indexed_output = layer(hidden)
+
+    torch.testing.assert_close(contiguous_output, indexed_output)
+    torch.testing.assert_close(
+        contiguous_state,
+        layer.state_pool.recurrent[:, 1:3],
+    )
+
+
+def test_compressed_contiguous_decode_keeps_conversion_writeback():
+    layer = make_layer()
+    layer.allocate_state_cache(
+        2,
+        "cpu",
+        recurrent_dtype=torch.bfloat16,
+    )
+    context = SimpleNamespace(
+        is_mixed=False,
+        is_prefill=False,
+        state_slots=torch.tensor([0], dtype=torch.int64),
+        state_reset_mask=torch.tensor([True]),
+        state_token_ranges=(),
+        decode_state_span=(0, 1),
+    )
+    context_module = types.ModuleType("nanovllm.utils.context")
+    context_module.get_context = lambda: context
+
+    with (
+        torch.inference_mode(),
+        patch.dict(sys.modules, {"nanovllm.utils.context": context_module}),
+        patch.object(layer.state_pool, "get", wraps=layer.state_pool.get) as get,
+        patch.object(layer.state_pool, "update", wraps=layer.state_pool.update) as update,
+    ):
+        layer(torch.randn(1, 4))
+
+    assert get.call_count == 1
+    assert update.call_count == 1
+
+
 def test_gated_delta_reuses_precomputed_reset_slots():
     layer = make_layer()
     layer.allocate_state_cache(1, "cpu")
@@ -1186,12 +1287,19 @@ def test_gated_delta_reuses_beta_projection_during_inference():
     original_softplus = qwen35_gated_delta.F.softplus
     observed = {}
 
-    def capture_beta(mixed_qkv, z, beta, log_decay, slots):
+    def capture_beta(mixed_qkv, z, beta, log_decay, slots, state_span=None):
         observed["same_storage"] = beta.data_ptr() == projected_beta.data_ptr()
         observed["decay_reuses_softplus"] = (
             log_decay.data_ptr() == observed["softplus_output"]
         )
-        return original_decode(mixed_qkv, z, beta, log_decay, slots)
+        return original_decode(
+            mixed_qkv,
+            z,
+            beta,
+            log_decay,
+            slots,
+            state_span,
+        )
 
     def capture_softplus(value):
         result = original_softplus(value)

@@ -90,6 +90,7 @@ class Context:
     state_reset_slots: torch.Tensor | None = None
     state_token_ranges: tuple[tuple[int, int], ...] = ()
     state_prefill_groups: tuple[StatePrefillGroup, ...] = ()
+    decode_state_span: tuple[int, int] | None = None
 
 _CONTEXT = Context()
 
@@ -127,6 +128,7 @@ def set_context(
     state_slots=None,
     state_reset_mask=None,
     state_token_ranges=(),
+    decode_state_span=None,
 ):
     global _CONTEXT
     state_prefill_groups = build_state_prefill_groups(
@@ -171,6 +173,7 @@ def set_context(
         state_reset_slots=state_reset_slots,
         state_token_ranges=state_token_ranges,
         state_prefill_groups=state_prefill_groups,
+        decode_state_span=decode_state_span,
     )
 
 def reset_context():

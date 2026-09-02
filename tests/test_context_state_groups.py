@@ -33,6 +33,7 @@ def test_set_context_precomputes_recurrent_prefill_groups():
             state_slots=torch.tensor([3, 8], dtype=torch.int32),
             state_reset_mask=torch.tensor([False, True]),
             state_token_ranges=((1, 4),),
+            decode_state_span=(3, 1),
         )
 
         assert get_context().state_prefill_groups[0][0] == 3
@@ -44,6 +45,7 @@ def test_set_context_precomputes_recurrent_prefill_groups():
             get_context().state_reset_slots,
             torch.tensor([8], dtype=torch.int32),
         )
+        assert get_context().decode_state_span == (3, 1)
     finally:
         reset_context()
 

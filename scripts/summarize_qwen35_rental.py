@@ -941,6 +941,14 @@ def summarize(run_dir: Path, run_id: str) -> dict:
                     "candidate_gemm_launches": 1,
                 },
             ),
+            "contiguous_decode_state": summarize_buffer_reuse_candidate(
+                result["results"]["contiguous_decode_state"],
+                (
+                    "avoided_state_gather_mib",
+                    "avoided_state_scatter_mib",
+                ),
+                {"candidate_uses_cache_views": True},
+            ),
             "sampling_greedy_precision": summarize_buffer_reuse_candidate(
                 result["results"]["greedy_sampler_precision_fast_path"],
                 ("avoided_fp32_logits_mib",),

@@ -669,6 +669,22 @@ class ModelRunner:
             pin_memory=True,
         ).cuda(non_blocking=True)
 
+    def contiguous_state_span(
+        self,
+        seqs: list[Sequence],
+    ) -> tuple[int, int] | None:
+        model_spec = self.config.model_spec
+        if model_spec is None or not model_spec.is_hybrid or not seqs:
+            return None
+        slots = [
+            warmup_slot if seq.state_slot is None else seq.state_slot
+            for warmup_slot, seq in enumerate(seqs)
+        ]
+        start = slots[0]
+        if slots == list(range(start, start + len(slots))):
+            return start, len(slots)
+        return None
+
     def prepare_state_reset_mask(self, seqs: list[Sequence]):
         model_spec = self.config.model_spec
         if model_spec is None or not model_spec.is_hybrid:
@@ -847,6 +863,7 @@ class ModelRunner:
             state_slots=self.prepare_state_slots(seqs),
             state_reset_mask=self.prepare_state_reset_mask(seqs),
             state_token_ranges=(),
+            decode_state_span=self.contiguous_state_span(seqs),
         )
 
     def prepare_decode(self, seqs: list[Sequence]):
@@ -886,6 +903,7 @@ class ModelRunner:
             state_slots=self.prepare_state_slots(seqs),
             state_reset_mask=self.prepare_state_reset_mask(seqs),
             state_token_ranges=(),
+            decode_state_span=self.contiguous_state_span(seqs),
         )
         return input_ids, positions
 
@@ -939,6 +957,7 @@ class ModelRunner:
                 )
                 for start, end in prefill["state_token_ranges"]
             ),
+            decode_state_span=decode.get("decode_state_span"),
         )
         return input_ids, positions
 

@@ -1576,6 +1576,66 @@ def benchmark_attention_packed_qkv(
     return result
 
 
+def benchmark_contiguous_decode_state(
+    args,
+    device,
+    dtype,
+    local_value_heads: int,
+    local_conv_channels: int,
+) -> dict:
+    state_shape = (
+        args.decode_batch,
+        local_value_heads,
+        args.key_head_dim,
+        args.value_head_dim,
+    )
+    conv_shape = (
+        args.decode_batch,
+        local_conv_channels,
+        args.conv_kernel_size,
+    )
+    indexed_state = torch.zeros(state_shape, device=device, dtype=torch.float32)
+    indexed_conv = torch.zeros(conv_shape, device=device, dtype=dtype)
+    view_state = indexed_state.clone()
+    view_conv = indexed_conv.clone()
+    slots = torch.arange(args.decode_batch, device=device)
+    state_delta = torch.randn_like(indexed_state)
+    conv_delta = torch.randn_like(indexed_conv)
+
+    def reference():
+        recurrent = indexed_state[slots]
+        convolution = indexed_conv[slots]
+        recurrent.add_(state_delta)
+        convolution.add_(conv_delta)
+        indexed_state[slots] = recurrent
+        indexed_conv[slots] = convolution
+        return recurrent, convolution
+
+    def candidate():
+        recurrent = view_state.narrow(0, 0, args.decode_batch)
+        convolution = view_conv.narrow(0, 0, args.decode_batch)
+        recurrent.add_(state_delta)
+        convolution.add_(conv_delta)
+        return recurrent, convolution
+
+    result = compare(
+        reference,
+        candidate,
+        device=device,
+        warmup=args.warmup,
+        iterations=args.iterations,
+        repeats=args.repeats,
+    )
+    gathered_bytes = (
+        indexed_state.numel() * indexed_state.element_size()
+        + indexed_conv.numel() * indexed_conv.element_size()
+    )
+    result["avoided_state_gather_mib"] = gathered_bytes / 1024 / 1024
+    result["avoided_state_scatter_mib"] = gathered_bytes / 1024 / 1024
+    result["candidate_uses_cache_views"] = True
+    return result
+
+
 def benchmark_decay_rate(args, device, dtype, local_value_heads: int) -> dict:
     hidden = torch.randn(
         args.router_tokens,
@@ -2577,6 +2637,13 @@ def main() -> None:
                 dtype,
                 local_query_heads,
                 local_kv_heads,
+            ),
+            "contiguous_decode_state": benchmark_contiguous_decode_state(
+                args,
+                device,
+                dtype,
+                local_value_heads,
+                local_conv_channels,
             ),
             "gated_delta_decay_rate_precompute": benchmark_decay_rate(
                 args,

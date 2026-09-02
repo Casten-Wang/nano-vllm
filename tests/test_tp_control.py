@@ -474,6 +474,22 @@ class HybridStateContextTest(unittest.TestCase):
 
         self.assertFalse(runner.supports_cudagraph())
 
+    def test_contiguous_state_span_is_derived_without_device_reads(self):
+        runner = self.make_hybrid_runner()
+        contiguous = [
+            SimpleNamespace(state_slot=3),
+            SimpleNamespace(state_slot=4),
+            SimpleNamespace(state_slot=5),
+        ]
+        interleaved = [
+            SimpleNamespace(state_slot=3),
+            SimpleNamespace(state_slot=5),
+        ]
+
+        self.assertEqual(runner.contiguous_state_span(contiguous), (3, 3))
+        self.assertIsNone(runner.contiguous_state_span(interleaved))
+        self.assertIsNone(runner.contiguous_state_span([]))
+
     def test_hybrid_model_enables_graph_safe_decode(self):
         runner = self.make_hybrid_runner()
         runner.enforce_eager = False

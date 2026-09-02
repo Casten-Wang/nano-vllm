@@ -589,6 +589,19 @@ class Qwen35RecurrentStatePool:
     def get(self, layer: int, slots: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         return self.recurrent[layer, slots], self.convolution[layer, slots]
 
+    def get_contiguous(
+        self,
+        layer: int,
+        start: int,
+        count: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if start < 0 or count <= 0 or start + count > self.recurrent.shape[1]:
+            raise ValueError("contiguous state span is out of bounds")
+        return (
+            self.recurrent[layer].narrow(0, start, count),
+            self.convolution[layer].narrow(0, start, count),
+        )
+
     def update(
         self,
         layer: int,
@@ -881,9 +894,21 @@ class Qwen35GatedDeltaNet(nn.Module):
         beta: torch.Tensor,
         log_decay: torch.Tensor,
         slots: torch.Tensor,
+        state_span: tuple[int, int] | None = None,
     ) -> torch.Tensor:
         assert self.state_pool is not None
-        recurrent_state, conv_state = self.state_pool.get(0, slots)
+        reuse_cached_state = (
+            state_span is not None
+            and not torch.is_grad_enabled()
+            and self.state_pool.recurrent.dtype == torch.float32
+        )
+        if reuse_cached_state:
+            recurrent_state, conv_state = self.state_pool.get_contiguous(
+                0,
+                *state_span,
+            )
+        else:
+            recurrent_state, conv_state = self.state_pool.get(0, slots)
         convolved, conv_state = causal_conv1d_step(
             mixed_qkv,
             conv_state,
@@ -908,7 +933,8 @@ class Qwen35GatedDeltaNet(nn.Module):
             recurrent_state,
             inplace_state=True,
         )
-        self.state_pool.update(0, slots, recurrent_state, conv_state)
+        if not reuse_cached_state:
+            self.state_pool.update(0, slots, recurrent_state, conv_state)
         return self.norm(
             output.reshape(-1, self.value_head_dim),
             z.reshape(-1, self.value_head_dim),
@@ -1020,6 +1046,7 @@ class Qwen35GatedDeltaNet(nn.Module):
                 beta[:decode_count],
                 log_decay[:decode_count],
                 decode_slots,
+                getattr(context, "decode_state_span", None),
             )
 
         prefill_groups = getattr(context, "state_prefill_groups", None)

@@ -149,6 +149,32 @@ def test_attention_packed_qkv_replaces_three_gemms_and_tracks_key_copy():
     assert all(item["max_abs_error"] <= 1e-6 for item in result["errors"])
 
 
+def test_contiguous_decode_state_benchmark_tracks_avoided_copy():
+    args = SimpleNamespace(
+        decode_batch=2,
+        key_head_dim=3,
+        value_head_dim=4,
+        conv_kernel_size=2,
+        warmup=0,
+        iterations=1,
+        repeats=1,
+    )
+
+    result = MODULE.benchmark_contiguous_decode_state(
+        args,
+        torch.device("cpu"),
+        torch.bfloat16,
+        local_value_heads=2,
+        local_conv_channels=5,
+    )
+
+    expected_bytes = 2 * 2 * 3 * 4 * 4 + 2 * 5 * 2 * 2
+    assert result["avoided_state_gather_mib"] == expected_bytes / 1024 / 1024
+    assert result["avoided_state_scatter_mib"] == expected_bytes / 1024 / 1024
+    assert result["candidate_uses_cache_views"]
+    assert all(item["max_abs_error"] == 0 for item in result["errors"])
+
+
 def test_greedy_sampler_benchmark_tracks_avoided_fp32_logits():
     args = SimpleNamespace(
         sampling_batch=4,
