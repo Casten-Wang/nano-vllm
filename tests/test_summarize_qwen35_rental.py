@@ -359,6 +359,13 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
                     }
                     for name in ("unfiltered", "top_k", "top_k_top_p")
                 },
+                "greedy_sampler_precision_fast_path": {
+                    "reference": {"peak_extra_mib": 128.0},
+                    "candidate": {"peak_extra_mib": 0.0},
+                    "speedup": 2.0,
+                    "errors": [{"max_abs_error": 0.0}],
+                    "avoided_fp32_logits_mib": 64.0,
+                },
                 "router_topk_first": {
                     "reference": {"peak_extra_mib": 2.0},
                     "candidate": {"peak_extra_mib": 1.0},

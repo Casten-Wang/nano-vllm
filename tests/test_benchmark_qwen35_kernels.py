@@ -63,6 +63,25 @@ def test_sampling_filter_benchmark_covers_unfiltered_and_top_k_paths():
     assert all(item["errors"][0]["max_abs_error"] == 0 for item in result.values())
 
 
+def test_greedy_sampler_benchmark_tracks_avoided_fp32_logits():
+    args = SimpleNamespace(
+        sampling_batch=4,
+        vocab_size=16,
+        warmup=0,
+        iterations=1,
+        repeats=1,
+    )
+
+    result = MODULE.benchmark_greedy_sampler(
+        args,
+        torch.device("cpu"),
+        torch.bfloat16,
+    )
+
+    assert result["avoided_fp32_logits_mib"] == 4 * 16 * 2 / 1024 / 1024
+    assert result["errors"][0]["max_abs_error"] == 0
+
+
 def test_router_benchmark_reuses_selected_logits_for_probabilities():
     args = SimpleNamespace(
         router_tokens=8,

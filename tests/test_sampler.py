@@ -155,6 +155,31 @@ class SamplerTest(unittest.TestCase):
 
         self.assertTrue(torch.equal(actual, torch.tensor([1, 0])))
 
+    def test_mixed_batch_promotes_only_sampling_rows(self):
+        sampler = Sampler()
+        logits = torch.tensor(
+            [[1.0, 9.0, 2.0], [8.0, 3.0, 4.0]],
+            dtype=torch.bfloat16,
+        )
+        temperatures = torch.tensor([0.0, 1.0])
+        top_ks = torch.tensor([-1, -1], dtype=torch.int32)
+        top_ps = torch.ones(2)
+        observed = []
+
+        def record_dtype(sample_logits, sample_top_ks, sample_top_ps):
+            observed.append((sample_logits.shape, sample_logits.dtype))
+            return sample_logits
+
+        with unittest.mock.patch.object(
+            sampler_module,
+            "apply_top_k_top_p",
+            side_effect=record_dtype,
+        ):
+            actual = sampler(logits, temperatures, top_ks, top_ps)
+
+        self.assertEqual(observed, [(torch.Size([1, 3]), torch.float32)])
+        self.assertEqual(actual[0].item(), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

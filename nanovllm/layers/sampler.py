@@ -165,8 +165,6 @@ class Sampler(nn.Module):
         if torch.any(~torch.isfinite(temperatures)) or torch.any(temperatures < 0):
             raise ValueError("temperatures must be finite and non-negative")
 
-        logits = logits.float()
-
         greedy_mask = temperatures <= 1e-10
         greedy_tokens = logits.argmax(dim=-1)
         if bool(greedy_mask.all()):
@@ -175,7 +173,7 @@ class Sampler(nn.Module):
         # Only sampling rows need filtering, softmax, and random-number
         # generation. Greedy rows take the direct argmax fast path.
         sample_mask = ~greedy_mask
-        sample_logits = logits[sample_mask].div(
+        sample_logits = logits[sample_mask].float().div(
             temperatures[sample_mask].unsqueeze(dim=1)
         )
         sample_logits = apply_top_k_top_p(

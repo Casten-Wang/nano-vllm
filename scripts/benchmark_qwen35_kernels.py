@@ -290,6 +290,43 @@ def benchmark_sampling_filter(args, device, dtype) -> dict:
     return results
 
 
+def benchmark_greedy_sampler(args, device, dtype) -> dict:
+    logits = torch.randn(
+        args.sampling_batch,
+        args.vocab_size,
+        device=device,
+        dtype=dtype,
+    )
+    temperatures = torch.zeros(args.sampling_batch, device=device)
+    top_ks = torch.full(
+        (args.sampling_batch,),
+        -1,
+        device=device,
+        dtype=torch.int32,
+    )
+    top_ps = torch.ones(args.sampling_batch, device=device)
+    sampler = SAMPLER.Sampler()
+
+    def reference():
+        return (logits.float().argmax(dim=-1),)
+
+    def candidate():
+        return (sampler(logits, temperatures, top_ks, top_ps),)
+
+    result = compare(
+        reference,
+        candidate,
+        device=device,
+        warmup=args.warmup,
+        iterations=args.iterations,
+        repeats=args.repeats,
+    )
+    result["avoided_fp32_logits_mib"] = (
+        logits.numel() * max(4 - logits.element_size(), 0) / 1024 / 1024
+    )
+    return result
+
+
 def benchmark_moe_output_merge(args, device, dtype) -> dict:
     routed_source = torch.randn(
         args.router_tokens,
@@ -1642,6 +1679,11 @@ def main() -> None:
         benchmark_results = {
             "router_topk_first": benchmark_router(args, device, dtype),
             "sampling_filter_fast_paths": benchmark_sampling_filter(
+                args,
+                device,
+                dtype,
+            ),
+            "greedy_sampler_precision_fast_path": benchmark_greedy_sampler(
                 args,
                 device,
                 dtype,
