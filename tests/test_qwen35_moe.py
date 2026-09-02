@@ -556,6 +556,43 @@ def test_batched_decode_route_weighting_reuses_expert_output():
     )
 
 
+def test_batched_decode_route_sum_fills_caller_output():
+    expert_output = torch.tensor(
+        [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0], [7.0, 8.0]]
+    )
+    original = expert_output.clone()
+    weights = torch.tensor([[0.25, 0.75], [0.60, 0.40]])
+    output = torch.empty(2, 2)
+    expected = (original.view(2, 2, 2) * weights.unsqueeze(-1)).sum(dim=1)
+
+    actual = moe_dispatch.weighted_route_sum(
+        expert_output,
+        weights,
+        output=output,
+    )
+
+    assert actual is output
+    torch.testing.assert_close(actual, expected)
+
+
+def test_batched_decode_route_sum_rejects_invalid_output():
+    with pytest.raises(ValueError, match="weighted route sum"):
+        moe_dispatch.weighted_route_sum(
+            torch.randn(4, 2),
+            torch.rand(2, 2),
+            output=torch.empty(2, 3),
+        )
+
+
+def test_batched_decode_route_sum_rejects_output_with_autograd():
+    with pytest.raises(ValueError, match="requires grad"):
+        moe_dispatch.weighted_route_sum(
+            torch.randn(4, 2, requires_grad=True),
+            torch.rand(2, 2),
+            output=torch.empty(2, 2),
+        )
+
+
 def test_sorted_route_weighting_reuses_expert_output_without_autograd():
     expert_output = torch.randn(5, 4)
     original = expert_output.clone()

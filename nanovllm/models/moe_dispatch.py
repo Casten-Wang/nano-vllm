@@ -16,12 +16,28 @@ def silu_and_mul(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
 def weighted_route_sum(
     expert_output: torch.Tensor,
     topk_weights: torch.Tensor,
+    *,
+    output: torch.Tensor | None = None,
 ) -> torch.Tensor:
+    """Combine top-k routes, optionally writing inference output in place."""
+
     routed = expert_output.reshape(*topk_weights.shape, -1)
     weights = topk_weights.unsqueeze(-1)
     if expert_output.requires_grad or topk_weights.requires_grad:
+        if output is not None:
+            raise ValueError("output is unsupported when route sum requires grad")
         return (routed * weights).sum(dim=1)
+    expected_shape = (topk_weights.shape[0], expert_output.shape[-1])
+    if output is not None and (
+        output.shape != expected_shape
+        or output.dtype != expert_output.dtype
+        or output.device != expert_output.device
+    ):
+        raise ValueError("output must match the weighted route sum")
     routed.mul_(weights)
+    if output is not None:
+        torch.sum(routed, dim=1, out=output)
+        return output
     return routed.sum(dim=1)
 
 
@@ -88,10 +104,18 @@ def batched_expert_dispatch(
             selected_down,
             activated.unsqueeze(-1),
         ).squeeze(-1)
-        output[start:end] = weighted_route_sum(
-            expert_output,
-            topk_weights[start:end],
-        )
+        route_weights = topk_weights[start:end]
+        if expert_output.requires_grad or route_weights.requires_grad:
+            output[start:end] = weighted_route_sum(
+                expert_output,
+                route_weights,
+            )
+        else:
+            weighted_route_sum(
+                expert_output,
+                route_weights,
+                output=output[start:end],
+            )
         # Python keeps loop locals alive until their next assignment. Release
         # the consumed chunk so the next gathered expert weights do not
         # overlap with the previous chunk's large temporaries.
