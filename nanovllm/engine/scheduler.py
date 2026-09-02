@@ -124,11 +124,12 @@ class Scheduler:
     def schedule_legacy(self) -> tuple[list[Sequence], bool]:
         scheduled_seqs = []
         num_batched_tokens = 0
+        num_running = len(self.running)
 
         # prefill
         while (
             self.waiting
-            and len(self.running) + len(scheduled_seqs) < self.max_num_seqs
+            and num_running + len(scheduled_seqs) < self.max_num_seqs
         ):
             seq = self.waiting[0]
             remaining = self.max_num_batched_tokens - num_batched_tokens
