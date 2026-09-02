@@ -63,6 +63,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--int8-partitioned-decode-partition-size", type=int, default=512)
     parser.add_argument("--sliding-window-size", type=int, default=None)
     parser.add_argument("--enable-dynamic-chunked-prefill", action="store_true")
+    parser.add_argument(
+        "--prefill-starvation-threshold",
+        type=int,
+        default=0,
+        help=(
+            "After this many consecutive decode-only steps, reserve one token "
+            "for waiting prefill work; zero disables the fairness policy."
+        ),
+    )
     parser.add_argument("--name", default=None)
     parser.add_argument("--result-dir", default="benchmark_results")
     parser.add_argument("--output", type=Path)
@@ -115,6 +124,7 @@ def main() -> None:
         int8_partitioned_decode_partition_size=args.int8_partitioned_decode_partition_size,
         sliding_window_size=args.sliding_window_size,
         enable_dynamic_chunked_prefill=args.enable_dynamic_chunked_prefill,
+        prefill_starvation_threshold=args.prefill_starvation_threshold,
     )
     llm.model_runner.call("reset_execution_stats")
     llm.model_runner.call("reset_shape_trace")
@@ -284,6 +294,7 @@ def main() -> None:
         "int8_partitioned_decode_partition_size": args.int8_partitioned_decode_partition_size,
         "sliding_window_size": args.sliding_window_size,
         "enable_dynamic_chunked_prefill": args.enable_dynamic_chunked_prefill,
+        "prefill_starvation_threshold": args.prefill_starvation_threshold,
         "require_paths": required_paths,
         "injected": injected,
         "expected_requests": expected_requests,
@@ -327,6 +338,8 @@ def main() -> None:
             prefix += f"_int8_{args.kv_dequant_backend}"
         if args.enable_dynamic_chunked_prefill:
             prefix += "_dynchunk"
+        if args.prefill_starvation_threshold:
+            prefix += f"_fair{args.prefill_starvation_threshold}"
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     json_path = args.output or result_dir / f"{prefix}_{timestamp}.json"
     json_path.parent.mkdir(parents=True, exist_ok=True)

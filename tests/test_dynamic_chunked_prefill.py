@@ -286,6 +286,35 @@ def test_dynamic_scheduler_tracks_and_resets_consecutive_prefill_starvation():
     assert scheduler.max_prefill_starvation_steps == 2
 
 
+def test_dynamic_scheduler_reserves_prefill_after_starvation_threshold():
+    scheduler = make_scheduler(max_tokens=2, max_seqs=3, block_size=4)
+    scheduler.prefill_starvation_threshold = 2
+    running = []
+    for token in (1, 5):
+        seq = Sequence([token] * 4)
+        scheduler.block_manager.allocate(seq, 0)
+        seq.status = SequenceStatus.RUNNING
+        seq.is_prefill = False
+        seq.num_cached_tokens = len(seq)
+        scheduler.running.append(seq)
+        running.append(seq)
+    waiting = Sequence([10] * 4)
+    scheduler.waiting.append(waiting)
+
+    for token_ids in ((101, 102), (103, 104)):
+        result = scheduler.schedule()
+        assert result.prefill_seqs == []
+        scheduler.postprocess_mixed(result, list(token_ids))
+
+    result = scheduler.schedule()
+
+    assert result.decode_seqs == [running[0]]
+    assert result.prefill_seqs == [waiting]
+    assert waiting.num_scheduled_tokens == 1
+    assert scheduler.current_prefill_starvation_steps == 0
+    assert scheduler.max_prefill_starvation_steps == 2
+
+
 def test_dynamic_prefill_only_result_uses_prefill_mode():
     scheduler = make_scheduler(max_tokens=8, max_seqs=8, block_size=4)
     waiting = Sequence([10] * 6)

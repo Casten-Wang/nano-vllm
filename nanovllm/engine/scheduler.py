@@ -47,6 +47,11 @@ class Scheduler:
         self.eos_token_ids = frozenset(eos)
         self.block_size = config.kvcache_block_size
         self.enable_dynamic_chunked_prefill = config.enable_dynamic_chunked_prefill
+        self.prefill_starvation_threshold = getattr(
+            config,
+            "prefill_starvation_threshold",
+            0,
+        )
         self.block_manager = BlockManager(config.num_kvcache_blocks, config.kvcache_block_size)
         model_spec = getattr(config, "model_spec", None)
         self.state_manager = (
@@ -177,7 +182,28 @@ class Scheduler:
         # 1. Decode first to protect TPOT/ITL for already-running requests.
         # 2. Spend the remaining token and sequence budget on prefill chunks.
         # 3. Return both groups so ModelRunner can execute one mixed forward.
-        decode_seqs = self.schedule_decode_first()
+        decode_budget = self.max_num_batched_tokens
+        active_waiting = sum(
+            seq.state_slot is not None or bool(seq.block_table)
+            for seq in self.waiting
+        )
+        waiting_head_is_active = bool(self.waiting) and (
+            self.waiting[0].state_slot is not None
+            or bool(self.waiting[0].block_table)
+        )
+        has_prefill_slot = (
+            len(self.running) + active_waiting < self.max_num_seqs
+            or waiting_head_is_active
+        )
+        if (
+            self.waiting
+            and has_prefill_slot
+            and self.prefill_starvation_threshold > 0
+            and self.current_prefill_starvation_steps
+            >= self.prefill_starvation_threshold
+        ):
+            decode_budget = max(decode_budget - 1, 0)
+        decode_seqs = self.schedule_decode_first(decode_budget)
         prefill_budget = self.max_num_batched_tokens - len(decode_seqs)
         # ``self.running`` still contains decode requests that did not fit the
         # current token budget. They continue to own KV/state slots and must be
@@ -200,9 +226,20 @@ class Scheduler:
             raise RuntimeError("scheduler has no runnable sequence")
         return ScheduleResult(prefill_seqs=prefill_seqs, decode_seqs=decode_seqs)
 
-    def schedule_decode_first(self) -> list[Sequence]:
+    def schedule_decode_first(
+        self,
+        token_budget: int | None = None,
+    ) -> list[Sequence]:
+        if token_budget is None:
+            token_budget = self.max_num_batched_tokens
+        if token_budget < 0:
+            raise ValueError("decode token budget must be non-negative")
         scheduled_seqs = []
-        while self.running and len(scheduled_seqs) < self.max_num_seqs and len(scheduled_seqs) < self.max_num_batched_tokens:
+        while (
+            self.running
+            and len(scheduled_seqs) < self.max_num_seqs
+            and len(scheduled_seqs) < token_budget
+        ):
             seq = self.running.popleft()
             while not self.block_manager.can_append(seq):
                 if self.running:

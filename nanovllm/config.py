@@ -54,6 +54,7 @@ class Config:
     kv_dequant_backend: str = "fused"
     sliding_window_size: int | None = None
     enable_dynamic_chunked_prefill: bool = False
+    prefill_starvation_threshold: int = 0
     int8_partitioned_decode_threshold: int = 8192
     int8_partitioned_decode_partition_size: int = 512
     recurrent_state_dtype: str = "float32"
@@ -86,6 +87,8 @@ class Config:
             )
         if self.sliding_window_size is not None and self.sliding_window_size <= 0:
             raise ValueError("sliding_window_size must be positive when provided")
+        if self.prefill_starvation_threshold < 0:
+            raise ValueError("prefill_starvation_threshold must be non-negative")
         if self.int8_partitioned_decode_threshold <= 0:
             raise ValueError("int8_partitioned_decode_threshold must be positive")
         if self.int8_partitioned_decode_partition_size <= 0:

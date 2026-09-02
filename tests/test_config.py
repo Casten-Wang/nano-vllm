@@ -78,6 +78,15 @@ def test_invalid_qwen35_moe_decode_chunk_size_is_rejected(monkeypatch, tmp_path)
         )
 
 
+def test_negative_prefill_starvation_threshold_is_rejected(monkeypatch, tmp_path):
+    with pytest.raises(ValueError, match="prefill_starvation_threshold"):
+        make_config(
+            monkeypatch,
+            tmp_path,
+            prefill_starvation_threshold=-1,
+        )
+
+
 def test_quantized_checkpoint_is_rejected_before_runtime_setup(monkeypatch, tmp_path):
     text_config = SimpleNamespace(max_position_embeddings=32768)
     monkeypatch.setattr(
