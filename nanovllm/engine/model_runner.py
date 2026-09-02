@@ -847,7 +847,12 @@ class ModelRunner:
         )
         return input_ids, positions
 
-    def build_prefill_inputs(self, seqs: list[Sequence]):
+    def build_prefill_inputs(
+        self,
+        seqs: list[Sequence],
+        *,
+        prepare_state_metadata: bool = True,
+    ):
         input_ids = []
         positions = []
         cu_seqlens_q = [0]
@@ -906,12 +911,25 @@ class ModelRunner:
             block_tables=block_tables,
             dequant_block_ids=dequant_block_ids,
             dequant_block_tables=dequant_block_tables,
-            state_slots=self.prepare_state_slots(seqs),
-            state_reset_mask=self.prepare_state_reset_mask(seqs),
+            state_slots=(
+                self.prepare_state_slots(seqs)
+                if prepare_state_metadata
+                else None
+            ),
+            state_reset_mask=(
+                self.prepare_state_reset_mask(seqs)
+                if prepare_state_metadata
+                else None
+            ),
             state_token_ranges=tuple(zip(cu_seqlens_q[:-1], cu_seqlens_q[1:])),
         )
 
-    def build_decode_inputs(self, seqs: list[Sequence]):
+    def build_decode_inputs(
+        self,
+        seqs: list[Sequence],
+        *,
+        prepare_state_metadata: bool = True,
+    ):
         input_ids = []
         positions = []
         slot_mapping = []
@@ -940,8 +958,16 @@ class ModelRunner:
             dequant_block_ids=dequant_block_ids,
             dequant_block_tables=dequant_block_tables,
             max_context_len=max(context_lens) if context_lens else 0,
-            state_slots=self.prepare_state_slots(seqs),
-            state_reset_mask=self.prepare_state_reset_mask(seqs),
+            state_slots=(
+                self.prepare_state_slots(seqs)
+                if prepare_state_metadata
+                else None
+            ),
+            state_reset_mask=(
+                self.prepare_state_reset_mask(seqs)
+                if prepare_state_metadata
+                else None
+            ),
             state_token_ranges=(),
             decode_state_span=self.contiguous_state_span(seqs),
         )
@@ -988,8 +1014,15 @@ class ModelRunner:
         return input_ids, positions
 
     def prepare_mixed(self, prefill_seqs: list[Sequence], decode_seqs: list[Sequence]):
-        decode = self.build_decode_inputs(decode_seqs)
-        prefill = self.build_prefill_inputs(prefill_seqs)
+        decode = self.build_decode_inputs(
+            decode_seqs,
+            prepare_state_metadata=False,
+        )
+        prefill = self.build_prefill_inputs(
+            prefill_seqs,
+            prepare_state_metadata=False,
+        )
+        mixed_seqs = [*decode_seqs, *prefill_seqs]
         input_ids = decode["input_ids"] + prefill["input_ids"]
         positions = decode["positions"] + prefill["positions"]
         slot_mapping = decode["slot_mapping"] + prefill["slot_mapping"]
@@ -1020,16 +1053,8 @@ class ModelRunner:
             prefill_block_tables=prefill["block_tables"],
             prefill_dequant_block_ids=prefill["dequant_block_ids"],
             prefill_dequant_block_tables=prefill["dequant_block_tables"],
-            state_slots=torch.cat(
-                (decode["state_slots"], prefill["state_slots"]),
-            )
-            if decode["state_slots"] is not None
-            else None,
-            state_reset_mask=torch.cat(
-                (decode["state_reset_mask"], prefill["state_reset_mask"]),
-            )
-            if decode["state_reset_mask"] is not None
-            else None,
+            state_slots=self.prepare_state_slots(mixed_seqs),
+            state_reset_mask=self.prepare_state_reset_mask(mixed_seqs),
             state_token_ranges=tuple(
                 (
                     len(decode_seqs) + start,

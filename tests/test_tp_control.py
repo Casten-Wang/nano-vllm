@@ -448,38 +448,55 @@ class HybridStateContextTest(unittest.TestCase):
     def test_mixed_context_orders_decode_before_prefill_slots(self):
         runner = self.make_hybrid_runner()
         runner.block_size = 256
-        runner.build_decode_inputs = lambda seqs: {
-            "input_ids": [1, 2],
-            "positions": [4, 5],
-            "slot_mapping": [10, 11],
-            "context_lens": [5, 6],
-            "block_tables": FakeTensor(),
-            "dequant_block_ids": None,
-            "dequant_block_tables": None,
-            "state_slots": FakeTensor([8, 9]),
-            "state_reset_mask": FakeTensor([False, False]),
-            "state_token_ranges": (),
-        }
-        runner.build_prefill_inputs = lambda seqs: {
-            "input_ids": [3, 4],
-            "positions": [0, 1],
-            "slot_mapping": [12, 13],
-            "cu_seqlens_q": [0, 2],
-            "cu_seqlens_k": [0, 2],
-            "max_seqlen_q": 2,
-            "max_seqlen_k": 2,
-            "block_tables": None,
-            "dequant_block_ids": None,
-            "dequant_block_tables": None,
-            "state_slots": FakeTensor([3]),
-            "state_reset_mask": FakeTensor([True]),
-            "state_token_ranges": ((0, 2),),
-        }
+        metadata_options = []
+
+        def build_decode_inputs(seqs, **kwargs):
+            metadata_options.append(kwargs)
+            return {
+                "input_ids": [1, 2],
+                "positions": [4, 5],
+                "slot_mapping": [10, 11],
+                "context_lens": [5, 6],
+                "block_tables": FakeTensor(),
+                "dequant_block_ids": None,
+                "dequant_block_tables": None,
+                "state_token_ranges": (),
+            }
+
+        def build_prefill_inputs(seqs, **kwargs):
+            metadata_options.append(kwargs)
+            return {
+                "input_ids": [3, 4],
+                "positions": [0, 1],
+                "slot_mapping": [12, 13],
+                "cu_seqlens_q": [0, 2],
+                "cu_seqlens_k": [0, 2],
+                "max_seqlen_q": 2,
+                "max_seqlen_k": 2,
+                "block_tables": None,
+                "dequant_block_ids": None,
+                "dequant_block_tables": None,
+                "state_token_ranges": ((0, 2),),
+            }
+
+        runner.build_decode_inputs = build_decode_inputs
+        runner.build_prefill_inputs = build_prefill_inputs
+        decode_seqs = [object(), object()]
+        prefill_seqs = [object()]
+        state_metadata_calls = []
+        runner.prepare_state_slots = lambda seqs: (
+            state_metadata_calls.append(("slots", seqs))
+            or FakeTensor([8, 9, 3])
+        )
+        runner.prepare_state_reset_mask = lambda seqs: (
+            state_metadata_calls.append(("reset", seqs))
+            or FakeTensor([False, False, True])
+        )
         captured = {}
         original = model_runner_module.set_context
         model_runner_module.set_context = lambda *args, **kwargs: captured.update(kwargs)
         try:
-            runner.prepare_mixed([object()], [object(), object()])
+            runner.prepare_mixed(prefill_seqs, decode_seqs)
         finally:
             model_runner_module.set_context = original
 
@@ -489,6 +506,20 @@ class HybridStateContextTest(unittest.TestCase):
             [False, False, True],
         )
         self.assertEqual(captured["state_token_ranges"], ((2, 4),))
+        self.assertEqual(
+            metadata_options,
+            [
+                {"prepare_state_metadata": False},
+                {"prepare_state_metadata": False},
+            ],
+        )
+        self.assertEqual(
+            state_metadata_calls,
+            [
+                ("slots", decode_seqs + prefill_seqs),
+                ("reset", decode_seqs + prefill_seqs),
+            ],
+        )
 
     def test_hybrid_model_disables_cuda_graph(self):
         runner = self.make_hybrid_runner()
