@@ -352,10 +352,7 @@ class ModelRunner:
             return "prefill_indexed"
         if use_graph:
             return "decode_graph_indexed"
-        if (
-            getattr(context, "decode_state_span", None) is not None
-            and self.config.recurrent_state_dtype == "float32"
-        ):
+        if getattr(context, "decode_state_span", None) is not None:
             return "decode_contiguous_view"
         return "decode_indexed_copy"
 

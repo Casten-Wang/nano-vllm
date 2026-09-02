@@ -515,6 +515,20 @@ class HybridStateContextTest(unittest.TestCase):
         self.assertIsNone(runner.contiguous_state_span(interleaved))
         self.assertIsNone(runner.contiguous_state_span([]))
 
+    def test_compressed_eager_state_span_is_reported_as_contiguous_view(self):
+        runner = self.make_hybrid_runner()
+        runner.config.recurrent_state_dtype = "model"
+        context = SimpleNamespace(decode_state_span=(3, 2))
+
+        self.assertEqual(
+            runner._state_access_path(
+                context,
+                step_kind="decode",
+                use_graph=False,
+            ),
+            "decode_contiguous_view",
+        )
+
     def test_hybrid_model_enables_graph_safe_decode(self):
         runner = self.make_hybrid_runner()
         runner.enforce_eager = False
