@@ -42,6 +42,8 @@ def summary(
     ppl_bf16,
     ppl_int8,
     *,
+    tensor_parallel_size=4,
+    recurrent_state_dtype="float32",
     top1=7,
     logprob=-2.0,
     top1_agreement=0.99,
@@ -51,6 +53,11 @@ def summary(
         "commit": "abc",
         "git_dirty": False,
         "checkpoint_manifest": {"digest": "weights"},
+        "configuration": {
+            "tensor_parallel_size": tensor_parallel_size,
+            "recurrent_state_dtype": recurrent_state_dtype,
+            "teacher_forcing": True,
+        },
         "case_token_digest": "cases",
         "batches": [
             {
@@ -104,7 +111,9 @@ def test_quality_case_command_forwards_all_quality_dimensions():
 def test_matrix_summary_separates_state_and_kv_quality_effects():
     cases = {
         MODULE.QualityCase(4, "float32"): summary(10.0, 10.5),
-        MODULE.QualityCase(4, "model"): summary(10.2, 10.8),
+        MODULE.QualityCase(4, "model"): summary(
+            10.2, 10.8, recurrent_state_dtype="model"
+        ),
     }
 
     result = MODULE.summarize_results(cases)
@@ -119,11 +128,17 @@ def test_matrix_summary_separates_state_and_kv_quality_effects():
 def test_matrix_summary_requires_cross_tp_logit_parity():
     cases = {
         MODULE.QualityCase(4, "float32"): summary(10.0, 10.5),
-        MODULE.QualityCase(4, "model"): summary(10.2, 10.8),
-        MODULE.QualityCase(8, "float32"): summary(10.0, 10.5),
+        MODULE.QualityCase(4, "model"): summary(
+            10.2, 10.8, recurrent_state_dtype="model"
+        ),
+        MODULE.QualityCase(8, "float32"): summary(
+            10.0, 10.5, tensor_parallel_size=8
+        ),
         MODULE.QualityCase(8, "model"): summary(
             10.2,
             10.8,
+            tensor_parallel_size=8,
+            recurrent_state_dtype="model",
             logprob=-2.06,
         ),
     }
@@ -147,7 +162,9 @@ def test_matrix_summary_rejects_int8_quality_regression():
             10.5,
             top1_agreement=0.97,
         ),
-        MODULE.QualityCase(4, "model"): summary(10.2, 10.8),
+        MODULE.QualityCase(4, "model"): summary(
+            10.2, 10.8, recurrent_state_dtype="model"
+        ),
     }
 
     result = MODULE.summarize_results(cases)
@@ -162,7 +179,9 @@ def test_matrix_summary_rejects_int8_quality_regression():
 def test_matrix_summary_rejects_mixed_checkpoint_results():
     cases = {
         MODULE.QualityCase(4, "float32"): summary(10.0, 10.5),
-        MODULE.QualityCase(4, "model"): summary(10.2, 10.8),
+        MODULE.QualityCase(4, "model"): summary(
+            10.2, 10.8, recurrent_state_dtype="model"
+        ),
     }
     cases[MODULE.QualityCase(4, "model")]["checkpoint_manifest"][
         "digest"
@@ -175,7 +194,9 @@ def test_matrix_summary_rejects_mixed_checkpoint_results():
 def test_matrix_summary_rejects_dirty_or_mixed_source_results():
     cases = {
         MODULE.QualityCase(4, "float32"): summary(10.0, 10.5),
-        MODULE.QualityCase(4, "model"): summary(10.2, 10.8),
+        MODULE.QualityCase(4, "model"): summary(
+            10.2, 10.8, recurrent_state_dtype="model"
+        ),
     }
     cases[MODULE.QualityCase(4, "model")]["commit"] = "def"
     with pytest.raises(ValueError, match="different commits"):
@@ -184,6 +205,21 @@ def test_matrix_summary_rejects_dirty_or_mixed_source_results():
     cases[MODULE.QualityCase(4, "model")]["commit"] = "abc"
     cases[MODULE.QualityCase(4, "model")]["git_dirty"] = True
     with pytest.raises(ValueError, match="clean worktrees"):
+        MODULE.summarize_results(cases)
+
+
+def test_matrix_summary_rejects_mislabeled_case_configuration():
+    cases = {
+        MODULE.QualityCase(4, "float32"): summary(10.0, 10.5),
+        MODULE.QualityCase(4, "model"): summary(
+            10.2,
+            10.8,
+            tensor_parallel_size=8,
+            recurrent_state_dtype="model",
+        ),
+    }
+
+    with pytest.raises(ValueError, match="TP does not match"):
         MODULE.summarize_results(cases)
 
 

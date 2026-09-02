@@ -138,6 +138,17 @@ def summarize_results(
     rows = []
     by_tp: dict[str, dict] = {}
     for case, result in results.items():
+        configuration = result.get("configuration", {})
+        if configuration.get("tensor_parallel_size") != case.tensor_parallel_size:
+            raise ValueError(
+                f"quality result TP does not match case {case.name}"
+            )
+        if configuration.get("recurrent_state_dtype") != case.recurrent_state_dtype:
+            raise ValueError(
+                f"quality result state dtype does not match case {case.name}"
+            )
+        if configuration.get("teacher_forcing") is not True:
+            raise ValueError(f"quality result is not teacher-forced: {case.name}")
         summary = result["summary"]
         decode_ppl = summary["decode_ppl"]
         int8_attention_paths = {
