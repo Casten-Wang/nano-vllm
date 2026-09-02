@@ -128,6 +128,7 @@ class ExecutionPolicyTest(unittest.TestCase):
             is_hybrid=True,
             kv_cache_dtype="auto",
             kv_dequant_backend="fused",
+            weight_quant_backend="auto",
         )
 
         self.assertFalse(
@@ -140,6 +141,12 @@ class ExecutionPolicyTest(unittest.TestCase):
             supports(
                 qwen35_moe_decode_backend="batched",
                 **{**common, "kv_cache_dtype": "int8", "kv_dequant_backend": "torch"},
+            )
+        )
+        self.assertFalse(
+            supports(
+                qwen35_moe_decode_backend="batched",
+                **{**common, "weight_quant_backend": "triton"},
             )
         )
 

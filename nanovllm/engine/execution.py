@@ -119,12 +119,17 @@ def supports_cudagraph_policy(
     qwen35_moe_decode_backend: str,
     kv_cache_dtype: str,
     kv_dequant_backend: str,
+    weight_quant_backend: str = "auto",
 ) -> bool:
     """Return whether every configured decode component is graph-safe."""
 
     if enforce_eager or sliding_window_size is not None:
         return False
     if is_hybrid and qwen35_moe_decode_backend != "batched":
+        return False
+    # GPTQ expert dispatch currently performs a device-to-host synchronization
+    # and a data-dependent Python loop, so neither executor is graph-safe yet.
+    if weight_quant_backend in {"reference", "triton"}:
         return False
     if kv_cache_dtype == "int8" and kv_dequant_backend != "fused":
         return False

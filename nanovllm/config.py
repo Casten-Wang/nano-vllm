@@ -119,7 +119,7 @@ class Config:
         ):
             if self.qwen35_moe_decode_backend != "sorted":
                 raise ValueError(
-                    "the GPTQ reference backend requires "
+                    "the current GPTQ expert backend requires "
                     "qwen35_moe_decode_backend='sorted'"
                 )
             self.model_config.nanovllm_quantization_spec = quantization

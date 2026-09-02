@@ -228,6 +228,11 @@ class ModelRunner:
             qwen35_moe_decode_backend=self.config.qwen35_moe_decode_backend,
             kv_cache_dtype=self.config.kv_cache_dtype,
             kv_dequant_backend=self.config.kv_dequant_backend,
+            weight_quant_backend=getattr(
+                self.config,
+                "weight_quant_backend",
+                "auto",
+            ),
         )
 
     def should_use_cudagraph(self, input_ids: torch.Tensor, is_prefill: bool) -> bool:
