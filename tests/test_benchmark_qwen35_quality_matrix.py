@@ -33,6 +33,8 @@ def args(**overrides):
         "cases_file": None,
         "run_id": "rental-a",
         "tp_sizes": (4, 8),
+        "weight_quant_backend": "auto",
+        "qwen35_moe_decode_backend": "sorted",
     }
     values.update(overrides)
     return Namespace(**values)
@@ -105,6 +107,8 @@ def test_quality_case_command_forwards_all_quality_dimensions():
     assert command[command.index("--recurrent-state-dtype") + 1] == "model"
     assert command[command.index("--continuation-len") + 1] == "16"
     assert command[command.index("--partition-size") + 1] == "512"
+    assert command[command.index("--weight-quant-backend") + 1] == "auto"
+    assert command[command.index("--qwen35-moe-decode-backend") + 1] == "sorted"
     assert command[command.index("--name") + 1] == "run-1_qwen35_tp8_state-model"
 
 

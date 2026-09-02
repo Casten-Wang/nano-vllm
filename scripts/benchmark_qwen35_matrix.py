@@ -95,6 +95,8 @@ def command_for_case(
         case.recurrent_state_dtype,
         "--qwen35-moe-decode-backend",
         case.moe_decode_backend,
+        "--weight-quant-backend",
+        getattr(args, "weight_quant_backend", "auto"),
         "--kv-cache-dtype",
         case.kv_cache_dtype,
         "--num-seqs",
@@ -548,6 +550,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-model-len", type=int, default=4096)
     parser.add_argument("--max-num-batched-tokens", type=int, default=16384)
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.9)
+    parser.add_argument(
+        "--weight-quant-backend",
+        choices=("auto", "reference", "triton"),
+        default="auto",
+    )
     parser.add_argument(
         "--max-num-seqs",
         type=int,

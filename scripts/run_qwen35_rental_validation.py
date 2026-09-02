@@ -27,6 +27,8 @@ REMOTE_CHECKPOINT_AUDIT_SCRIPT = (
 )
 OFFICIAL_CHECKPOINT_REPO = "Qwen/Qwen3.5-35B-A3B"
 OFFICIAL_CHECKPOINT_REVISION = "59d61f3ce65a6d9863b86d2e96597125219dc754"
+OFFICIAL_GPTQ_CHECKPOINT_REPO = "Qwen/Qwen3.5-35B-A3B-GPTQ-Int4"
+OFFICIAL_GPTQ_CHECKPOINT_REVISION = "3af5ca2972faf6de1fd6f4efc4d8d319ca751e8b"
 QUALITY_MAX_PROMPT_LENGTH = 8_192
 QUALITY_CONTINUATION_LENGTH = 16
 MIXED_CONCURRENT_SEQUENCES = 16
@@ -517,7 +519,90 @@ def commands(args: argparse.Namespace) -> list[tuple[str, list[str]]]:
                     str(args.max_model_len),
                 ],
             ),
+        )
+    )
+    if args.gptq_model is not None:
+        gptq_run_id = f"{args.run_id}-gptq"
+        gptq_root = root / "gptq"
+        result.extend(
             (
+                (
+                    "official-gptq-checkpoint-audit",
+                    [
+                        sys.executable,
+                        str(REMOTE_CHECKPOINT_AUDIT_SCRIPT),
+                        "--repo",
+                        OFFICIAL_GPTQ_CHECKPOINT_REPO,
+                        "--revision",
+                        args.gptq_revision,
+                        "--tp-sizes",
+                        tp_sizes,
+                        "--output",
+                        str(gptq_root / "official_checkpoint_header_audit.json"),
+                    ],
+                ),
+                (
+                    "gptq-performance-matrix",
+                    [
+                        sys.executable,
+                        str(MATRIX_SCRIPT),
+                        "--model",
+                        args.gptq_model,
+                        "--tp-sizes",
+                        tp_sizes,
+                        "--num-seqs",
+                        str(args.num_seqs),
+                        "--input-len",
+                        str(args.input_len),
+                        "--output-len",
+                        str(args.output_len),
+                        "--max-model-len",
+                        str(args.max_model_len),
+                        "--max-num-seqs",
+                        str(args.max_num_seqs),
+                        "--repeats",
+                        str(args.repeats),
+                        "--run-id",
+                        gptq_run_id,
+                        "--result-dir",
+                        str(gptq_root / "performance"),
+                        "--weight-quant-backend",
+                        "auto",
+                        "--no-checkpoint-audit",
+                    ],
+                ),
+                (
+                    "gptq-quality-matrix",
+                    [
+                        sys.executable,
+                        str(QUALITY_SCRIPT),
+                        "--model",
+                        args.gptq_model,
+                        "--tp-sizes",
+                        tp_sizes,
+                        "--run-id",
+                        gptq_run_id,
+                        "--result-dir",
+                        str(gptq_root / "quality"),
+                        "--weight-quant-backend",
+                        "auto",
+                        "--qwen35-moe-decode-backend",
+                        "sorted",
+                        "--no-checkpoint-audit",
+                        "--prompt-lengths",
+                        f"128,1024,3072,{QUALITY_MAX_PROMPT_LENGTH}",
+                        "--continuation-len",
+                        str(QUALITY_CONTINUATION_LENGTH),
+                        "--max-model-len",
+                        str(args.max_model_len),
+                        "--max-num-batched-tokens",
+                        str(args.max_model_len),
+                    ],
+                ),
+            )
+        )
+    result.append(
+        (
                 "final-summary",
                 [
                     sys.executable,
@@ -529,8 +614,7 @@ def commands(args: argparse.Namespace) -> list[tuple[str, list[str]]]:
                     "--output",
                     str(root / "summary.json"),
                 ],
-            ),
-        )
+            )
     )
     return result
 
@@ -542,6 +626,12 @@ def manifest_plan(
     return {
         "run_id": args.run_id,
         "model": canonical_model_reference(args.model),
+        "gptq_model": (
+            canonical_model_reference(args.gptq_model)
+            if args.gptq_model is not None
+            else None
+        ),
+        "gptq_revision": args.gptq_revision if args.gptq_model else None,
         "source_tree_sha256": source_tree_sha256(),
         "stages": [
             {"name": name, "command": command}
@@ -595,6 +685,9 @@ def collect_stage_artifacts(
             root / "preflight" / "official_checkpoint_header_audit.json"
         ]
         search_root = root / "preflight"
+    elif stage_name == "official-gptq-checkpoint-audit":
+        required = [root / "gptq" / "official_checkpoint_header_audit.json"]
+        search_root = root / "gptq"
     elif stage_name == "preflight":
         required = [
             root / "preflight" / "checkpoint_mapping_audit.json",
@@ -652,6 +745,12 @@ def collect_stage_artifacts(
     elif stage_name == "quality-matrix":
         search_root = root / "quality"
         required = [search_root / f"{args.run_id}_summary.json"]
+    elif stage_name == "gptq-performance-matrix":
+        search_root = root / "gptq" / "performance"
+        required = [search_root / f"{args.run_id}-gptq_matrix_summary.json"]
+    elif stage_name == "gptq-quality-matrix":
+        search_root = root / "gptq" / "quality"
+        required = [search_root / f"{args.run_id}-gptq_summary.json"]
     elif stage_name == "final-summary":
         required = [root / "summary.json"]
         search_root = root
@@ -666,6 +765,7 @@ def collect_stage_artifacts(
         required
         if stage_name in (
             "official-checkpoint-audit",
+            "official-gptq-checkpoint-audit",
             "preflight",
             "final-summary",
         )
@@ -733,6 +833,8 @@ def prepare_manifest(
         if {
             "run_id": manifest.get("run_id"),
             "model": manifest.get("model"),
+            "gptq_model": manifest.get("gptq_model"),
+            "gptq_revision": manifest.get("gptq_revision"),
             "source_tree_sha256": manifest.get("source_tree_sha256"),
             "stages": manifest.get("stages"),
         } != plan:
@@ -774,6 +876,15 @@ def mark_stage_completed(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", required=True)
+    parser.add_argument(
+        "--gptq-model",
+        default=None,
+        help="Optional official GPTQ-Int4 checkpoint to validate after BF16.",
+    )
+    parser.add_argument(
+        "--gptq-revision",
+        default=OFFICIAL_GPTQ_CHECKPOINT_REVISION,
+    )
     parser.add_argument("--tp-sizes", type=parse_tp_sizes, default=(4, 8))
     parser.add_argument("--num-seqs", type=int, default=64)
     parser.add_argument("--input-len", type=int, default=512)

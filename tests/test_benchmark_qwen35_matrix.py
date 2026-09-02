@@ -24,6 +24,7 @@ def args(**overrides):
         "max_model_len": 4096,
         "max_num_batched_tokens": 8192,
         "gpu_memory_utilization": 0.9,
+        "weight_quant_backend": "auto",
         "max_num_seqs": 64,
         "seed": 7,
         "result_dir": "benchmark_results/matrix",
@@ -90,6 +91,16 @@ def test_moe_candidate_runs_cuda_graph_and_requires_observed_path():
     assert "decode_eager" not in required
     assert "decode_graph_indexed" in required
     assert "decode_contiguous_view" not in required
+
+
+def test_weight_quant_backend_is_forwarded_to_each_case():
+    command = MODULE.command_for_case(
+        args(weight_quant_backend="triton"),
+        MODULE.BenchmarkCase(4, "model", "auto"),
+    )
+
+    assert command[command.index("--weight-quant-backend") + 1] == "triton"
+    assert "--enforce-eager" in command
 
 
 def test_default_sequence_capacity_tracks_workload(monkeypatch):

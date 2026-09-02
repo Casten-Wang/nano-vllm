@@ -26,6 +26,8 @@ SUMMARY_SPEC.loader.exec_module(SUMMARY_MODULE)
 def args():
     return Namespace(
         model="/models/qwen35",
+        gptq_model=None,
+        gptq_revision=MODULE.OFFICIAL_GPTQ_CHECKPOINT_REVISION,
         tp_sizes=(4, 8),
         num_seqs=64,
         input_len=512,
@@ -148,6 +150,57 @@ def test_commands_are_fail_fast_and_cover_complete_validation_suite():
     )
     assert stages[-2][1][stages[-2][1].index("--continuation-len") + 1] == "16"
     assert stages[-1][1][-1].endswith("summary.json")
+
+
+def test_optional_gptq_checkpoint_adds_audited_eager_tp_matrix():
+    arguments = args()
+    arguments.gptq_model = "Qwen/Qwen3.5-35B-A3B-GPTQ-Int4"
+    stages = MODULE.commands(arguments)
+    names = [name for name, _ in stages]
+
+    assert names[-4:] == [
+        "official-gptq-checkpoint-audit",
+        "gptq-performance-matrix",
+        "gptq-quality-matrix",
+        "final-summary",
+    ]
+    commands = dict(stages)
+    audit = commands["official-gptq-checkpoint-audit"]
+    assert audit[audit.index("--repo") + 1] == MODULE.OFFICIAL_GPTQ_CHECKPOINT_REPO
+    assert audit[audit.index("--revision") + 1] == MODULE.OFFICIAL_GPTQ_CHECKPOINT_REVISION
+    performance = commands["gptq-performance-matrix"]
+    assert performance[performance.index("--weight-quant-backend") + 1] == "auto"
+    assert "--no-checkpoint-audit" in performance
+    quality = commands["gptq-quality-matrix"]
+    assert quality[quality.index("--weight-quant-backend") + 1] == "auto"
+    assert quality[quality.index("--qwen35-moe-decode-backend") + 1] == "sorted"
+    assert "--no-checkpoint-audit" in quality
+
+
+def test_gptq_identity_is_part_of_resume_manifest():
+    arguments = args()
+    arguments.gptq_model = "Qwen/Qwen3.5-35B-A3B-GPTQ-Int4"
+
+    plan = MODULE.manifest_plan(arguments, MODULE.commands(arguments))
+
+    assert plan["gptq_model"] == arguments.gptq_model
+    assert plan["gptq_revision"] == MODULE.OFFICIAL_GPTQ_CHECKPOINT_REVISION
+
+
+def test_gptq_artifact_collection_is_isolated(tmp_path):
+    arguments = args()
+    arguments.result_dir = str(tmp_path)
+    arguments.gptq_model = "Qwen/Qwen3.5-35B-A3B-GPTQ-Int4"
+    quality_dir = tmp_path / arguments.run_id / "gptq" / "quality"
+    quality_dir.mkdir(parents=True)
+    expected = quality_dir / f"{arguments.run_id}-gptq_summary.json"
+    expected.write_text('{"valid": true}\n')
+    (quality_dir / "unrelated.json").write_text('{}\n')
+
+    artifacts = MODULE.collect_stage_artifacts(arguments, "gptq-quality-matrix")
+
+    assert expected in artifacts
+    assert all(path.is_relative_to(quality_dir) for path in artifacts)
 
 
 def test_attention_commands_match_summary_contract():

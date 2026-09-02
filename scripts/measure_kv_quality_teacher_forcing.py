@@ -332,6 +332,10 @@ def run_worker(args: argparse.Namespace) -> None:
         model,
         tensor_parallel_size=args.tensor_parallel_size,
         recurrent_state_dtype=args.recurrent_state_dtype,
+        weight_quant_backend=getattr(args, "weight_quant_backend", "auto"),
+        qwen35_moe_decode_backend=getattr(
+            args, "qwen35_moe_decode_backend", "sorted"
+        ),
         enforce_eager=True,
         max_model_len=args.max_model_len,
         max_num_batched_tokens=args.max_num_batched_tokens,
@@ -423,6 +427,10 @@ def run_worker(args: argparse.Namespace) -> None:
             "mode": mode,
             "tensor_parallel_size": args.tensor_parallel_size,
             "recurrent_state_dtype": args.recurrent_state_dtype,
+            "requested_weight_quant_backend": getattr(
+                args, "weight_quant_backend", "auto"
+            ),
+            "weight_quant_backend": runner.config.weight_quant_backend,
             "partition_threshold": args.partition_threshold,
             "partition_size": args.partition_size,
             "cases": cases,
@@ -627,6 +635,8 @@ def compare_workers(auto: dict[str, Any], int8: dict[str, Any]) -> dict[str, Any
         raise RuntimeError("BF16 and INT8 workers used different tensor parallel sizes")
     if auto.get("recurrent_state_dtype") != int8.get("recurrent_state_dtype"):
         raise RuntimeError("BF16 and INT8 workers used different recurrent state dtypes")
+    if auto.get("weight_quant_backend") != int8.get("weight_quant_backend"):
+        raise RuntimeError("BF16 and INT8 workers used different weight backends")
     execution_validation = {
         "auto": validate_worker_execution(auto),
         "int8": validate_worker_execution(int8),
@@ -686,6 +696,7 @@ def compare_workers(auto: dict[str, Any], int8: dict[str, Any]) -> dict[str, Any
     if not decode_rows:
         raise RuntimeError("quality comparison produced no KV-sensitive decode rows")
     result = {
+        "weight_quant_backend": auto.get("weight_quant_backend"),
         "steps_compared": len(rows),
         "kv_sensitive_steps_compared": len(decode_rows),
         "quality_scope": (
@@ -740,6 +751,10 @@ def run_worker_process(
         str(args.tensor_parallel_size),
         "--recurrent-state-dtype",
         args.recurrent_state_dtype,
+        "--weight-quant-backend",
+        getattr(args, "weight_quant_backend", "auto"),
+        "--qwen35-moe-decode-backend",
+        getattr(args, "qwen35_moe_decode_backend", "sorted"),
         "--max-model-len",
         str(args.max_model_len),
         "--max-num-batched-tokens",
@@ -763,6 +778,16 @@ def main() -> None:
         "--recurrent-state-dtype",
         choices=("float32", "model"),
         default="float32",
+    )
+    parser.add_argument(
+        "--weight-quant-backend",
+        choices=("auto", "reference", "triton"),
+        default="auto",
+    )
+    parser.add_argument(
+        "--qwen35-moe-decode-backend",
+        choices=("sorted", "batched"),
+        default="sorted",
     )
     parser.add_argument(
         "--cases-file",
@@ -885,6 +910,8 @@ def main() -> None:
         "configuration": {
             "tensor_parallel_size": args.tensor_parallel_size,
             "recurrent_state_dtype": args.recurrent_state_dtype,
+            "requested_weight_quant_backend": args.weight_quant_backend,
+            "qwen35_moe_decode_backend": args.qwen35_moe_decode_backend,
             "prompt_lengths": actual_prompt_lengths,
             "cases_per_length": args.cases_per_length,
             "continuation_len": args.continuation_len,
@@ -942,6 +969,12 @@ def main() -> None:
         comparison["cases_file"] = str(cases_file)
         result["batches"].append(comparison)
     result["summary"] = summarize_batch_comparisons(result["batches"])
+    effective_backends = {
+        batch["weight_quant_backend"] for batch in result["batches"]
+    }
+    if None in effective_backends or len(effective_backends) != 1:
+        raise RuntimeError("quality batches used inconsistent weight backends")
+    result["configuration"]["weight_quant_backend"] = effective_backends.pop()
     result_path = result_dir / f"{args.name}.json"
     result_path.write_text(json.dumps(result, indent=2, ensure_ascii=False) + "\n")
     print(json.dumps(result, indent=2, ensure_ascii=False))

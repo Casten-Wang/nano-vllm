@@ -67,6 +67,10 @@ def command_for_case(
         str(case.tensor_parallel_size),
         "--recurrent-state-dtype",
         case.recurrent_state_dtype,
+        "--weight-quant-backend",
+        getattr(args, "weight_quant_backend", "auto"),
+        "--qwen35-moe-decode-backend",
+        getattr(args, "qwen35_moe_decode_backend", "sorted"),
         "--prompt-lengths",
         args.prompt_lengths,
         "--cases-per-length",
@@ -344,6 +348,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--continuation-len", type=int, default=16)
     parser.add_argument("--max-model-len", type=int, default=4096)
     parser.add_argument("--max-num-batched-tokens", type=int, default=16384)
+    parser.add_argument(
+        "--weight-quant-backend",
+        choices=("auto", "reference", "triton"),
+        default="auto",
+    )
+    parser.add_argument(
+        "--qwen35-moe-decode-backend",
+        choices=("sorted", "batched"),
+        default="sorted",
+    )
     parser.add_argument("--partition-threshold", type=int, default=8192)
     parser.add_argument("--partition-size", type=int, default=512)
     parser.add_argument("--trace-max-events", type=int, default=2048)
