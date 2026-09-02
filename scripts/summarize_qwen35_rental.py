@@ -370,6 +370,59 @@ def summarize_moe_runtime(rows: list[dict]) -> dict[str, dict]:
     return comparisons
 
 
+def summarize_recurrent_state_access(rows: list[dict]) -> dict:
+    by_configuration = {}
+    for row in rows:
+        backend = row.get("qwen35_moe_decode_backend")
+        expected = {
+            "sorted": {"prefill_indexed", "decode_contiguous_view"},
+            "batched": {"prefill_indexed", "decode_graph_indexed"},
+        }.get(backend)
+        if expected is None:
+            raise ValueError(
+                "performance row has unsupported MoE decode backend: "
+                f"{backend!r}"
+            )
+        paths = row.get("execution_paths", {})
+        required = paths.get("required", [])
+        observed = paths.get("observed_in_all_repeats", [])
+        required_set = set(required) if isinstance(required, list) else set()
+        observed_set = set(observed) if isinstance(observed, list) else set()
+        missing_required = sorted(expected - required_set)
+        missing_observed = sorted(expected - observed_set)
+        label = row.get("label")
+        tp_name = f"tp{row['tensor_parallel_size']}"
+        configuration_name = (
+            f"{label}:state={row['recurrent_state_dtype']}:"
+            f"kv={row['kv_cache_dtype']}:moe={backend}"
+        )
+        by_tp = by_configuration.setdefault(tp_name, {})
+        if configuration_name in by_tp:
+            raise ValueError(
+                "duplicate performance configuration for recurrent-state "
+                f"evidence: {tp_name}/{configuration_name}"
+            )
+        by_tp[configuration_name] = {
+            "valid": not missing_required and not missing_observed,
+            "expected": sorted(expected),
+            "required": sorted(required_set),
+            "observed_in_all_repeats": sorted(observed_set),
+            "missing_from_required": missing_required,
+            "missing_from_observed": missing_observed,
+        }
+    return {
+        "all_configurations_valid": (
+            bool(by_configuration)
+            and all(
+                item["valid"]
+                for by_tp in by_configuration.values()
+                for item in by_tp.values()
+            )
+        ),
+        "by_configuration": by_configuration,
+    }
+
+
 def summarize_attention_case(result: dict, *, partitioned: bool) -> dict:
     reference = result["results"]["flash_reference"]
     fused = [
@@ -710,6 +763,9 @@ def summarize(run_dir: Path, run_id: str) -> dict:
         key=lambda row: row["median"]["peak_torch_allocated_mib"],
     )
     moe_runtime = summarize_moe_runtime(performance["runs"])
+    recurrent_state_access = summarize_recurrent_state_access(
+        performance["runs"]
+    )
 
     kernels = {}
     normalization = {}
@@ -1243,7 +1299,10 @@ def summarize(run_dir: Path, run_id: str) -> dict:
             recurrent_storage_matches_preflight
         ),
         "kv_storage_matches_preflight": kv_storage_matches_preflight,
-        "performance_paths_valid": performance["all_execution_paths_valid"],
+        "performance_paths_valid": (
+            performance["all_execution_paths_valid"]
+            and recurrent_state_access["all_configurations_valid"]
+        ),
         "performance_generation_valid": performance["all_generation_valid"],
         "performance_output_parity": performance["all_output_digests_match"],
         "moe_runtime_output_parity": all(
@@ -1352,6 +1411,7 @@ def summarize(run_dir: Path, run_id: str) -> dict:
         "performance": {
             "best_throughput": best_throughput,
             "lowest_peak_memory": lowest_memory,
+            "recurrent_state_access": recurrent_state_access,
         },
         "memory": {
             "by_tp": memory_by_tp,

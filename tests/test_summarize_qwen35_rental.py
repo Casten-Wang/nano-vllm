@@ -280,6 +280,13 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
             "generated_token_ids_digest": "tokens",
             "repeat_output_digests_match": True,
             "execution_paths_valid": True,
+            "execution_paths": {
+                "required": ["prefill_indexed", "decode_contiguous_view"],
+                "observed_in_all_repeats": [
+                    "prefill_indexed",
+                    "decode_contiguous_view",
+                ],
+            },
             "generation_valid": True,
             "storage": {
                 "num_kvcache_blocks": 1,
@@ -321,6 +328,13 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
             "generated_token_ids_digest": "tokens",
             "repeat_output_digests_match": True,
             "execution_paths_valid": True,
+            "execution_paths": {
+                "required": ["prefill_indexed", "decode_graph_indexed"],
+                "observed_in_all_repeats": [
+                    "prefill_indexed",
+                    "decode_graph_indexed",
+                ],
+            },
             "generation_valid": True,
             "storage": {
                 "num_kvcache_blocks": 1,
@@ -650,6 +664,9 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     )
     assert report["performance"]["best_throughput"]["label"] == "batched"
     assert report["performance"]["lowest_peak_memory"]["label"] == "sorted"
+    state_access = report["performance"]["recurrent_state_access"]
+    assert state_access["all_configurations_valid"]
+    assert len(state_access["by_configuration"]["tp4"]) == 4
     assert report["graph_safe_moe"]["all_tp_promoted"]
     assert report["hybrid_cudagraph"]["all_tp_passed"]
     assert report["hybrid_cudagraph"]["by_tp"]["tp4"]["short"][
@@ -751,6 +768,20 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
 
     performance_path = tmp_path / f"performance/{run_id}_matrix_summary.json"
     performance_result = json.loads(performance_path.read_text())
+    performance_result["runs"][0]["execution_paths"][
+        "observed_in_all_repeats"
+    ] = ["prefill_indexed", "decode_indexed_copy"]
+    write(performance_path, performance_result)
+    invalid_state_path_report = MODULE.summarize(tmp_path, run_id)
+    state_access = invalid_state_path_report["performance"][
+        "recurrent_state_access"
+    ]
+    assert not state_access["all_configurations_valid"]
+    assert not invalid_state_path_report["evidence"]["performance_paths_valid"]
+    assert not invalid_state_path_report["valid"]
+    performance_result["runs"][0]["execution_paths"][
+        "observed_in_all_repeats"
+    ] = ["prefill_indexed", "decode_contiguous_view"]
     performance_result["runs"][0]["storage"]["recurrent_state_storage_by_rank"][1][
         "rotary_cache_bytes_local_rank"
     ] = 8192
