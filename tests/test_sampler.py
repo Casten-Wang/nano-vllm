@@ -305,6 +305,77 @@ class SamplerTest(unittest.TestCase):
 
         self.assertTrue(torch.equal(actual, expected))
 
+    def test_all_top_k_sampling_avoids_full_vocab_filter(self):
+        sampler = Sampler()
+        logits = torch.tensor(
+            [[1.0, 9.0, 2.0, 8.0, 3.0], [7.0, 1.0, 6.0, 2.0, 5.0]],
+            dtype=torch.bfloat16,
+        )
+        temperatures = torch.tensor([1.0, 0.7])
+        top_ks = torch.tensor([2, 3], dtype=torch.int32)
+        top_ps = torch.tensor([1.0, 0.8])
+        metadata = build_sampling_metadata(
+            temperatures.tolist(),
+            top_ks.tolist(),
+            top_ps.tolist(),
+            vocab_size=logits.size(1),
+        )
+        def unit_exponential(tensor, *args, **kwargs):
+            return tensor.fill_(1)
+
+        with (
+            unittest.mock.patch.object(
+                sampler_module,
+                "apply_top_k_top_p",
+                side_effect=AssertionError("full-vocabulary filter must not run"),
+            ),
+            unittest.mock.patch.object(
+                torch.Tensor,
+                "exponential_",
+                new=unit_exponential,
+            ),
+        ):
+            actual = sampler(
+                logits,
+                temperatures,
+                top_ks,
+                top_ps,
+                metadata,
+            )
+
+        self.assertTrue(torch.equal(actual, torch.tensor([1, 0])))
+
+    def test_mixed_greedy_and_top_k_sampling_uses_compact_candidates(self):
+        sampler = Sampler()
+        logits = torch.tensor(
+            [[1.0, 9.0, 2.0, 8.0], [7.0, 1.0, 6.0, 2.0]],
+            dtype=torch.bfloat16,
+        )
+        temperatures = torch.tensor([0.0, 0.7])
+        top_ks = torch.tensor([-1, 2], dtype=torch.int32)
+        top_ps = torch.tensor([1.0, 0.9])
+        metadata = build_sampling_metadata(
+            temperatures.tolist(),
+            top_ks.tolist(),
+            top_ps.tolist(),
+            vocab_size=logits.size(1),
+        )
+
+        with unittest.mock.patch.object(
+            torch.Tensor,
+            "exponential_",
+            new=lambda tensor, *args, **kwargs: tensor.fill_(1),
+        ):
+            actual = sampler(
+                logits,
+                temperatures,
+                top_ks,
+                top_ps,
+                metadata,
+            )
+
+        self.assertTrue(torch.equal(actual, torch.tensor([1, 0])))
+
 
 if __name__ == "__main__":
     unittest.main()

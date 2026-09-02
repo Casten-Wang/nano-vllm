@@ -78,6 +78,29 @@ def test_sampling_filter_benchmark_covers_unfiltered_and_top_k_paths():
     assert all(item["uses_host_sampling_metadata"] for item in result.values())
 
 
+def test_compact_top_k_sampling_benchmark_tracks_fp32_reduction():
+    args = SimpleNamespace(
+        sampling_batch=4,
+        vocab_size=16,
+        sampling_top_k=3,
+        sampling_top_p=0.9,
+        warmup=0,
+        iterations=1,
+        repeats=1,
+    )
+
+    result = MODULE.benchmark_compact_top_k_sampling(
+        args,
+        torch.device("cpu"),
+        torch.bfloat16,
+    )
+
+    assert result["full_fp32_logits_mib"] == 4 * 16 * 4 / 1024 / 1024
+    assert result["compact_fp32_logits_mib"] == 4 * 3 * 4 / 1024 / 1024
+    assert result["avoided_fp32_logits_mib"] == 4 * 13 * 4 / 1024 / 1024
+    assert result["errors"][0]["max_abs_error"] == 0
+
+
 def test_greedy_sampler_benchmark_tracks_avoided_fp32_logits():
     args = SimpleNamespace(
         sampling_batch=4,

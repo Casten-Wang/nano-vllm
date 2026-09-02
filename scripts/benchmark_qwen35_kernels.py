@@ -316,6 +316,81 @@ def benchmark_sampling_filter(args, device, dtype) -> dict:
     return results
 
 
+def benchmark_compact_top_k_sampling(args, device, dtype) -> dict:
+    logits = torch.randn(
+        args.sampling_batch,
+        args.vocab_size,
+        device=device,
+        dtype=dtype,
+    )
+    temperatures = torch.ones(args.sampling_batch, device=device)
+    top_ks = torch.full(
+        (args.sampling_batch,),
+        args.sampling_top_k,
+        device=device,
+        dtype=torch.int32,
+    )
+    top_ps = torch.full(
+        (args.sampling_batch,),
+        args.sampling_top_p,
+        device=device,
+    )
+
+    def reference():
+        filtered = SAMPLER.apply_top_k_top_p(
+            logits.float().div(temperatures.unsqueeze(1)),
+            top_ks,
+            top_ps,
+        )
+        return torch.softmax(filtered, dim=-1)
+
+    def candidate():
+        selected, indices = SAMPLER.compact_top_k_logits(
+            logits,
+            temperatures,
+            top_ks,
+            top_ps,
+            args.sampling_top_k,
+            args.sampling_top_p < 1.0,
+        )
+        return torch.softmax(selected, dim=-1), indices
+
+    expected = reference()
+    selected_probs, selected_indices = candidate()
+    actual = torch.zeros_like(expected).scatter_(
+        -1,
+        selected_indices,
+        selected_probs,
+    )
+    reference_timing = measure(
+        reference,
+        device=device,
+        warmup=args.warmup,
+        iterations=args.iterations,
+        repeats=args.repeats,
+    )
+    candidate_timing = measure(
+        candidate,
+        device=device,
+        warmup=args.warmup,
+        iterations=args.iterations,
+        repeats=args.repeats,
+    )
+    full_fp32_mib = logits.numel() * 4 / 1024 / 1024
+    compact_fp32_mib = (
+        args.sampling_batch * args.sampling_top_k * 4 / 1024 / 1024
+    )
+    return {
+        "reference": reference_timing,
+        "candidate": candidate_timing,
+        "speedup": reference_timing["median_ms"] / candidate_timing["median_ms"],
+        "errors": [error(actual, expected)],
+        "full_fp32_logits_mib": full_fp32_mib,
+        "compact_fp32_logits_mib": compact_fp32_mib,
+        "avoided_fp32_logits_mib": full_fp32_mib - compact_fp32_mib,
+    }
+
+
 def benchmark_greedy_sampler(args, device, dtype) -> dict:
     logits = torch.randn(
         args.sampling_batch,
@@ -2314,6 +2389,11 @@ def main() -> None:
         benchmark_results = {
             "router_topk_first": benchmark_router(args, device, dtype),
             "sampling_filter_fast_paths": benchmark_sampling_filter(
+                args,
+                device,
+                dtype,
+            ),
+            "compact_top_k_sampling": benchmark_compact_top_k_sampling(
                 args,
                 device,
                 dtype,

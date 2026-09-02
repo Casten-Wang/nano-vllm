@@ -425,6 +425,15 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
                     "avoided_fp32_logits_mib": 64.0,
                     "uses_host_sampling_metadata": True,
                 },
+                "compact_top_k_sampling": {
+                    "reference": {"peak_extra_mib": 32.0},
+                    "candidate": {"peak_extra_mib": 2.0},
+                    "speedup": 1.2,
+                    "errors": [{"max_abs_error": 0.0}],
+                    "full_fp32_logits_mib": 32.0,
+                    "compact_fp32_logits_mib": 1.0,
+                    "avoided_fp32_logits_mib": 31.0,
+                },
                 "decode_convolution_state_reuse": {
                     "reference": {"peak_extra_mib": 16.0},
                     "candidate": {"peak_extra_mib": 8.0},
@@ -637,6 +646,9 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     assert report["buffer_reuse"]["by_tp"]["tp4"]["torch_kv_dequant"][
         "workspace"
     ]["avoided_output_workspace_mib"] == 16.0
+    assert report["buffer_reuse"]["by_tp"]["tp4"]["sampling_compact_top_k"][
+        "workspace"
+    ]["avoided_fp32_logits_mib"] == 31.0
     assert report["buffer_reuse"]["by_tp"]["tp4"]["attention_norm_output"][
         "workspace"
     ]["reused_projection_output_mib"] == 4.0

@@ -191,6 +191,62 @@ def apply_top_k_top_p(
     return filtered_logits
 
 
+def compact_top_k_logits(
+    logits: torch.Tensor,
+    temperatures: torch.Tensor,
+    top_ks: torch.Tensor,
+    top_ps: torch.Tensor,
+    max_top_k: int,
+    any_top_p_enabled: bool,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Build filtered FP32 logits only for selected top-k candidates."""
+
+    selected_logits, selected_indices = torch.topk(
+        logits,
+        max_top_k,
+        dim=-1,
+    )
+    selected_logits = selected_logits.float().div_(temperatures.unsqueeze(1))
+    ranks = torch.arange(max_top_k, device=logits.device).unsqueeze(0)
+    selected_logits.masked_fill_(
+        ranks >= top_ks.unsqueeze(1),
+        float("-inf"),
+    )
+    if any_top_p_enabled:
+        selected_probs = torch.softmax(selected_logits, dim=-1)
+        cumulative_probs = torch.cumsum(selected_probs, dim=-1)
+        selected_remove = cumulative_probs > top_ps.unsqueeze(1)
+        selected_remove[:, 1:] = selected_remove[:, :-1].clone()
+        selected_remove[:, 0] = False
+        selected_logits.masked_fill_(selected_remove, float("-inf"))
+    return selected_logits, selected_indices
+
+
+def sample_top_k_compact(
+    logits: torch.Tensor,
+    temperatures: torch.Tensor,
+    top_ks: torch.Tensor,
+    top_ps: torch.Tensor,
+    max_top_k: int,
+    any_top_p_enabled: bool,
+) -> torch.Tensor:
+    """Sample from top-k candidates without materializing FP32 full logits."""
+
+    selected_logits, selected_indices = compact_top_k_logits(
+        logits,
+        temperatures,
+        top_ks,
+        top_ps,
+        max_top_k,
+        any_top_p_enabled,
+    )
+    probabilities = torch.softmax(selected_logits, dim=-1)
+    selected_offsets = probabilities.div_(
+        torch.empty_like(probabilities).exponential_(1).clamp_min_(1e-10)
+    ).argmax(dim=-1)
+    return selected_indices.gather(1, selected_offsets.unsqueeze(1)).squeeze(1)
+
+
 class Sampler(nn.Module):
 
     def forward(
@@ -248,15 +304,51 @@ class Sampler(nn.Module):
             else not bool(greedy_mask.any())
         )
         sample_mask = None if all_sampling else ~greedy_mask
-        sample_logits = (
+        sample_source = (
             logits if all_sampling else logits[sample_mask]
-        ).float().div(
-            (temperatures if all_sampling else temperatures[sample_mask]).unsqueeze(dim=1)
+        )
+        sample_temperatures = (
+            temperatures if all_sampling else temperatures[sample_mask]
+        )
+        sample_top_ks = top_ks if all_sampling else top_ks[sample_mask]
+        sample_top_ps = top_ps if all_sampling else top_ps[sample_mask]
+        if metadata is not None:
+            all_top_k_enabled = metadata.all_top_k_enabled
+            any_top_p_enabled = metadata.any_top_p_enabled
+            max_top_k = metadata.max_top_k
+        else:
+            sample_top_k_enabled = (
+                (sample_top_ks > 0) & (sample_top_ks < logits.size(1))
+            )
+            all_top_k_enabled = bool(sample_top_k_enabled.all())
+            any_top_p_enabled = bool((sample_top_ps < 1.0).any())
+            max_top_k = (
+                int(sample_top_ks.max().item())
+                if all_top_k_enabled
+                else 0
+            )
+        if all_top_k_enabled:
+            sample_tokens = sample_top_k_compact(
+                sample_source,
+                sample_temperatures,
+                sample_top_ks,
+                sample_top_ps,
+                max_top_k,
+                any_top_p_enabled,
+            )
+            if all_sampling:
+                return sample_tokens
+            greedy_tokens = logits.argmax(dim=-1)
+            greedy_tokens[sample_mask] = sample_tokens
+            return greedy_tokens
+
+        sample_logits = sample_source.float().div(
+            sample_temperatures.unsqueeze(dim=1)
         )
         sample_logits = apply_top_k_top_p(
             sample_logits,
-            top_ks if all_sampling else top_ks[sample_mask],
-            top_ps if all_sampling else top_ps[sample_mask],
+            sample_top_ks,
+            sample_top_ps,
             metadata,
         )
         probs = torch.softmax(sample_logits, dim=-1)
