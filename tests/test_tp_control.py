@@ -169,6 +169,36 @@ def make_runner(rank: int, events):
 
 
 class TPControlTest(unittest.TestCase):
+    def test_collective_rpc_is_published_before_waiting_for_workers(self):
+        runner = make_runner(
+            0,
+            [(FakeEvent(), FakeEvent(ready=True), bytearray(CONTROL_STATUS_SIZE))],
+        )
+        runner.worker_control_failed = False
+        calls = []
+        runner.write_shm = lambda method_name, *args: calls.append(
+            ("publish", method_name)
+        )
+        runner.get_kv_cache_stats_by_rank = lambda: (
+            calls.append(("collective", "get_kv_cache_stats_by_rank")) or [
+                {"rank": 0},
+                {"rank": 1},
+            ]
+        )
+        runner.wait_for_workers = lambda: calls.append(("wait", None))
+
+        stats = runner.call("get_kv_cache_stats_by_rank")
+
+        self.assertEqual(stats, [{"rank": 0}, {"rank": 1}])
+        self.assertEqual(
+            calls,
+            [
+                ("publish", "get_kv_cache_stats_by_rank"),
+                ("collective", "get_kv_cache_stats_by_rank"),
+                ("wait", None),
+            ],
+        )
+
     def test_single_rank_cuda_memory_stats(self):
         runner = object.__new__(ModelRunner)
         runner.rank = 0
@@ -495,6 +525,39 @@ class HybridStateContextTest(unittest.TestCase):
         self.assertEqual(
             stats,
             [{"rank": 0, "data_bytes": 20, "scale_bytes": 8, "total_bytes": 28}],
+        )
+
+    def test_multi_rank_kv_cache_stats_are_gathered(self):
+        runner = object.__new__(ModelRunner)
+        runner.rank = 0
+        runner.world_size = 2
+        runner.kv_cache = FakeTensor(range(10))
+        runner.kv_scale = FakeTensor(range(4))
+        original_gather = getattr(model_runner_module.dist, "all_gather_object", None)
+
+        def gather(output, local):
+            output[:] = [local, {
+                "rank": 1,
+                "data_bytes": 24,
+                "scale_bytes": 10,
+                "total_bytes": 34,
+            }]
+
+        model_runner_module.dist.all_gather_object = gather
+        try:
+            stats = runner.get_kv_cache_stats_by_rank()
+        finally:
+            if original_gather is None:
+                del model_runner_module.dist.all_gather_object
+            else:
+                model_runner_module.dist.all_gather_object = original_gather
+
+        self.assertEqual(
+            stats,
+            [
+                {"rank": 0, "data_bytes": 20, "scale_bytes": 8, "total_bytes": 28},
+                {"rank": 1, "data_bytes": 24, "scale_bytes": 10, "total_bytes": 34},
+            ],
         )
 
 
