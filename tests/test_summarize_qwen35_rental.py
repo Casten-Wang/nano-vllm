@@ -198,6 +198,39 @@ def write_mixed_case(root):
         )
 
 
+def write_pressure_case(root):
+    write(
+        root / "pressure/tp4.json",
+        {
+            "commit": "abc",
+            "git_dirty": False,
+            "cuda_available": True,
+            "tensor_parallel_size": 4,
+            "initial_seqs": MODULE.PRESSURE_INITIAL_SEQUENCES,
+            "injected_seqs": MODULE.PRESSURE_INJECTED_SEQUENCES,
+            "initial_input_len": 256,
+            "injected_input_len": 1024,
+            "output_len": 16,
+            "num_kvcache_blocks_override": MODULE.PRESSURE_KV_BLOCKS,
+            "num_kvcache_blocks": MODULE.PRESSURE_KV_BLOCKS,
+            "enable_dynamic_chunked_prefill": True,
+            "injected": True,
+            "expected_requests": 8,
+            "finished_requests": 8,
+            "total_time_s": 10.0,
+            "peak_torch_allocated_mib": 12_000.0,
+            "metrics": {
+                "preemption_count": 1,
+                "preempted_token_progress": 1025,
+                "max_preempted_token_progress": 1025,
+                "reclaimed_kv_blocks": 4,
+            },
+            "execution_validation": {"valid": True},
+            "generation_validation": {"valid": True},
+        },
+    )
+
+
 def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     run_id = "rental-a"
     write(
@@ -771,6 +804,7 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     )
     write_long_prefill_case(tmp_path)
     write_mixed_case(tmp_path)
+    write_pressure_case(tmp_path)
 
     report = MODULE.summarize(tmp_path, run_id)
 
@@ -927,6 +961,10 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     assert attention["long"]["production_workspace_reuse"][
         "promote_to_runtime"
     ]
+    pressure = report["kv_pressure"]["by_tp"]["tp4"]
+    assert pressure["valid"]
+    assert pressure["preemption_count"] == 1
+    assert pressure["preempted_token_progress"] == 1025
     memory = report["memory"]["by_tp"]["tp4"]
     assert memory["int8_kv_reduction_ratio"] == 0.49609375
     assert memory["minimum_budget_margin_bytes"] == 5_000

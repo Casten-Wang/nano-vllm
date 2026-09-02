@@ -98,13 +98,14 @@ for name, module in SAVED_MODULES.items():
         sys.modules[name] = module
 
 
-def make_scheduler(max_tokens=8, max_seqs=8, block_size=4):
+def make_scheduler(max_tokens=8, max_seqs=8, block_size=4, num_blocks=32):
     Sequence.block_size = block_size
     return Scheduler(
         FakeConfig(
             max_num_seqs=max_seqs,
             max_num_batched_tokens=max_tokens,
             kvcache_block_size=block_size,
+            num_kvcache_blocks=num_blocks,
         )
     )
 
@@ -313,6 +314,47 @@ def test_dynamic_scheduler_reserves_prefill_after_starvation_threshold():
     assert waiting.num_scheduled_tokens == 1
     assert scheduler.current_prefill_starvation_steps == 0
     assert scheduler.max_prefill_starvation_steps == 2
+
+
+def test_kv_pressure_workload_preempts_and_eventually_completes():
+    scheduler = make_scheduler(
+        max_tokens=2048,
+        max_seqs=8,
+        block_size=256,
+        num_blocks=12,
+    )
+    initial = [Sequence([token] * 256) for token in range(1, 5)]
+    for seq in initial:
+        seq.max_tokens = 16
+        scheduler.add(seq)
+    all_sequences = list(initial)
+    injected = False
+    decode_steps = 0
+
+    for _ in range(100):
+        if scheduler.is_finished():
+            break
+        result = scheduler.schedule()
+        scheduler.postprocess_mixed(result, [100] * len(result.seqs))
+        if result.decode_seqs and not injected:
+            decode_steps += 1
+            if decode_steps == 1:
+                added = [Sequence([token] * 1024) for token in range(5, 9)]
+                for seq in added:
+                    seq.max_tokens = 16
+                    scheduler.add(seq)
+                all_sequences.extend(added)
+                injected = True
+    else:
+        raise AssertionError("KV-pressure workload did not terminate")
+
+    assert injected
+    assert scheduler.is_finished()
+    assert all(seq.is_finished for seq in all_sequences)
+    assert scheduler.preemption_count > 0
+    assert scheduler.preempted_token_progress > 0
+    assert scheduler.reclaimed_kv_blocks > 0
+    assert scheduler.block_manager.num_used_blocks == 0
 
 
 def test_dynamic_prefill_only_result_uses_prefill_mode():

@@ -28,6 +28,9 @@ OFFICIAL_CHECKPOINT_REVISION = "59d61f3ce65a6d9863b86d2e96597125219dc754"
 QUALITY_MAX_PROMPT_LENGTH = 8_192
 QUALITY_CONTINUATION_LENGTH = 16
 MIXED_CONCURRENT_SEQUENCES = 16
+PRESSURE_KV_BLOCKS = 12
+PRESSURE_INITIAL_SEQUENCES = 4
+PRESSURE_INJECTED_SEQUENCES = 4
 SOURCE_ROOTS = (ROOT / "nanovllm", ROOT / "scripts")
 SOURCE_FILES = (ROOT / "pyproject.toml",)
 
@@ -227,6 +230,48 @@ def commands(args: argparse.Namespace) -> list[tuple[str, list[str]]]:
                     ],
                 )
             )
+        result.append(
+            (
+                f"pressure-tp{tp_size}",
+                [
+                    sys.executable,
+                    str(ONLINE_MIXED_SCRIPT),
+                    "--model",
+                    args.model,
+                    "--tensor-parallel-size",
+                    str(tp_size),
+                    "--qwen35-moe-decode-backend",
+                    "batched",
+                    "--initial-seqs",
+                    str(PRESSURE_INITIAL_SEQUENCES),
+                    "--injected-seqs",
+                    str(PRESSURE_INJECTED_SEQUENCES),
+                    "--initial-input-len",
+                    "256",
+                    "--injected-input-len",
+                    "1024",
+                    "--output-len",
+                    "16",
+                    "--temperature",
+                    "0",
+                    "--inject-after-decode-steps",
+                    "1",
+                    "--max-model-len",
+                    str(args.max_model_len),
+                    "--max-num-batched-tokens",
+                    "2048",
+                    "--max-num-seqs",
+                    str(PRESSURE_INITIAL_SEQUENCES + PRESSURE_INJECTED_SEQUENCES),
+                    "--num-kvcache-blocks-override",
+                    str(PRESSURE_KV_BLOCKS),
+                    "--enable-dynamic-chunked-prefill",
+                    "--require-paths",
+                    "mixed_eager",
+                    "--output",
+                    str(root / "pressure" / f"tp{tp_size}.json"),
+                ],
+            )
+        )
         result.append(
             (
                 f"kernels-long-prefill-tp{tp_size}",
@@ -483,6 +528,10 @@ def collect_stage_artifacts(
         tp_name, repeat_name = stage_name.removeprefix("mixed-").rsplit("-", 1)
         search_root = root / "mixed" / tp_name
         required = [search_root / f"{repeat_name}.json"]
+    elif stage_name.startswith("pressure-tp"):
+        tp_name = stage_name.removeprefix("pressure-")
+        search_root = root / "pressure"
+        required = [search_root / f"{tp_name}.json"]
     elif stage_name.startswith("cudagraph-"):
         _, context_name, tp_name = stage_name.split("-")
         search_root = root / "cudagraph" / tp_name / context_name
@@ -521,6 +570,7 @@ def collect_stage_artifacts(
         or stage_name.startswith("kernels-")
         or stage_name.startswith("attention-")
         or stage_name.startswith("mixed-")
+        or stage_name.startswith("pressure-")
         or stage_name.startswith("cudagraph-")
         else sorted(search_root.rglob("*.json"))
     )

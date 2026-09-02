@@ -50,6 +50,7 @@ def test_commands_are_fail_fast_and_cover_complete_validation_suite():
         "mixed-tp4-r1",
         "mixed-tp4-r2",
         "mixed-tp4-r3",
+        "pressure-tp4",
         "kernels-long-prefill-tp4",
         "attention-short-tp4",
         "attention-long-tp4",
@@ -60,6 +61,7 @@ def test_commands_are_fail_fast_and_cover_complete_validation_suite():
         "mixed-tp8-r1",
         "mixed-tp8-r2",
         "mixed-tp8-r3",
+        "pressure-tp8",
         "kernels-long-prefill-tp8",
         "attention-short-tp8",
         "attention-long-tp8",
@@ -87,6 +89,11 @@ def test_commands_are_fail_fast_and_cover_complete_validation_suite():
     assert mixed[mixed.index("--temperature") + 1] == "0"
     assert "--enable-dynamic-chunked-prefill" in mixed
     assert mixed[mixed.index("--require-paths") + 1] == "mixed_eager"
+    pressure = commands["pressure-tp4"]
+    assert pressure[pressure.index("--num-kvcache-blocks-override") + 1] == "12"
+    assert pressure[pressure.index("--initial-input-len") + 1] == "256"
+    assert pressure[pressure.index("--injected-input-len") + 1] == "1024"
+    assert pressure[pressure.index("--output-len") + 1] == "16"
     long_prefill = commands["kernels-long-prefill-tp4"]
     assert "--prefill-only" in long_prefill
     assert long_prefill[long_prefill.index("--prefill-tokens") + 1] == "8192"
@@ -263,6 +270,20 @@ def test_mixed_stage_collects_only_its_repeat(tmp_path):
     artifacts = MODULE.collect_stage_artifacts(arguments, "mixed-tp4-r2")
 
     assert artifacts == [second]
+
+
+def test_pressure_stage_collects_its_tp_artifact(tmp_path):
+    arguments = args()
+    arguments.result_dir = str(tmp_path)
+    pressure_dir = tmp_path / arguments.run_id / "pressure"
+    pressure_dir.mkdir(parents=True)
+    artifact = pressure_dir / "tp4.json"
+    artifact.write_text('{"valid": true}\n')
+    (pressure_dir / "tp8.json").write_text('{"valid": true}\n')
+
+    artifacts = MODULE.collect_stage_artifacts(arguments, "pressure-tp4")
+
+    assert artifacts == [artifact]
 
 
 def test_manifest_rejects_changed_completed_artifact(tmp_path):
