@@ -778,6 +778,12 @@ def test_single_token_dispatch_reports_general_path_baseline():
     assert result["single_token_decode_fast_path"]
     assert result["general_dispatch_baseline"]["median_ms"] > 0
     assert result["decode_fast_path_speedup"] > 0
+    device_scalar = result["device_scalar_candidate"]
+    assert device_scalar["avoids_host_route_sync"]
+    assert device_scalar["speedup_vs_current"] > 0
+    assert device_scalar["estimated_selected_weight_mib"] > 0
+    assert device_scalar["errors_vs_current"]["max_abs_error"] < 1e-5
+    assert not device_scalar["promotion"]["promote_to_runtime"]
     graph_safe = result["graph_safe_batched_candidate"]
     assert graph_safe["speedup_vs_current"] > 0
     assert graph_safe["estimated_selected_weight_mib"] > 0
@@ -786,6 +792,39 @@ def test_single_token_dispatch_reports_general_path_baseline():
     assert not graph_safe["promotion"]["promote_to_runtime"]
     assert not graph_safe["promotion"]["checks"]["cuda_measurement"]
     assert set(result["graph_safe_chunk_sweep"]["candidates"]) == {"1", "2"}
+
+
+def test_device_scalar_decode_matches_sorted_without_host_sync(monkeypatch):
+    torch.manual_seed(131)
+    hidden = torch.randn(1, 4)
+    topk_ids = torch.tensor([[3, 0]])
+    topk_weights = torch.tensor([[0.4, 0.6]])
+    gate_up = torch.randn(4, 6, 4)
+    down = torch.randn(4, 4, 3)
+    expected = MODULE.expert_dispatch(
+        hidden,
+        topk_ids,
+        topk_weights,
+        gate_up,
+        down,
+    )
+
+    monkeypatch.setattr(
+        torch.Tensor,
+        "cpu",
+        lambda _tensor: (_ for _ in ()).throw(
+            AssertionError("candidate must keep route metadata on device")
+        ),
+    )
+    actual = MODULE.expert_dispatch_device_scalar_decode(
+        hidden,
+        topk_ids,
+        topk_weights,
+        gate_up,
+        down,
+    )
+
+    torch.testing.assert_close(actual, expected)
 
 
 def test_chunk_recommendation_uses_worst_decode_batch_speedup():

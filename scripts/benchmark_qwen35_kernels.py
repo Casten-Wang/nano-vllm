@@ -767,6 +767,32 @@ def expert_dispatch(
     )
 
 
+def expert_dispatch_device_scalar_decode(
+    hidden_states: torch.Tensor,
+    topk_ids: torch.Tensor,
+    topk_weights: torch.Tensor,
+    gate_up_proj: torch.Tensor,
+    down_proj: torch.Tensor,
+) -> torch.Tensor:
+    """Single-token candidate that keeps sorted route metadata on device."""
+
+    if hidden_states.shape[0] != 1:
+        raise ValueError("device-scalar dispatch requires one decode token")
+    output = torch.zeros_like(hidden_states)
+    route_order = torch.argsort(topk_ids[0], stable=True)
+    for route_index in route_order.unbind():
+        expert_id = topk_ids[0, route_index].reshape(1)
+        selected_gate_up = gate_up_proj.index_select(0, expert_id).squeeze(0)
+        gate_up = F.linear(hidden_states, selected_gate_up)
+        del selected_gate_up
+        gate, up = gate_up.chunk(2, dim=-1)
+        selected_down = down_proj.index_select(0, expert_id).squeeze(0)
+        expert_output = F.linear(F.silu(gate) * up, selected_down)
+        del selected_down
+        output.add_(expert_output * topk_weights[0, route_index])
+    return output
+
+
 def expert_dispatch_general(
     hidden_states: torch.Tensor,
     topk_ids: torch.Tensor,
@@ -1057,6 +1083,56 @@ def benchmark_expert_dispatch(args, device, dtype, token_count: int) -> dict:
         result["decode_fast_path_speedup"] = (
             general_timing["median_ms"] / result["candidate"]["median_ms"]
         )
+        device_scalar_output = expert_dispatch_device_scalar_decode(
+            hidden,
+            topk_ids,
+            topk_weights,
+            gate_up_proj,
+            down_proj,
+        )
+        device_scalar_timing = measure(
+            lambda: expert_dispatch_device_scalar_decode(
+                hidden,
+                topk_ids,
+                topk_weights,
+                gate_up_proj,
+                down_proj,
+            ),
+            device=device,
+            warmup=args.warmup,
+            iterations=args.iterations,
+            repeats=args.repeats,
+        )
+        device_scalar_timing.update(
+            {
+                "speedup_vs_current": (
+                    result["candidate"]["median_ms"]
+                    / device_scalar_timing["median_ms"]
+                ),
+                "errors_vs_current": error(device_scalar_output, output),
+                "avoids_host_route_sync": True,
+                "estimated_selected_weight_mib": (
+                    3
+                    * local_intermediate_size
+                    * args.hidden_size
+                    * hidden.element_size()
+                    / 1024
+                    / 1024
+                ),
+            }
+        )
+        device_scalar_timing["promotion"] = evaluate_graph_safe_moe_candidate(
+            device_type=device.type,
+            speedup=device_scalar_timing["speedup_vs_current"],
+            peak_extra_mib=device_scalar_timing["peak_extra_mib"],
+            max_abs_error=device_scalar_timing["errors_vs_current"][
+                "max_abs_error"
+            ],
+            min_speedup=args.moe_graph_safe_min_speedup,
+            max_peak_extra_mib=args.moe_graph_safe_max_peak_extra_mib,
+            max_allowed_abs_error=args.moe_graph_safe_max_abs_error,
+        )
+        result["device_scalar_candidate"] = device_scalar_timing
     if token_count <= args.max_decode_tokens:
         chunk_sizes = tuple(
             sorted(
