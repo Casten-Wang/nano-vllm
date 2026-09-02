@@ -327,6 +327,38 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
                     "reused_gate_fp32_workspace_mib": 4.0,
                     "candidate_reuses_fp32_workspaces": True,
                 },
+                "moe_output_buffer_reuse": {
+                    "reference": {"peak_extra_mib": 12.0},
+                    "candidate": {"peak_extra_mib": 4.0},
+                    "speedup": 1.1,
+                    "errors": [{"max_abs_error": 0.0}],
+                    "reused_routed_output_mib": 4.0,
+                    "reused_shared_output_mib": 4.0,
+                    "reused_gate_mib": 0.01,
+                },
+                "residual_output_buffer_reuse": {
+                    "reference": {"peak_extra_mib": 8.0},
+                    "candidate": {"peak_extra_mib": 4.0},
+                    "speedup": 1.05,
+                    "errors": [{"max_abs_error": 0.0}],
+                    "reused_branch_output_mib_per_merge": 4.0,
+                    "residual_merges_per_decoder_layer": 2,
+                },
+                "torch_kv_dequant_buffer_reuse": {
+                    "reference": {"peak_extra_mib": 32.0},
+                    "candidate": {"peak_extra_mib": 16.0},
+                    "speedup": 1.1,
+                    "errors": [{"max_abs_error": 0.0}],
+                    "avoided_output_workspace_mib": 16.0,
+                },
+                "specialized_delta_decode": {
+                    "reference": {"peak_extra_mib": 24.0},
+                    "candidate": {"peak_extra_mib": 8.0},
+                    "speedup": 1.2,
+                    "errors": [{"max_abs_error": 0.0}],
+                    "reused_recurrent_state_mib": 8.0,
+                    "avoided_full_state_intermediates": 2,
+                },
             },
         },
     )
@@ -357,6 +389,7 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     assert report["evidence"]["long_prefill_kernel_evidence"]
     assert report["evidence"]["mixed_workload_evidence"]
     assert report["evidence"]["normalization_workspace_evidence"]
+    assert report["evidence"]["buffer_reuse_evidence"]
     assert report["long_prefill"]["by_tp"]["tp4"]["valid"]
     chunk_sweep = report["long_prefill"]["by_tp"]["tp4"]["chunk_sweep"]
     assert chunk_sweep["fastest_chunk_size"] == 64
@@ -372,6 +405,12 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     assert report["normalization"]["by_tp"]["tp4"]["gated_rmsnorm"][
         "workspace"
     ]["reused_gate_fp32_workspace_mib"] == 4.0
+    assert report["buffer_reuse"]["by_tp"]["tp4"]["torch_kv_dequant"][
+        "workspace"
+    ]["avoided_output_workspace_mib"] == 16.0
+    assert report["buffer_reuse"]["by_tp"]["tp4"]["recurrent_decode"][
+        "metadata"
+    ]["avoided_full_state_intermediates"] == 2
     assert report["graph_safe_moe"]["by_tp"]["tp4"]["promotion"][
         "selected_decode_batches"
     ] == [1, 64]
@@ -537,3 +576,39 @@ def test_memory_summary_rejects_non_saving_int8_cache():
 
     with pytest.raises(ValueError, match="does not reduce memory"):
         MODULE.summarize_memory_preflight(report)
+
+
+def test_buffer_reuse_summary_rejects_missing_workspace_metric():
+    result = {
+        "reference": {"peak_extra_mib": 2.0},
+        "candidate": {"peak_extra_mib": 1.0},
+        "speedup": 1.1,
+        "errors": [{"max_abs_error": 0.0}],
+    }
+
+    with pytest.raises(ValueError, match="missing workspace metrics"):
+        MODULE.summarize_buffer_reuse_candidate(
+            result,
+            ("reused_workspace_mib",),
+        )
+
+
+def test_buffer_reuse_summary_preserves_failed_accuracy_evidence():
+    result = {
+        "reference": {"peak_extra_mib": 2.0},
+        "candidate": {"peak_extra_mib": 1.0},
+        "speedup": 1.1,
+        "errors": [{"max_abs_error": 0.051}],
+        "reused_workspace_mib": 1.0,
+        "expected_count": 2,
+    }
+
+    summary = MODULE.summarize_buffer_reuse_candidate(
+        result,
+        ("reused_workspace_mib",),
+        {"expected_count": 2},
+    )
+
+    assert not summary["valid"]
+    assert summary["max_abs_error"] == 0.051
+    assert summary["peak_extra_mib_delta"] == -1.0

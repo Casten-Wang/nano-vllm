@@ -24,6 +24,7 @@ LONG_PREFILL_TOKENS = 8192
 LONG_PREFILL_MAX_ABS_ERROR = 0.05
 MIXED_MAX_COEFFICIENT_OF_VARIATION = 0.10
 NORMALIZATION_MAX_ABS_ERROR = 0.05
+BUFFER_REUSE_MAX_ABS_ERROR = 0.05
 
 
 def load_json(path: Path) -> dict:
@@ -51,6 +52,50 @@ def summarize_normalization_candidate(result: dict, reuse_key: str) -> dict:
             for key, value in result.items()
             if key.endswith("_workspace_mib") or key == "avoided_fp32_copy_mib"
         },
+    }
+
+
+def summarize_buffer_reuse_candidate(
+    result: dict,
+    workspace_keys: tuple[str, ...],
+    required_metadata: dict[str, int] | None = None,
+) -> dict:
+    missing = [key for key in workspace_keys if key not in result]
+    if missing:
+        raise ValueError(
+            "buffer-reuse benchmark is missing workspace metrics: "
+            + ", ".join(missing)
+        )
+    errors = result.get("errors", [])
+    if not errors:
+        raise ValueError("buffer-reuse benchmark has no correctness metrics")
+    max_abs_error = max(item["max_abs_error"] for item in errors)
+    reference = result["reference"]
+    candidate = result["candidate"]
+    metadata = {
+        key: result.get(key) for key in (required_metadata or {})
+    }
+    metadata_valid = all(
+        metadata[key] == expected
+        for key, expected in (required_metadata or {}).items()
+    )
+    workspace = {key: result[key] for key in workspace_keys}
+    return {
+        "valid": (
+            all(value > 0 for value in workspace.values())
+            and metadata_valid
+            and max_abs_error <= BUFFER_REUSE_MAX_ABS_ERROR
+        ),
+        "speedup": result["speedup"],
+        "reference_peak_extra_mib": reference["peak_extra_mib"],
+        "candidate_peak_extra_mib": candidate["peak_extra_mib"],
+        "peak_extra_mib_delta": (
+            candidate["peak_extra_mib"] - reference["peak_extra_mib"]
+        ),
+        "max_abs_error": max_abs_error,
+        "max_allowed_abs_error": BUFFER_REUSE_MAX_ABS_ERROR,
+        "workspace": workspace,
+        "metadata": metadata,
     }
 
 
@@ -510,6 +555,7 @@ def summarize(run_dir: Path, run_id: str) -> dict:
 
     kernels = {}
     normalization = {}
+    buffer_reuse = {}
     long_prefill = {}
     mixed_runs = {}
     configured_max_decode_batch = performance["workload"]["max_num_seqs"]
@@ -588,6 +634,30 @@ def summarize(run_dir: Path, run_id: str) -> dict:
             "gated_rmsnorm": summarize_normalization_candidate(
                 result["results"]["gated_rmsnorm_fp32_reuse"],
                 "candidate_reuses_fp32_workspaces",
+            ),
+        }
+        buffer_reuse[tp_name] = {
+            "moe_output_merge": summarize_buffer_reuse_candidate(
+                result["results"]["moe_output_buffer_reuse"],
+                (
+                    "reused_routed_output_mib",
+                    "reused_shared_output_mib",
+                    "reused_gate_mib",
+                ),
+            ),
+            "residual_merge": summarize_buffer_reuse_candidate(
+                result["results"]["residual_output_buffer_reuse"],
+                ("reused_branch_output_mib_per_merge",),
+                {"residual_merges_per_decoder_layer": 2},
+            ),
+            "torch_kv_dequant": summarize_buffer_reuse_candidate(
+                result["results"]["torch_kv_dequant_buffer_reuse"],
+                ("avoided_output_workspace_mib",),
+            ),
+            "recurrent_decode": summarize_buffer_reuse_candidate(
+                result["results"]["specialized_delta_decode"],
+                ("reused_recurrent_state_mib",),
+                {"avoided_full_state_intermediates": 2},
             ),
         }
         kernels[tp_name] = {
@@ -819,6 +889,14 @@ def summarize(run_dir: Path, run_id: str) -> dict:
                 for item in by_kind.values()
             )
         ),
+        "buffer_reuse_evidence": (
+            set(buffer_reuse) == expected_tp_names
+            and all(
+                item["valid"]
+                for by_kind in buffer_reuse.values()
+                for item in by_kind.values()
+            )
+        ),
         "quality_reads_stored_kv": all(
             row["kv_sensitive_token_rows"] > 0 for row in quality["cases"]
         ),
@@ -877,6 +955,9 @@ def summarize(run_dir: Path, run_id: str) -> dict:
         },
         "normalization": {
             "by_tp": normalization,
+        },
+        "buffer_reuse": {
+            "by_tp": buffer_reuse,
         },
         "hybrid_cudagraph": {
             "all_tp_passed": cudagraph_valid,
