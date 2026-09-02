@@ -2,6 +2,7 @@ from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 import sys
 import types
+from unittest.mock import patch
 
 import torch
 from torch import nn
@@ -94,6 +95,22 @@ class PackedSlicedMappedModel(nn.Module):
         return "model.gate_proj.weight"
 
 
+class StrictPackedModel(nn.Module):
+    strict_weight_loading = True
+    packed_modules_mapping = {
+        "gate_proj": ("gate_up_proj", 0),
+        "up_proj": ("gate_up_proj", 1),
+    }
+
+    def __init__(self):
+        super().__init__()
+        self.gate_up_proj = nn.Linear(2, 2, bias=False)
+        self.loaded_shards = []
+        self.gate_up_proj.weight.weight_loader = (
+            lambda _param, _source, shard_id: self.loaded_shards.append(shard_id)
+        )
+
+
 def test_loader_maps_text_names_before_loading_and_skips_visual_tensors(tmp_path):
     (tmp_path / "model.safetensors").touch()
     FakeSafeFile.requested.clear()
@@ -164,3 +181,30 @@ def test_packed_mapping_matches_complete_module_segment_only():
         "model.layers.0.mlp.experts.gate_up_proj",
         mapping,
     ) is None
+
+
+def test_strict_loader_rejects_incomplete_packed_parameter(tmp_path):
+    (tmp_path / "model.safetensors").touch()
+    safe_file = FakeSafeFile()
+    safe_file.keys = lambda: ("gate_proj.weight",)
+
+    with patch.object(loader, "safe_open", return_value=safe_file):
+        try:
+            loader.load_model(StrictPackedModel(), str(tmp_path))
+        except RuntimeError as error:
+            assert "incomplete packed parameters" in str(error)
+            assert "expected ['0', '1']" in str(error)
+        else:
+            raise AssertionError("strict loading accepted a missing packed shard")
+
+
+def test_strict_loader_accepts_every_packed_shard(tmp_path):
+    (tmp_path / "model.safetensors").touch()
+    safe_file = FakeSafeFile()
+    safe_file.keys = lambda: ("gate_proj.weight", "up_proj.weight")
+    model = StrictPackedModel()
+
+    with patch.object(loader, "safe_open", return_value=safe_file):
+        loader.load_model(model, str(tmp_path))
+
+    assert model.loaded_shards == [0, 1]

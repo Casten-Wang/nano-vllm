@@ -31,9 +31,17 @@ def load_model(model: nn.Module, path: str):
     packed_modules_mapping = getattr(model, "packed_modules_mapping", {})
     map_weight_name = getattr(model, "map_weight_name", lambda name: name)
     loaded_parameters: set[str] = set()
+    loaded_packed_shards: dict[str, set[object]] = {}
+    loaded_source_weights: set[str] = set()
     for file in glob(os.path.join(path, "*.safetensors")):
         with safe_open(file, "pt", "cpu") as f:
             for source_weight_name in f.keys():
+                if source_weight_name in loaded_source_weights:
+                    raise RuntimeError(
+                        "checkpoint contains duplicate weight: "
+                        f"{source_weight_name}"
+                    )
+                loaded_source_weights.add(source_weight_name)
                 weight_name = map_weight_name(source_weight_name)
                 if weight_name is None:
                     continue
@@ -43,6 +51,13 @@ def load_model(model: nn.Module, path: str):
                 )
                 if packed_parameter is not None:
                     param_name, shard_id = packed_parameter
+                    shards = loaded_packed_shards.setdefault(param_name, set())
+                    if shard_id in shards:
+                        raise RuntimeError(
+                            f"packed parameter {param_name} contains duplicate "
+                            f"shard {shard_id!r}"
+                        )
+                    shards.add(shard_id)
                     param = model.get_parameter(param_name)
                     packed_safetensors_loader = getattr(
                         param,
@@ -90,3 +105,24 @@ def load_model(model: nn.Module, path: str):
             preview = ", ".join(missing[:8])
             suffix = "" if len(missing) <= 8 else f", ... ({len(missing)} total)"
             raise RuntimeError(f"checkpoint is missing model parameters: {preview}{suffix}")
+        packed_shards_by_target: dict[str, set[object]] = {}
+        for target_module, shard_id in packed_modules_mapping.values():
+            packed_shards_by_target.setdefault(target_module, set()).add(shard_id)
+        incomplete = []
+        for param_name, loaded_shards in loaded_packed_shards.items():
+            target_modules = set(param_name.split(".")).intersection(
+                packed_shards_by_target
+            )
+            required_shards = set().union(
+                *(packed_shards_by_target[name] for name in target_modules)
+            )
+            if loaded_shards != required_shards:
+                incomplete.append(
+                    f"{param_name}: loaded {sorted(map(str, loaded_shards))}, "
+                    f"expected {sorted(map(str, required_shards))}"
+                )
+        if incomplete:
+            raise RuntimeError(
+                "checkpoint has incomplete packed parameters: "
+                + "; ".join(incomplete)
+            )
