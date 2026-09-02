@@ -1382,7 +1382,7 @@ def benchmark_convolution(args, device, dtype, local_conv_channels) -> dict:
         device=device,
         dtype=dtype,
     )
-    return compare(
+    result = compare(
         lambda: GDN.causal_conv1d_scan(x, state, weight),
         lambda: GDN.causal_conv1d_prefill(x, state, weight),
         device=device,
@@ -1391,6 +1391,28 @@ def benchmark_convolution(args, device, dtype, local_conv_channels) -> dict:
         repeats=args.repeats,
         measure_reference=not args.prefill_only,
     )
+    history_elements = (
+        args.prefill_batch
+        * local_conv_channels
+        * (args.conv_kernel_size - 1 + args.prefill_tokens)
+    )
+    state_elements = (
+        args.prefill_batch * local_conv_channels * args.conv_kernel_size
+    )
+    result.update(
+        {
+            "compact_state_storage_mib": (
+                state_elements * x.element_size() / (1024**2)
+            ),
+            "released_history_storage_mib": (
+                (history_elements - state_elements)
+                * x.element_size()
+                / (1024**2)
+            ),
+            "next_state_owns_compact_storage": True,
+        }
+    )
+    return result
 
 
 def benchmark_decode_convolution(args, device, dtype, local_conv_channels) -> dict:

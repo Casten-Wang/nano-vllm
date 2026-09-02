@@ -109,6 +109,9 @@ def test_vectorized_causal_convolution_matches_scan(
         atol=tolerance,
     )
     torch.testing.assert_close(actual_state, expected_state)
+    assert actual_state.untyped_storage().nbytes() == (
+        actual_state.numel() * actual_state.element_size()
+    )
 
 
 def test_vectorized_causal_convolution_handles_empty_prefill():

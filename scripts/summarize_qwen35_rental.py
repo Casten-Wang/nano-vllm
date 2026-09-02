@@ -540,6 +540,13 @@ def summarize_long_prefill(result: dict, *, expected_tp_size: int) -> dict:
         )
         median_ms = candidate.get("median_ms", math.nan)
         peak_extra_mib = candidate.get("peak_extra_mib", math.nan)
+        compact_state_valid = True
+        if name == "vectorized_prefill_convolution":
+            compact_state_valid = (
+                item.get("next_state_owns_compact_storage") is True
+                and item.get("compact_state_storage_mib", 0) > 0
+                and item.get("released_history_storage_mib", 0) > 0
+            )
         valid = (
             bool(errors)
             and math.isfinite(max_abs_error)
@@ -548,12 +555,20 @@ def summarize_long_prefill(result: dict, *, expected_tp_size: int) -> dict:
             and median_ms > 0
             and math.isfinite(peak_extra_mib)
             and peak_extra_mib >= 0
+            and compact_state_valid
         )
         cases[name] = {
             "valid": valid,
             "median_ms": median_ms,
             "peak_extra_mib": peak_extra_mib,
             "max_abs_error": max_abs_error,
+            "compact_state_valid": compact_state_valid,
+            "compact_state_storage_mib": item.get(
+                "compact_state_storage_mib"
+            ),
+            "released_history_storage_mib": item.get(
+                "released_history_storage_mib"
+            ),
         }
         if name == "grouped_delta_prefill":
             reused_mib = item.get("reused_fp32_output_buffer_mib")

@@ -97,7 +97,10 @@ def causal_conv1d_prefill(
         bias=bias,
         groups=weight.shape[0],
     )
-    next_state = history[..., -weight.shape[1] :]
+    # Detach the tiny recurrent tail from the full prefill history. Returning
+    # a view would keep the entire [batch, channels, sequence] allocation live
+    # until the later DeltaNet state update finishes.
+    next_state = history[..., -weight.shape[1] :].clone()
     return F.silu(output.transpose(1, 2)).to(x.dtype), next_state
 
 

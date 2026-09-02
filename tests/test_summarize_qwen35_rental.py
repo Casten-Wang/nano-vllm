@@ -105,6 +105,12 @@ def write_long_prefill_case(root, *, max_abs_error=0.01):
         "reused_fp32_output_buffer_mib": 32.0,
         "reused_fp32_pairwise_buffer_mib": 16.0,
     }
+    convolution = {
+        **deepcopy(measurement),
+        "compact_state_storage_mib": 0.015625,
+        "released_history_storage_mib": 31.996,
+        "next_state_owns_compact_storage": True,
+    }
     write(
         root / "kernels_long/tp4.json",
         {
@@ -120,7 +126,7 @@ def write_long_prefill_case(root, *, max_abs_error=0.01):
                 "delta_prefill_chunk_sizes": [32, 64, 128],
             },
             "results": {
-                "vectorized_prefill_convolution": measurement,
+                "vectorized_prefill_convolution": convolution,
                 "grouped_delta_prefill": deepcopy(measurement),
                 "grouped_delta_prefill_chunk_sweep": {
                     "baseline_chunk_size": 64,
