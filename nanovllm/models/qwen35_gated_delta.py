@@ -2,12 +2,68 @@
 
 from __future__ import annotations
 
+from functools import lru_cache
+
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 from torch import nn
 
 from nanovllm.layers.linear import MergedColumnParallelLinear
+
+
+_MAX_CACHED_CAUSAL_MASK_SIZE = 1024
+
+
+def _make_causal_upper_mask(
+    chunk_size: int,
+    device_type: str,
+    device_index: int | None,
+) -> torch.Tensor:
+    device = (
+        torch.device(device_type)
+        if device_index is None
+        else torch.device(device_type, device_index)
+    )
+    # A cache miss can occur during CUDA Graph warmup under inference_mode.
+    # Create a regular tensor so the same immutable mask remains safe if the
+    # process later runs an autograd-enabled correctness or training path.
+    with torch.inference_mode(False):
+        return torch.ones(
+            chunk_size,
+            chunk_size,
+            dtype=torch.bool,
+            device=device,
+        ).triu_(1)
+
+
+@lru_cache(maxsize=32)
+def _cached_causal_upper_mask(
+    chunk_size: int,
+    device_type: str,
+    device_index: int | None,
+) -> torch.Tensor:
+    """Share immutable DeltaNet masks across layers on the same device."""
+
+    return _make_causal_upper_mask(chunk_size, device_type, device_index)
+
+
+def causal_upper_mask(chunk_size: int, device: torch.device) -> torch.Tensor:
+    """Return a bounded, device-local causal mask for chunked DeltaNet."""
+
+    if chunk_size <= 0:
+        raise ValueError("chunk_size must be positive")
+    if chunk_size > _MAX_CACHED_CAUSAL_MASK_SIZE:
+        return _make_causal_upper_mask(
+            chunk_size,
+            device.type,
+            device.index,
+        )
+    return _cached_causal_upper_mask(
+        chunk_size,
+        device.type,
+        device.index,
+    )
 
 
 def l2_normalize(
@@ -450,12 +506,7 @@ def chunk_gated_delta_rule(
         num_chunks,
         chunk_size,
     )
-    upper_mask = torch.ones(
-        chunk_size,
-        chunk_size,
-        dtype=torch.bool,
-        device=query.device,
-    ).triu(1)
+    upper_mask = causal_upper_mask(chunk_size, query.device)
     cumulative_decay = decay.cumsum(dim=-1)
     pairwise_decay = (
         cumulative_decay.unsqueeze(-1) - cumulative_decay.unsqueeze(-2)

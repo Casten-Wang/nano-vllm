@@ -29,6 +29,7 @@ causal_conv1d_scan = qwen35_gated_delta.causal_conv1d_scan
 causal_conv1d_prefill = qwen35_gated_delta.causal_conv1d_prefill
 chunk_gated_delta_rule = qwen35_gated_delta.chunk_gated_delta_rule
 effective_chunk_size = qwen35_gated_delta.effective_chunk_size
+causal_upper_mask = qwen35_gated_delta.causal_upper_mask
 gather_prefill_group = qwen35_gated_delta._gather_prefill_group
 l2_normalize = qwen35_gated_delta.l2_normalize
 recurrent_gated_delta_rule = qwen35_gated_delta.recurrent_gated_delta_rule
@@ -83,6 +84,84 @@ def test_effective_chunk_size_avoids_excess_short_prefill_padding(
     expected,
 ):
     assert effective_chunk_size(sequence_length, maximum) == expected
+
+
+def test_causal_upper_mask_is_shared_by_device_and_chunk_size():
+    qwen35_gated_delta._cached_causal_upper_mask.cache_clear()
+
+    first = causal_upper_mask(4, torch.device("cpu"))
+    second = causal_upper_mask(4, torch.device("cpu"))
+
+    assert first.data_ptr() == second.data_ptr()
+    torch.testing.assert_close(
+        first,
+        torch.tensor(
+            [
+                [False, True, True, True],
+                [False, False, True, True],
+                [False, False, False, True],
+                [False, False, False, False],
+            ]
+        ),
+    )
+
+
+def test_causal_upper_mask_cache_is_bounded():
+    cache = qwen35_gated_delta._cached_causal_upper_mask
+    cache.cache_clear()
+
+    for chunk_size in range(1, 34):
+        causal_upper_mask(chunk_size, torch.device("cpu"))
+
+    info = cache.cache_info()
+    assert info.maxsize == 32
+    assert info.currsize == 32
+
+
+def test_oversized_causal_masks_are_not_retained():
+    cache = qwen35_gated_delta._cached_causal_upper_mask
+    cache.cache_clear()
+    chunk_size = qwen35_gated_delta._MAX_CACHED_CAUSAL_MASK_SIZE + 1
+
+    first = causal_upper_mask(chunk_size, torch.device("cpu"))
+    second = causal_upper_mask(chunk_size, torch.device("cpu"))
+
+    assert first.data_ptr() != second.data_ptr()
+    assert cache.cache_info().currsize == 0
+
+
+def test_causal_upper_mask_rejects_non_positive_size():
+    with pytest.raises(ValueError, match="chunk_size must be positive"):
+        causal_upper_mask(0, torch.device("cpu"))
+
+
+def test_chunk_rule_reuses_cached_causal_mask_between_layers():
+    cache = qwen35_gated_delta._cached_causal_upper_mask
+    cache.cache_clear()
+    tensors = inputs(5)
+
+    with torch.inference_mode():
+        chunk_gated_delta_rule(*tensors, chunk_size=4)
+        chunk_gated_delta_rule(*tensors, chunk_size=4)
+
+    info = cache.cache_info()
+    assert info.misses == 1
+    assert info.hits == 1
+
+
+def test_inference_cached_causal_mask_remains_autograd_safe():
+    cache = qwen35_gated_delta._cached_causal_upper_mask
+    cache.cache_clear()
+    tensors = inputs(5)
+
+    with torch.inference_mode():
+        chunk_gated_delta_rule(*tensors, chunk_size=4)
+
+    grad_tensors = tuple(tensor.requires_grad_() for tensor in inputs(6))
+    output, state = chunk_gated_delta_rule(*grad_tensors, chunk_size=4)
+    (output.square().mean() + state.square().mean()).backward()
+
+    assert all(tensor.grad is not None for tensor in grad_tensors)
 
 
 def test_contiguous_prefill_group_reuses_projected_storage():
