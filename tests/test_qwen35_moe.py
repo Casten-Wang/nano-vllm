@@ -1,9 +1,11 @@
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
+import gc
 import sys
 import types
 from types import SimpleNamespace
 from unittest.mock import patch
+import weakref
 
 import pytest
 import torch
@@ -328,6 +330,42 @@ def test_batched_multi_token_decode_matches_sorted_backend_in_chunks():
 
     torch.testing.assert_close(actual, expected)
     assert selected_route_counts == [4, 4, 2]
+
+
+def test_batched_decode_releases_previous_chunk_weights_before_next_chunk():
+    hidden = torch.randn(2, 4)
+    topk_ids = torch.tensor([[0, 1], [2, 3]])
+    topk_weights = torch.full((2, 2), 0.5)
+    gate_up_proj = torch.randn(4, 6, 4)
+    down_proj = torch.randn(4, 4, 3)
+    original_index_select = torch.Tensor.index_select
+    selected_down_refs = []
+
+    def record_index_select(tensor, dim, index):
+        if tensor is gate_up_proj and selected_down_refs:
+            gc.collect()
+            assert selected_down_refs[-1]() is None
+        result = original_index_select(tensor, dim, index)
+        if tensor is down_proj:
+            selected_down_refs.append(weakref.ref(result))
+        return result
+
+    with (
+        torch.inference_mode(),
+        patch.object(torch.Tensor, "index_select", new=record_index_select),
+    ):
+        output = moe_dispatch.batched_expert_dispatch(
+            hidden,
+            topk_ids,
+            topk_weights,
+            gate_up_proj,
+            down_proj,
+            chunk_size=1,
+        )
+
+    assert output.shape == hidden.shape
+    assert selected_down_refs
+    assert all(reference() is None for reference in selected_down_refs)
 
 
 def test_batched_dispatch_can_fill_caller_output_buffer():

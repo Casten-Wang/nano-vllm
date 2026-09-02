@@ -80,4 +80,16 @@ def batched_expert_dispatch(
             expert_output,
             topk_weights[start:end],
         )
+        # Python keeps loop locals alive until their next assignment. Release
+        # the consumed chunk so the next gathered expert weights do not
+        # overlap with the previous chunk's large temporaries.
+        del (
+            activated,
+            expert_ids,
+            expert_output,
+            gate,
+            gate_up,
+            selected_down,
+            up,
+        )
     return output
