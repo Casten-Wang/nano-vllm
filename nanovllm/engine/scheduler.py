@@ -304,7 +304,11 @@ class Scheduler:
             return scheduled_seqs, True
 
         # decode
-        while self.running and len(scheduled_seqs) < self.max_num_seqs:
+        while (
+            self.running
+            and len(scheduled_seqs) < self.max_num_seqs
+            and len(scheduled_seqs) < self.max_num_batched_tokens
+        ):
             seq = self.running.popleft()
             while not self.block_manager.can_append(seq):
                 victim = self.select_preemption_victim(seq)

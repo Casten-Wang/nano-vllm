@@ -402,6 +402,34 @@ class BlockManagerLifecycleTest(unittest.TestCase):
         self.assertEqual(list(scheduler.running), waiting)
         self.assertFalse(scheduler.waiting)
 
+    def test_legacy_decode_respects_token_budget_below_sequence_limit(self):
+        scheduler = Scheduler(
+            FakeConfig(
+                max_num_seqs=4,
+                max_num_batched_tokens=2,
+                num_kvcache_blocks=8,
+                kvcache_block_size=4,
+                enable_dynamic_chunked_prefill=False,
+            )
+        )
+        running = [Sequence([token] * 4) for token in range(1, 5)]
+        for seq in running:
+            scheduler.block_manager.allocate(seq, num_cached_blocks=0)
+            seq.num_cached_tokens = len(seq)
+            seq.status = SequenceStatus.RUNNING
+            seq.is_prefill = False
+            scheduler.running.append(seq)
+
+        scheduled, is_prefill = scheduler.schedule()
+
+        self.assertFalse(is_prefill)
+        self.assertEqual(scheduled, running[:2])
+        self.assertEqual(list(scheduler.running), running)
+        self.assertEqual(
+            sum(seq.num_scheduled_tokens for seq in scheduled),
+            scheduler.max_num_batched_tokens,
+        )
+
     def test_legacy_partial_prefill_uses_one_remaining_sequence_slot(self):
         scheduler = Scheduler(
             FakeConfig(
