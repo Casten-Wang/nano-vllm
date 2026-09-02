@@ -158,11 +158,12 @@ def test_optional_gptq_checkpoint_adds_audited_eager_tp_matrix():
     stages = MODULE.commands(arguments)
     names = [name for name, _ in stages]
 
-    assert names[-5:] == [
+    assert names[-6:] == [
         "official-gptq-checkpoint-audit",
         "gptq-preflight",
         "gptq-performance-matrix",
         "gptq-quality-matrix",
+        "gptq-vs-bf16-quality",
         "final-summary",
     ]
     commands = dict(stages)
@@ -181,6 +182,11 @@ def test_optional_gptq_checkpoint_adds_audited_eager_tp_matrix():
     assert quality[quality.index("--weight-quant-backend") + 1] == "auto"
     assert quality[quality.index("--qwen35-moe-decode-backend") + 1] == "sorted"
     assert "--no-checkpoint-audit" in quality
+    comparison = commands["gptq-vs-bf16-quality"]
+    assert comparison[comparison.index("--baseline-run-id") + 1] == arguments.run_id
+    assert comparison[comparison.index("--candidate-run-id") + 1] == (
+        f"{arguments.run_id}-gptq"
+    )
 
 
 def test_gptq_identity_is_part_of_resume_manifest():

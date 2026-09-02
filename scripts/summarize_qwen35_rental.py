@@ -110,6 +110,7 @@ def summarize_optional_gptq(run_dir: Path, run_id: str) -> dict:
         root / "performance" / f"{gptq_run_id}_matrix_summary.json"
     )
     quality = load_json(root / "quality" / f"{gptq_run_id}_summary.json")
+    checkpoint_quality = load_json(root / "quality" / "bf16_vs_gptq.json")
     performance_runs = performance.get("runs", [])
     quality_cases = quality.get("cases", [])
     tp_names = {
@@ -167,6 +168,13 @@ def summarize_optional_gptq(run_dir: Path, run_id: str) -> dict:
             for row in quality_cases
         )
     )
+    checkpoint_quality_valid = (
+        checkpoint_quality.get("valid") is True
+        and checkpoint_quality.get("baseline_run_id") == run_id
+        and checkpoint_quality.get("candidate_run_id") == gptq_run_id
+        and checkpoint_quality.get("tensor_parallel_sizes")
+        == sorted(int(name.removeprefix("tp")) for name in tp_names)
+    )
     valid_runs = [
         row
         for row in performance_runs
@@ -182,12 +190,14 @@ def summarize_optional_gptq(run_dir: Path, run_id: str) -> dict:
             and memory_valid
             and performance_valid
             and quality_valid
+            and checkpoint_quality_valid
         ),
         "audit_valid": audit_valid,
         "local_checkpoint_matches_official": local_checkpoint_valid,
         "memory_preflight_valid": memory_valid,
         "performance_valid": performance_valid,
         "quality_valid": quality_valid,
+        "bf16_vs_gptq_quality_valid": checkpoint_quality_valid,
         "official_checkpoint": {
             "repo": audit.get("repo"),
             "resolved_revision": audit.get("resolved_revision"),
@@ -213,6 +223,7 @@ def summarize_optional_gptq(run_dir: Path, run_id: str) -> dict:
         ),
         "quality_gates": quality.get("quality_gates"),
         "cross_tp": quality.get("cross_tp"),
+        "bf16_vs_gptq": checkpoint_quality,
     }
 
 

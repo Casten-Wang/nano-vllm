@@ -19,6 +19,9 @@ ATTENTION_KERNEL_SCRIPT = ROOT / "scripts" / "benchmark_attention_kernel.py"
 CACHE_TRANSFER_SCRIPT = ROOT / "scripts" / "benchmark_cache_transfer.py"
 CACHE_EXPORT_SCRIPT = ROOT / "scripts" / "benchmark_cache_export.py"
 QUALITY_SCRIPT = ROOT / "scripts" / "benchmark_qwen35_quality_matrix.py"
+CHECKPOINT_QUALITY_SCRIPT = (
+    ROOT / "scripts" / "compare_qwen35_checkpoint_quality.py"
+)
 ONLINE_MIXED_SCRIPT = ROOT / "scripts" / "benchmark_online_mixed.py"
 SUMMARY_SCRIPT = ROOT / "scripts" / "summarize_qwen35_rental.py"
 CUDAGRAPH_PARITY_SCRIPT = ROOT / "scripts" / "verify_cudagraph_parity.py"
@@ -629,6 +632,25 @@ def commands(args: argparse.Namespace) -> list[tuple[str, list[str]]]:
                         str(args.max_model_len),
                     ],
                 ),
+                (
+                    "gptq-vs-bf16-quality",
+                    [
+                        sys.executable,
+                        str(CHECKPOINT_QUALITY_SCRIPT),
+                        "--baseline-dir",
+                        str(root / "quality"),
+                        "--baseline-run-id",
+                        args.run_id,
+                        "--candidate-dir",
+                        str(gptq_root / "quality"),
+                        "--candidate-run-id",
+                        gptq_run_id,
+                        "--tp-sizes",
+                        tp_sizes,
+                        "--output",
+                        str(gptq_root / "quality" / "bf16_vs_gptq.json"),
+                    ],
+                ),
             )
         )
     result.append(
@@ -787,6 +809,9 @@ def collect_stage_artifacts(
     elif stage_name == "gptq-quality-matrix":
         search_root = root / "gptq" / "quality"
         required = [search_root / f"{args.run_id}-gptq_summary.json"]
+    elif stage_name == "gptq-vs-bf16-quality":
+        search_root = root / "gptq" / "quality"
+        required = [search_root / "bf16_vs_gptq.json"]
     elif stage_name == "final-summary":
         required = [root / "summary.json"]
         search_root = root
@@ -803,6 +828,7 @@ def collect_stage_artifacts(
             "official-checkpoint-audit",
             "official-gptq-checkpoint-audit",
             "gptq-preflight",
+            "gptq-vs-bf16-quality",
             "preflight",
             "final-summary",
         )

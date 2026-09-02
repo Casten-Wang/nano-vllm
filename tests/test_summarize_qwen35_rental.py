@@ -109,6 +109,16 @@ def write_gptq_summary_inputs(root, run_id, *, backend="triton"):
             "cross_tp": {"all_passed": True},
         },
     )
+    write(
+        root / "gptq/quality/bf16_vs_gptq.json",
+        {
+            "valid": True,
+            "baseline_run_id": run_id,
+            "candidate_run_id": gptq_run_id,
+            "tensor_parallel_sizes": [4, 8],
+            "cases": {},
+        },
+    )
 
 
 def test_optional_gptq_summary_is_disabled_when_directory_is_absent(tmp_path):
@@ -126,6 +136,7 @@ def test_optional_gptq_summary_requires_actual_triton_execution(tmp_path):
     assert report["valid"]
     assert report["local_checkpoint_matches_official"]
     assert report["memory_preflight_valid"]
+    assert report["bf16_vs_gptq_quality_valid"]
     assert report["tensor_parallel_sizes"] == [4, 8]
     assert report["best_throughput"]["tensor_parallel_size"] == 8
     assert report["lowest_peak_memory"]["tensor_parallel_size"] == 8
