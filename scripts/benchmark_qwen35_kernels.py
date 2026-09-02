@@ -285,6 +285,13 @@ def benchmark_sampling_filter(args, device, dtype) -> dict:
             iterations=args.iterations,
             repeats=args.repeats,
         )
+        # BF16 logits contain many ties. ``sort`` and ``topk`` may retain
+        # different token ids at a tied cutoff while producing the same
+        # filtered distribution. Compare the sorted value multisets for
+        # correctness without adding this canonicalization to timed calls.
+        expected_values = torch.sort(reference()[0], descending=True, dim=-1).values
+        actual_values = torch.sort(candidate()[0], descending=True, dim=-1).values
+        result["errors"] = [error(actual_values, expected_values)]
         result["avoided_full_sort_workspace_mib"] = full_sort_workspace_mib
         results[name] = result
     return results
