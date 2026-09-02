@@ -335,8 +335,18 @@ class Qwen35SparseMoeBlock(nn.Module):
             reduce_output=False,
         )
         shared = self.shared_expert(flat_states, reduce_output=False)
-        shared = torch.sigmoid(self.shared_expert_gate(flat_states)) * shared
-        output = routed + shared
+        shared_gate = self.shared_expert_gate(flat_states)
+        if torch.is_grad_enabled():
+            shared = torch.sigmoid(shared_gate) * shared
+            output = routed + shared
+        else:
+            # Both TP partials are dead after this merge. Reuse them instead
+            # of materializing gated-shared and combined-output tensors for
+            # every MoE layer in the inference hot path.
+            shared_gate.sigmoid_()
+            shared.mul_(shared_gate)
+            routed.add_(shared)
+            output = routed
         if self.experts.tp_size > 1:
             dist.all_reduce(output)
         return output.reshape(original_shape)

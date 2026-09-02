@@ -71,6 +71,28 @@ def test_gated_rmsnorm_benchmark_compares_both_reused_workspaces():
     assert result["errors"][0]["max_abs_error"] == 0
 
 
+def test_moe_output_merge_benchmark_measures_buffer_reuse():
+    args = SimpleNamespace(
+        router_tokens=8,
+        hidden_size=16,
+        warmup=0,
+        iterations=1,
+        repeats=1,
+    )
+
+    result = MODULE.benchmark_moe_output_merge(
+        args,
+        torch.device("cpu"),
+        torch.bfloat16,
+    )
+
+    output_mib = 8 * 16 * 2 / 1024 / 1024
+    assert result["reused_routed_output_mib"] == output_mib
+    assert result["reused_shared_output_mib"] == output_mib
+    assert result["reused_gate_mib"] == 8 * 2 / 1024 / 1024
+    assert result["errors"][0]["max_abs_error"] == 0
+
+
 def test_expert_dispatch_matches_naive_route_accumulation():
     torch.manual_seed(101)
     hidden = torch.randn(4, 3)

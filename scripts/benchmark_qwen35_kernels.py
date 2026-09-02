@@ -186,6 +186,55 @@ def benchmark_router(args, device, dtype) -> dict:
     return result
 
 
+def benchmark_moe_output_merge(args, device, dtype) -> dict:
+    routed_source = torch.randn(
+        args.router_tokens,
+        args.hidden_size,
+        device=device,
+        dtype=dtype,
+    )
+    shared_source = torch.randn_like(routed_source)
+    gate_source = torch.randn(
+        args.router_tokens,
+        1,
+        device=device,
+        dtype=dtype,
+    )
+
+    def reference():
+        routed = routed_source.clone()
+        shared = shared_source.clone()
+        gate = gate_source.clone()
+        return (routed + torch.sigmoid(gate) * shared,)
+
+    def candidate():
+        routed = routed_source.clone()
+        shared = shared_source.clone()
+        gate = gate_source.clone()
+        gate.sigmoid_()
+        shared.mul_(gate)
+        routed.add_(shared)
+        return (routed,)
+
+    result = compare(
+        reference,
+        candidate,
+        device=device,
+        warmup=args.warmup,
+        iterations=args.iterations,
+        repeats=args.repeats,
+    )
+    element_size = routed_source.element_size()
+    result["reused_routed_output_mib"] = (
+        routed_source.numel() * element_size / 1024 / 1024
+    )
+    result["reused_shared_output_mib"] = (
+        shared_source.numel() * element_size / 1024 / 1024
+    )
+    result["reused_gate_mib"] = gate_source.numel() * element_size / 1024 / 1024
+    return result
+
+
 def expert_dispatch(
     hidden_states: torch.Tensor,
     topk_ids: torch.Tensor,
@@ -1278,6 +1327,11 @@ def main() -> None:
         expert_dispatch = benchmark_expert_dispatch_sweep(args, device, dtype)
         benchmark_results = {
             "router_topk_first": benchmark_router(args, device, dtype),
+            "moe_output_buffer_reuse": benchmark_moe_output_merge(
+                args,
+                device,
+                dtype,
+            ),
             "expert_dispatch_torch": expert_dispatch,
             "moe_decode_chunk_recommendation": recommend_moe_decode_chunk_size(
                 expert_dispatch,

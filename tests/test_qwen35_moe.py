@@ -462,6 +462,95 @@ def test_sparse_moe_combines_tp_outputs_before_single_all_reduce():
     torch.testing.assert_close(output, routed + 0.5 * shared)
 
 
+def test_sparse_moe_inference_reuses_tp_partial_buffers():
+    config = SimpleNamespace(
+        hidden_size=4,
+        num_experts=4,
+        num_experts_per_tok=2,
+        moe_intermediate_size=8,
+        shared_expert_intermediate_size=8,
+    )
+    with (
+        patch.object(qwen35_moe.dist, "get_world_size", return_value=1),
+        patch.object(qwen35_moe.dist, "get_rank", return_value=0),
+        patch.object(linear.dist, "get_world_size", return_value=1),
+        patch.object(linear.dist, "get_rank", return_value=0),
+    ):
+        block = qwen35_moe.Qwen35SparseMoeBlock(config)
+    hidden = torch.randn(3, 4)
+    routed = torch.full_like(hidden, 2.0)
+    shared = torch.full_like(hidden, 4.0)
+    shared_gate = torch.zeros(3, 1)
+    topk_weights = torch.ones(3, 2)
+    topk_ids = torch.zeros(3, 2, dtype=torch.long)
+    context_module = types.ModuleType("nanovllm.utils.context")
+    context_module.get_context = lambda: SimpleNamespace(
+        is_prefill=False,
+        is_mixed=False,
+    )
+
+    with (
+        torch.inference_mode(),
+        patch.dict(sys.modules, {"nanovllm.utils.context": context_module}),
+        patch.object(block.gate, "forward", return_value=(topk_weights, topk_ids)),
+        patch.object(block.experts, "forward", return_value=routed),
+        patch.object(block.shared_expert, "forward", return_value=shared),
+        patch.object(block.shared_expert_gate, "forward", return_value=shared_gate),
+    ):
+        output = block(hidden)
+
+    assert output.data_ptr() == routed.data_ptr()
+    assert torch.equal(shared_gate, torch.full_like(shared_gate, 0.5))
+    assert torch.equal(shared, torch.full_like(shared, 2.0))
+    assert torch.equal(output, torch.full_like(output, 4.0))
+
+
+def test_sparse_moe_autograd_preserves_tp_partial_buffers():
+    config = SimpleNamespace(
+        hidden_size=4,
+        num_experts=4,
+        num_experts_per_tok=2,
+        moe_intermediate_size=8,
+        shared_expert_intermediate_size=8,
+    )
+    with (
+        patch.object(qwen35_moe.dist, "get_world_size", return_value=1),
+        patch.object(qwen35_moe.dist, "get_rank", return_value=0),
+        patch.object(linear.dist, "get_world_size", return_value=1),
+        patch.object(linear.dist, "get_rank", return_value=0),
+    ):
+        block = qwen35_moe.Qwen35SparseMoeBlock(config)
+    hidden = torch.randn(3, 4)
+    routed = torch.full_like(hidden, 2.0, requires_grad=True)
+    shared = torch.full_like(hidden, 4.0, requires_grad=True)
+    shared_gate = torch.zeros(3, 1, requires_grad=True)
+    routed_before = routed.detach().clone()
+    shared_before = shared.detach().clone()
+    topk_weights = torch.ones(3, 2)
+    topk_ids = torch.zeros(3, 2, dtype=torch.long)
+    context_module = types.ModuleType("nanovllm.utils.context")
+    context_module.get_context = lambda: SimpleNamespace(
+        is_prefill=False,
+        is_mixed=False,
+    )
+
+    with (
+        patch.dict(sys.modules, {"nanovllm.utils.context": context_module}),
+        patch.object(block.gate, "forward", return_value=(topk_weights, topk_ids)),
+        patch.object(block.experts, "forward", return_value=routed),
+        patch.object(block.shared_expert, "forward", return_value=shared),
+        patch.object(block.shared_expert_gate, "forward", return_value=shared_gate),
+    ):
+        output = block(hidden)
+        output.sum().backward()
+
+    assert torch.equal(routed, routed_before)
+    assert torch.equal(shared, shared_before)
+    assert routed.grad is not None
+    assert shared.grad is not None
+    assert shared_gate.grad is not None
+
+
 def test_mixed_batch_keeps_prefill_tokens_on_grouped_moe_dispatch():
     config = SimpleNamespace(
         hidden_size=4,
