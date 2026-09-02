@@ -938,6 +938,10 @@ def summarize(run_dir: Path, run_id: str) -> dict:
                 result["results"]["attention_norm_output_reuse"],
                 ("reused_projection_output_mib",),
             ),
+            "rotary_output": summarize_buffer_reuse_candidate(
+                result["results"]["rotary_output_reuse"],
+                ("reused_query_key_output_mib",),
+            ),
             "moe_output_merge": summarize_buffer_reuse_candidate(
                 result["results"]["moe_output_buffer_reuse"],
                 (

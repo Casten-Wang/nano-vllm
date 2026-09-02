@@ -7,6 +7,8 @@ def apply_rotary_emb(
     x: torch.Tensor,
     cos: torch.Tensor,
     sin: torch.Tensor,
+    *,
+    inplace_output: bool = False,
 ) -> torch.Tensor:
     rotary_dim = cos.shape[-1] * 2
     if rotary_dim > x.shape[-1]:
@@ -15,6 +17,11 @@ def apply_rotary_emb(
     x1, x2 = torch.chunk(x_rotary.float(), 2, dim=-1)
     y1 = x1 * cos - x2 * sin
     y2 = x2 * cos + x1 * sin
+    if inplace_output and not torch.is_grad_enabled():
+        half_rotary_dim = rotary_dim // 2
+        x[..., :half_rotary_dim].copy_(y1)
+        x[..., half_rotary_dim:rotary_dim].copy_(y2)
+        return x
     rotated = torch.cat((y1, y2), dim=-1).to(x.dtype)
     return torch.cat((rotated, x_pass), dim=-1)
 
@@ -48,11 +55,23 @@ class RotaryEmbedding(nn.Module):
         positions: torch.Tensor,
         query: torch.Tensor,
         key: torch.Tensor,
+        *,
+        inplace_output: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         cos_sin = self.cos_sin_cache[positions]
         cos, sin = cos_sin.chunk(2, dim=-1)
-        query = apply_rotary_emb(query, cos, sin)
-        key = apply_rotary_emb(key, cos, sin)
+        query = apply_rotary_emb(
+            query,
+            cos,
+            sin,
+            inplace_output=inplace_output,
+        )
+        key = apply_rotary_emb(
+            key,
+            cos,
+            sin,
+            inplace_output=inplace_output,
+        )
         return query, key
 
 

@@ -48,6 +48,10 @@ SAMPLER = load_source_module(
     "qwen35_sampler_benchmark",
     "nanovllm/layers/sampler.py",
 )
+ROTARY = load_source_module(
+    "qwen35_rotary_benchmark",
+    "nanovllm/layers/rotary_embedding.py",
+)
 
 
 def synchronize(device: torch.device) -> None:
@@ -1262,6 +1266,54 @@ def benchmark_attention_norm_output_reuse(args, device, dtype) -> dict:
     return result
 
 
+def benchmark_rotary_output_reuse(args, device, dtype) -> dict:
+    local_heads = args.total_key_heads // args.tp_size
+    query = torch.randn(
+        args.router_tokens,
+        local_heads,
+        args.key_head_dim,
+        device=device,
+        dtype=dtype,
+    )
+    key = torch.randn_like(query)
+    rotary_dim = max(2, args.key_head_dim // 4)
+    rotary_dim -= rotary_dim % 2
+    cos = torch.randn(
+        args.router_tokens,
+        1,
+        rotary_dim // 2,
+        device=device,
+    )
+    sin = torch.randn_like(cos)
+
+    def run(inplace_output):
+        q = query.clone()
+        k = key.clone()
+        return (
+            ROTARY.apply_rotary_emb(
+                q, cos, sin, inplace_output=inplace_output
+            ),
+            ROTARY.apply_rotary_emb(
+                k, cos, sin, inplace_output=inplace_output
+            ),
+        )
+
+    with torch.inference_mode():
+        result = compare(
+            lambda: run(False),
+            lambda: run(True),
+            device=device,
+            warmup=args.warmup,
+            iterations=args.iterations,
+            repeats=args.repeats,
+        )
+    result["reused_query_key_output_mib"] = (
+        (query.numel() + key.numel()) * query.element_size() / 1024 / 1024
+    )
+    result["rotary_dim"] = rotary_dim
+    return result
+
+
 def benchmark_beta_gate(args, device, dtype, local_value_heads: int) -> dict:
     hidden = torch.randn(
         args.router_tokens,
@@ -2248,6 +2300,11 @@ def main() -> None:
             ),
             "rmsnorm_fp32_reuse": benchmark_rmsnorm(args, device, dtype),
             "attention_norm_output_reuse": benchmark_attention_norm_output_reuse(
+                args,
+                device,
+                dtype,
+            ),
+            "rotary_output_reuse": benchmark_rotary_output_reuse(
                 args,
                 device,
                 dtype,

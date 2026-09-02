@@ -117,6 +117,30 @@ def test_attention_norm_benchmark_compares_projection_output_reuse():
     assert all(item["max_abs_error"] == 0 for item in result["errors"])
 
 
+def test_rotary_benchmark_compares_query_key_output_reuse():
+    args = SimpleNamespace(
+        router_tokens=4,
+        total_key_heads=8,
+        tp_size=4,
+        key_head_dim=8,
+        warmup=0,
+        iterations=1,
+        repeats=1,
+    )
+
+    result = MODULE.benchmark_rotary_output_reuse(
+        args,
+        torch.device("cpu"),
+        torch.bfloat16,
+    )
+
+    assert result["rotary_dim"] == 2
+    assert result["reused_query_key_output_mib"] == (
+        2 * 4 * 2 * 8 * 2 / 1024 / 1024
+    )
+    assert all(item["max_abs_error"] == 0 for item in result["errors"])
+
+
 def test_decode_convolution_benchmark_tracks_reused_state():
     args = SimpleNamespace(
         decode_batch=4,

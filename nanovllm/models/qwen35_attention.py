@@ -108,7 +108,12 @@ class Qwen35Attention(nn.Module):
         value = self.v_proj(hidden_states).view_as(key)
         query = self.q_norm(query, inplace_output=True)
         key = self.k_norm(key, inplace_output=True)
-        query, key = self.rotary_emb(positions, query, key)
+        query, key = self.rotary_emb(
+            positions,
+            query,
+            key,
+            inplace_output=True,
+        )
         output = self.attn(query, key, value)
         if output.requires_grad or gate.requires_grad:
             output = output * torch.sigmoid(gate)
