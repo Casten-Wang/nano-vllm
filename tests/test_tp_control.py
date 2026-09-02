@@ -52,6 +52,7 @@ def load_model_runner_module():
         "nanovllm.config",
         "nanovllm.engine",
         "nanovllm.engine.execution",
+        "nanovllm.engine.sampling_input_batch",
         "nanovllm.engine.sequence",
         "nanovllm.engine.kv_cache_packing",
         "nanovllm.models",
@@ -86,6 +87,9 @@ def load_model_runner_module():
         config_module = types.ModuleType("nanovllm.config")
         engine_module = types.ModuleType("nanovllm.engine")
         execution_module = types.ModuleType("nanovllm.engine.execution")
+        sampling_input_module = types.ModuleType(
+            "nanovllm.engine.sampling_input_batch"
+        )
         sequence_module = types.ModuleType("nanovllm.engine.sequence")
         packing_module = types.ModuleType("nanovllm.engine.kv_cache_packing")
         models_module = types.ModuleType("nanovllm.models")
@@ -104,6 +108,7 @@ def load_model_runner_module():
         execution_module.select_attention_paths = lambda **kwargs: ()
         execution_module.select_model_path = lambda *args, **kwargs: ""
         execution_module.supports_cudagraph_policy = lambda **kwargs: False
+        sampling_input_module.SamplingInputBatch = object
         sequence_module.Sequence = object
         packing_module.PackedBlockMetadata = object
         packing_module.build_packed_block_metadata = lambda *args, **kwargs: None
@@ -125,6 +130,7 @@ def load_model_runner_module():
                 "nanovllm.config": config_module,
                 "nanovllm.engine": engine_module,
                 "nanovllm.engine.execution": execution_module,
+                "nanovllm.engine.sampling_input_batch": sampling_input_module,
                 "nanovllm.engine.sequence": sequence_module,
                 "nanovllm.engine.kv_cache_packing": packing_module,
                 "nanovllm.models": models_module,
