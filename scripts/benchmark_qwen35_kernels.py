@@ -260,6 +260,7 @@ def benchmark_sampling_filter(args, device, dtype) -> dict:
     cases = (
         ("unfiltered", -1, 1.0),
         ("top_k", args.sampling_top_k, 1.0),
+        ("top_p", -1, args.sampling_top_p),
         ("top_k_top_p", args.sampling_top_k, args.sampling_top_p),
     )
     for name, top_k, top_p in cases:
@@ -310,7 +311,13 @@ def benchmark_sampling_filter(args, device, dtype) -> dict:
         expected_values = torch.sort(reference()[0], descending=True, dim=-1).values
         actual_values = torch.sort(candidate()[0], descending=True, dim=-1).values
         result["errors"] = [error(actual_values, expected_values)]
-        result["avoided_full_sort_workspace_mib"] = full_sort_workspace_mib
+        if name == "top_p":
+            result["avoided_top_k_mask_workspace_mib"] = (
+                logits.numel() * (logits.element_size() + 1)
+                + args.vocab_size * 8
+            ) / 1024 / 1024
+        else:
+            result["avoided_full_sort_workspace_mib"] = full_sort_workspace_mib
         result["uses_host_sampling_metadata"] = True
         results[name] = result
     return results

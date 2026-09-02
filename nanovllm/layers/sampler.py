@@ -157,21 +157,30 @@ def apply_top_k_top_p(
     # Top-p needs this ordering to compute the cumulative probability mass.
     sorted_logits, sorted_indices = torch.sort(logits, descending=True, dim=-1)
 
-    # top_k == -1 means "disabled", so the effective k becomes vocab_size.
-    # Otherwise clamp to vocab_size so oversized top_k values are harmless.
-    full_vocab = torch.full_like(top_ks, vocab_size)
-    effective_top_ks = torch.where(top_ks > 0, torch.minimum(top_ks, full_vocab), full_vocab)
+    if any_top_k_enabled:
+        # top_k == -1 means "disabled", so the effective k becomes vocab_size.
+        # Otherwise clamp to vocab_size so oversized top_k values are harmless.
+        full_vocab = torch.full_like(top_ks, vocab_size)
+        effective_top_ks = torch.where(
+            top_ks > 0,
+            torch.minimum(top_ks, full_vocab),
+            full_vocab,
+        )
 
-    # rank 0 is the largest logit, rank 1 the second largest, etc.
-    # A token survives top-k iff its sorted rank is smaller than k.
-    ranks = torch.arange(vocab_size, device=logits.device).unsqueeze(0)
-    top_k_keep = ranks < effective_top_ks.unsqueeze(1)
-
-    # Apply top-k before calculating top-p probabilities. This is important:
-    # top-p is defined over the distribution that remains after top-k
-    # filtering, not over the original full vocabulary distribution.
-    top_k_logits = sorted_logits.masked_fill(~top_k_keep, float("-inf"))
-    sorted_probs = torch.softmax(top_k_logits, dim=-1)
+        # Apply top-k before calculating top-p probabilities. This is important:
+        # top-p is defined over the distribution that remains after top-k.
+        ranks = torch.arange(vocab_size, device=logits.device).unsqueeze(0)
+        top_k_keep = ranks < effective_top_ks.unsqueeze(1)
+        probability_logits = sorted_logits.masked_fill(
+            ~top_k_keep,
+            float("-inf"),
+        )
+    else:
+        # Pure top-p needs the full sorted distribution. Avoid materializing
+        # all-true top-k masks, vocabulary ranks, and an unchanged logits copy.
+        top_k_keep = None
+        probability_logits = sorted_logits
+    sorted_probs = torch.softmax(probability_logits, dim=-1)
     cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
     sorted_remove = cumulative_probs > top_ps.unsqueeze(1)
 
@@ -180,7 +189,11 @@ def apply_top_k_top_p(
     # sampling behavior and also guarantees at least one token survives.
     sorted_remove[:, 1:] = sorted_remove[:, :-1].clone()
     sorted_remove[:, 0] = False
-    sorted_keep = top_k_keep & ~sorted_remove
+    sorted_keep = (
+        ~sorted_remove
+        if top_k_keep is None
+        else top_k_keep & ~sorted_remove
+    )
 
     # Apply the mask in sorted space.
     filtered_sorted_logits = sorted_logits.masked_fill(~sorted_keep, float("-inf"))

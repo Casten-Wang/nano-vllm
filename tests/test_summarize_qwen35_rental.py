@@ -443,6 +443,16 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
                         "uses_host_sampling_metadata": True,
                     }
                     for name in ("unfiltered", "top_k", "top_k_top_p")
+                }
+                | {
+                    "top_p": {
+                        "reference": {"peak_extra_mib": 128.0},
+                        "candidate": {"peak_extra_mib": 32.0},
+                        "speedup": 1.1,
+                        "errors": [{"max_abs_error": 0.0}],
+                        "avoided_top_k_mask_workspace_mib": 64.0,
+                        "uses_host_sampling_metadata": True,
+                    }
                 },
                 "greedy_sampler_precision_fast_path": {
                     "reference": {"peak_extra_mib": 128.0},
@@ -788,6 +798,9 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     assert report["buffer_reuse"]["by_tp"]["tp4"][
         "sorted_route_weighting"
     ]["workspace"]["avoided_weighted_expert_output_mib"] == 4.0
+    assert report["buffer_reuse"]["by_tp"]["tp4"]["sampling_top_p"][
+        "workspace"
+    ]["avoided_top_k_mask_workspace_mib"] == 64.0
     assert report["buffer_reuse"]["by_tp"]["tp4"][
         "batched_route_sum_output"
     ]["workspace"]["avoided_route_sum_output_mib"] == 4.0

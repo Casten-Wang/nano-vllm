@@ -990,6 +990,11 @@ def summarize(run_dir: Path, run_id: str) -> dict:
                 ("avoided_full_sort_workspace_mib",),
                 {"uses_host_sampling_metadata": True},
             ),
+            "sampling_top_p": summarize_buffer_reuse_candidate(
+                result["results"]["sampling_filter_fast_paths"]["top_p"],
+                ("avoided_top_k_mask_workspace_mib",),
+                {"uses_host_sampling_metadata": True},
+            ),
             "sampling_top_k_top_p": summarize_buffer_reuse_candidate(
                 result["results"]["sampling_filter_fast_paths"]["top_k_top_p"],
                 ("avoided_full_sort_workspace_mib",),

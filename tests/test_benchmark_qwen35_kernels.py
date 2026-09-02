@@ -69,11 +69,15 @@ def test_sampling_filter_benchmark_covers_unfiltered_and_top_k_paths():
         torch.bfloat16,
     )
 
-    assert set(result) == {"unfiltered", "top_k", "top_k_top_p"}
+    assert set(result) == {"unfiltered", "top_k", "top_p", "top_k_top_p"}
     assert all(
-        item["avoided_full_sort_workspace_mib"] == 4 * 16 * 10 / 1024 / 1024
-        for item in result.values()
+        result[name]["avoided_full_sort_workspace_mib"]
+        == 4 * 16 * 10 / 1024 / 1024
+        for name in ("unfiltered", "top_k", "top_k_top_p")
     )
+    assert result["top_p"]["avoided_top_k_mask_workspace_mib"] == (
+        4 * 16 * 3 + 16 * 8
+    ) / 1024 / 1024
     assert all(item["errors"][0]["max_abs_error"] == 0 for item in result.values())
     assert all(item["uses_host_sampling_metadata"] for item in result.values())
 
