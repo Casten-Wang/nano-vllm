@@ -1042,6 +1042,10 @@ def summarize(run_dir: Path, run_id: str) -> dict:
                     "reused_gate_mib",
                 ),
             ),
+            "sorted_route_weighting": summarize_buffer_reuse_candidate(
+                result["results"]["sorted_route_weighting_reuse"],
+                ("avoided_weighted_expert_output_mib",),
+            ),
             "residual_merge": summarize_buffer_reuse_candidate(
                 result["results"]["residual_output_buffer_reuse"],
                 ("reused_branch_output_mib_per_merge",),

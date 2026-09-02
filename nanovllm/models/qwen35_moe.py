@@ -9,7 +9,10 @@ from torch import nn
 
 from nanovllm.layers.activation import SiluAndMul
 from nanovllm.layers.linear import MergedColumnParallelLinear, RowParallelLinear, divide
-from nanovllm.models.moe_dispatch import batched_expert_dispatch
+from nanovllm.models.moe_dispatch import (
+    batched_expert_dispatch,
+    weight_expert_output,
+)
 
 
 class Qwen35RMSNorm(nn.Module):
@@ -295,7 +298,10 @@ class Qwen35Experts(nn.Module):
                     self.down_proj[expert_id],
                 )
                 output.add_(
-                    expert_output * topk_weights[0, route_index]
+                    weight_expert_output(
+                        expert_output,
+                        topk_weights[0, route_index],
+                    )
                 )
             return output
 
@@ -330,7 +336,10 @@ class Qwen35Experts(nn.Module):
                 F.silu(gate) * up,
                 self.down_proj[expert_id],
             )
-            expert_output = expert_output * sorted_weights[offset:end].unsqueeze(-1)
+            expert_output = weight_expert_output(
+                expert_output,
+                sorted_weights[offset:end],
+            )
             output.index_add_(0, token_index, expert_output.to(output.dtype))
             offset = end
         return output

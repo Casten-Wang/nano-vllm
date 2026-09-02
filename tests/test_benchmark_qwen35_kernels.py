@@ -433,6 +433,27 @@ def test_residual_merge_benchmark_measures_branch_reuse():
     assert result["errors"][0]["max_abs_error"] == 0
 
 
+def test_sorted_route_weighting_benchmark_measures_output_reuse():
+    args = SimpleNamespace(
+        router_tokens=8,
+        hidden_size=16,
+        warmup=0,
+        iterations=1,
+        repeats=1,
+    )
+
+    result = MODULE.benchmark_sorted_route_weighting(
+        args,
+        torch.device("cpu"),
+        torch.bfloat16,
+    )
+
+    assert result["avoided_weighted_expert_output_mib"] == (
+        8 * 16 * 2 / 1024 / 1024
+    )
+    assert result["errors"][0]["max_abs_error"] == 0
+
+
 def test_torch_kv_dequant_benchmark_measures_output_reuse():
     args = SimpleNamespace(
         prefill_tokens=256,

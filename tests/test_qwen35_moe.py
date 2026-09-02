@@ -556,6 +556,34 @@ def test_batched_decode_route_weighting_reuses_expert_output():
     )
 
 
+def test_sorted_route_weighting_reuses_expert_output_without_autograd():
+    expert_output = torch.randn(5, 4)
+    original = expert_output.clone()
+    weights = torch.rand(5)
+    storage = expert_output.data_ptr()
+
+    actual = moe_dispatch.weight_expert_output(expert_output, weights)
+
+    assert actual.data_ptr() == storage
+    torch.testing.assert_close(actual, original * weights.unsqueeze(-1))
+
+
+def test_sorted_route_weighting_preserves_autograd():
+    expert_output = torch.randn(5, 4, requires_grad=True)
+    weights = torch.rand(5, requires_grad=True)
+    expected_output = expert_output.detach().clone().requires_grad_()
+    expected_weights = weights.detach().clone().requires_grad_()
+
+    actual = moe_dispatch.weight_expert_output(expert_output, weights)
+    expected = expected_output * expected_weights.unsqueeze(-1)
+    actual.square().sum().backward()
+    expected.square().sum().backward()
+
+    torch.testing.assert_close(actual, expected)
+    torch.testing.assert_close(expert_output.grad, expected_output.grad)
+    torch.testing.assert_close(weights.grad, expected_weights.grad)
+
+
 def test_batched_decode_route_weighting_preserves_autograd():
     expert_output = torch.randn(6, 4, requires_grad=True)
     weights = torch.rand(3, 2, requires_grad=True)

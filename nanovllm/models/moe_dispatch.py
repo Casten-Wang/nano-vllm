@@ -25,6 +25,18 @@ def weighted_route_sum(
     return routed.sum(dim=1)
 
 
+def weight_expert_output(
+    expert_output: torch.Tensor,
+    route_weights: torch.Tensor,
+) -> torch.Tensor:
+    """Apply route weights while reusing inference-only expert output."""
+
+    weights = route_weights.unsqueeze(-1)
+    if expert_output.requires_grad or route_weights.requires_grad:
+        return expert_output * weights
+    return expert_output.mul_(weights)
+
+
 def batched_expert_dispatch(
     hidden_states: torch.Tensor,
     topk_ids: torch.Tensor,

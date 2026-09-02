@@ -484,6 +484,49 @@ def benchmark_moe_output_merge(args, device, dtype) -> dict:
     return result
 
 
+def benchmark_sorted_route_weighting(args, device, dtype) -> dict:
+    expert_output_source = torch.randn(
+        args.router_tokens,
+        args.hidden_size,
+        device=device,
+        dtype=dtype,
+    )
+    route_weights = torch.rand(
+        args.router_tokens,
+        device=device,
+        dtype=dtype,
+    )
+
+    def reference():
+        expert_output = expert_output_source.clone()
+        return (expert_output * route_weights.unsqueeze(-1),)
+
+    def candidate():
+        expert_output = expert_output_source.clone()
+        return (
+            MOE_DISPATCH.weight_expert_output(
+                expert_output,
+                route_weights,
+            ),
+        )
+
+    result = compare(
+        reference,
+        candidate,
+        device=device,
+        warmup=args.warmup,
+        iterations=args.iterations,
+        repeats=args.repeats,
+    )
+    result["avoided_weighted_expert_output_mib"] = (
+        expert_output_source.numel()
+        * expert_output_source.element_size()
+        / 1024
+        / 1024
+    )
+    return result
+
+
 def benchmark_residual_merge(args, device, dtype) -> dict:
     residual_source = torch.randn(
         args.router_tokens,
@@ -2587,6 +2630,11 @@ def main() -> None:
                 dtype,
             ),
             "moe_output_buffer_reuse": benchmark_moe_output_merge(
+                args,
+                device,
+                dtype,
+            ),
+            "sorted_route_weighting_reuse": benchmark_sorted_route_weighting(
                 args,
                 device,
                 dtype,
