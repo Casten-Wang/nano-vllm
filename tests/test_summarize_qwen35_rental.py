@@ -299,16 +299,35 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
             "commit": "abc",
             "git_dirty": False,
             "cuda_available": True,
-            "results": {"expert_dispatch_torch": {
-                batch: {"graph_safe_batched_candidate": {
-                    "promotion": {"promote_to_runtime": True},
-                    "median_ms": 1.0,
-                    "speedup_vs_current": 1.2,
-                    "peak_extra_mib": 4.0,
-                    "errors_vs_current": {"max_abs_error": 0.01},
-                }}
-                for batch in ("1", "64")
-            }},
+            "results": {
+                "expert_dispatch_torch": {
+                    batch: {"graph_safe_batched_candidate": {
+                        "promotion": {"promote_to_runtime": True},
+                        "median_ms": 1.0,
+                        "speedup_vs_current": 1.2,
+                        "peak_extra_mib": 4.0,
+                        "errors_vs_current": {"max_abs_error": 0.01},
+                    }}
+                    for batch in ("1", "64")
+                },
+                "rmsnorm_fp32_reuse": {
+                    "reference": {"peak_extra_mib": 8.0},
+                    "candidate": {"peak_extra_mib": 4.0},
+                    "speedup": 1.1,
+                    "errors": [{"max_abs_error": 0.0}],
+                    "avoided_fp32_copy_mib": 4.0,
+                    "candidate_reuses_fp32_workspace": True,
+                },
+                "gated_rmsnorm_fp32_reuse": {
+                    "reference": {"peak_extra_mib": 12.0},
+                    "candidate": {"peak_extra_mib": 4.0},
+                    "speedup": 1.2,
+                    "errors": [{"max_abs_error": 0.0}],
+                    "reused_hidden_fp32_workspace_mib": 4.0,
+                    "reused_gate_fp32_workspace_mib": 4.0,
+                    "candidate_reuses_fp32_workspaces": True,
+                },
+            },
         },
     )
     write_cudagraph_case(
@@ -337,6 +356,7 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     assert report["hybrid_cudagraph"]["all_tp_passed"]
     assert report["evidence"]["long_prefill_kernel_evidence"]
     assert report["evidence"]["mixed_workload_evidence"]
+    assert report["evidence"]["normalization_workspace_evidence"]
     assert report["long_prefill"]["by_tp"]["tp4"]["valid"]
     chunk_sweep = report["long_prefill"]["by_tp"]["tp4"]["chunk_sweep"]
     assert chunk_sweep["fastest_chunk_size"] == 64
@@ -346,6 +366,12 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     assert mixed["median_mixed_steps"] == 3
     assert mixed["initial_p95_decode_gap_cv"] < 0.1
     assert report["mixed_workload"]["cross_tp_output_parity"]
+    assert report["normalization"]["by_tp"]["tp4"]["rmsnorm"][
+        "peak_extra_mib_delta"
+    ] == -4.0
+    assert report["normalization"]["by_tp"]["tp4"]["gated_rmsnorm"][
+        "workspace"
+    ]["reused_gate_fp32_workspace_mib"] == 4.0
     assert report["graph_safe_moe"]["by_tp"]["tp4"]["promotion"][
         "selected_decode_batches"
     ] == [1, 64]

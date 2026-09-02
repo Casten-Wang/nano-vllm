@@ -598,16 +598,22 @@ def benchmark_rmsnorm(args, device, dtype) -> dict:
     eps = 1e-6
 
     def reference():
-        normalized = x.float() * torch.rsqrt(
-            x.float().pow(2).mean(dim=-1, keepdim=True) + eps
+        x_float = x.float()
+        normalized = x_float * torch.rsqrt(
+            x_float.pow(2).mean(dim=-1, keepdim=True) + eps
         )
         return ((normalized * (1.0 + weight)).to(dtype),)
 
     def candidate():
         x_float = x.float()
-        normalized = x_float * torch.rsqrt(
+        inverse_rms = torch.rsqrt(
             x_float.pow(2).mean(dim=-1, keepdim=True) + eps
         )
+        if x_float is not x:
+            x_float.mul_(inverse_rms)
+            x_float.mul_(1.0 + weight)
+            return (x_float.to(dtype),)
+        normalized = x_float * inverse_rms
         return ((normalized * (1.0 + weight)).to(dtype),)
 
     result = compare(
@@ -619,6 +625,72 @@ def benchmark_rmsnorm(args, device, dtype) -> dict:
         repeats=args.repeats,
     )
     result["avoided_fp32_copy_mib"] = x.numel() * 4 / 1024 / 1024
+    result["candidate_reuses_fp32_workspace"] = dtype != torch.float32
+    return result
+
+
+def benchmark_gated_rmsnorm(args, device, dtype) -> dict:
+    hidden = torch.randn(
+        args.router_tokens,
+        args.hidden_size,
+        device=device,
+        dtype=dtype,
+    )
+    gate = torch.randn_like(hidden)
+    weight = torch.randn(args.hidden_size, device=device)
+    eps = 1e-6
+
+    def reference():
+        hidden_float = hidden.float()
+        normalized = hidden_float * torch.rsqrt(
+            hidden_float.pow(2).mean(dim=-1, keepdim=True) + eps
+        )
+        return (
+            (
+                normalized.to(dtype)
+                * weight
+                * F.silu(gate.float())
+            ).to(dtype),
+        )
+
+    def candidate():
+        hidden_float = hidden.float()
+        inverse_rms = torch.rsqrt(
+            hidden_float.pow(2).mean(dim=-1, keepdim=True) + eps
+        )
+        if hidden_float is not hidden and gate.dtype != torch.float32:
+            hidden_float.mul_(inverse_rms)
+            normalized = hidden_float.to(dtype)
+            gate_float = gate.float()
+            F.silu(gate_float, inplace=True)
+            torch.mul(normalized, weight, out=hidden_float)
+            hidden_float.mul_(gate_float)
+            return (hidden_float.to(dtype),)
+        normalized = hidden_float * inverse_rms
+        return (
+            (
+                normalized.to(dtype)
+                * weight
+                * F.silu(gate.float())
+            ).to(dtype),
+        )
+
+    result = compare(
+        reference,
+        candidate,
+        device=device,
+        warmup=args.warmup,
+        iterations=args.iterations,
+        repeats=args.repeats,
+    )
+    workspace_mib = hidden.numel() * 4 / 1024 / 1024
+    result.update(
+        {
+            "reused_hidden_fp32_workspace_mib": workspace_mib,
+            "reused_gate_fp32_workspace_mib": workspace_mib,
+            "candidate_reuses_fp32_workspaces": dtype != torch.float32,
+        }
+    )
     return result
 
 
@@ -1212,6 +1284,11 @@ def main() -> None:
                 args.max_decode_tokens,
             ),
             "rmsnorm_fp32_reuse": benchmark_rmsnorm(args, device, dtype),
+            "gated_rmsnorm_fp32_reuse": benchmark_gated_rmsnorm(
+                args,
+                device,
+                dtype,
+            ),
             "vectorized_prefill_convolution": benchmark_convolution(
                 args,
                 device,
