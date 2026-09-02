@@ -816,6 +816,9 @@ def summarize(run_dir: Path, run_id: str) -> dict:
             "speedup_vs_current": candidate["speedup_vs_current"],
             "peak_extra_mib": candidate["peak_extra_mib"],
             "errors_vs_current": candidate["errors_vs_current"],
+            "reused_weighted_route_mib": candidate[
+                "reused_weighted_route_mib"
+            ],
             "by_decode_batch": {
                 batch: {
                     "promotion": item["promotion"],
@@ -823,6 +826,9 @@ def summarize(run_dir: Path, run_id: str) -> dict:
                     "speedup_vs_current": item["speedup_vs_current"],
                     "peak_extra_mib": item["peak_extra_mib"],
                     "errors_vs_current": item["errors_vs_current"],
+                    "reused_weighted_route_mib": item[
+                        "reused_weighted_route_mib"
+                    ],
                 }
                 for batch, item in candidates_by_batch.items()
             },

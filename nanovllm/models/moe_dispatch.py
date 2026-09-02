@@ -13,6 +13,18 @@ def silu_and_mul(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
     return gate.mul_(up)
 
 
+def weighted_route_sum(
+    expert_output: torch.Tensor,
+    topk_weights: torch.Tensor,
+) -> torch.Tensor:
+    routed = expert_output.reshape(*topk_weights.shape, -1)
+    weights = topk_weights.unsqueeze(-1)
+    if expert_output.requires_grad or topk_weights.requires_grad:
+        return (routed * weights).sum(dim=1)
+    routed.mul_(weights)
+    return routed.sum(dim=1)
+
+
 def batched_expert_dispatch(
     hidden_states: torch.Tensor,
     topk_ids: torch.Tensor,
@@ -50,8 +62,8 @@ def batched_expert_dispatch(
             selected_down,
             activated.unsqueeze(-1),
         ).squeeze(-1)
-        output[start:end] = (
-            expert_output.reshape(end - start, top_k, -1)
-            * topk_weights[start:end].unsqueeze(-1)
-        ).sum(dim=1)
+        output[start:end] = weighted_route_sum(
+            expert_output,
+            topk_weights[start:end],
+        )
     return output

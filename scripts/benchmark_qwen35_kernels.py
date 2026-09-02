@@ -772,6 +772,14 @@ def benchmark_expert_dispatch(args, device, dtype, token_count: int) -> dict:
                         / 1024
                         / 1024
                     ),
+                    "reused_weighted_route_mib": (
+                        min(token_count, chunk_size)
+                        * args.top_k
+                        * args.hidden_size
+                        * hidden.element_size()
+                        / 1024
+                        / 1024
+                    ),
                 }
             )
             graph_safe_timing["promotion"] = evaluate_graph_safe_moe_candidate(

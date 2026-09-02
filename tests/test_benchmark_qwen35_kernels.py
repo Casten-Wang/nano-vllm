@@ -426,6 +426,7 @@ def test_single_token_dispatch_reports_general_path_baseline():
     graph_safe = result["graph_safe_batched_candidate"]
     assert graph_safe["speedup_vs_current"] > 0
     assert graph_safe["estimated_selected_weight_mib"] > 0
+    assert graph_safe["reused_weighted_route_mib"] > 0
     assert graph_safe["errors_vs_current"]["max_abs_error"] < 1e-5
     assert not graph_safe["promotion"]["promote_to_runtime"]
     assert not graph_safe["promotion"]["checks"]["cuda_measurement"]

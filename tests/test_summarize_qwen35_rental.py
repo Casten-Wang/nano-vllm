@@ -390,6 +390,7 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
                         "speedup_vs_current": 1.2,
                         "peak_extra_mib": 4.0,
                         "errors_vs_current": {"max_abs_error": 0.01},
+                        "reused_weighted_route_mib": 0.25,
                     }}
                     for batch in ("1", "64")
                 },

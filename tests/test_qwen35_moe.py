@@ -362,6 +362,36 @@ def test_batched_decode_swiglu_reuses_gate_storage_without_autograd():
     torch.testing.assert_close(actual, expected)
 
 
+def test_batched_decode_route_weighting_reuses_expert_output():
+    expert_output = torch.tensor(
+        [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0], [7.0, 8.0]]
+    )
+    original = expert_output.clone()
+    weights = torch.tensor([[0.25, 0.75], [0.60, 0.40]])
+    expected = (original.view(2, 2, 2) * weights.unsqueeze(-1)).sum(dim=1)
+
+    actual = moe_dispatch.weighted_route_sum(expert_output, weights)
+
+    torch.testing.assert_close(actual, expected)
+    torch.testing.assert_close(
+        expert_output,
+        (original.view(2, 2, 2) * weights.unsqueeze(-1)).reshape_as(original),
+    )
+
+
+def test_batched_decode_route_weighting_preserves_autograd():
+    expert_output = torch.randn(6, 4, requires_grad=True)
+    weights = torch.rand(3, 2, requires_grad=True)
+    before = expert_output.detach().clone()
+
+    output = moe_dispatch.weighted_route_sum(expert_output, weights)
+    output.sum().backward()
+
+    torch.testing.assert_close(expert_output.detach(), before)
+    assert expert_output.grad is not None
+    assert weights.grad is not None
+
+
 def test_batched_backend_keeps_prefill_on_grouped_dispatch():
     experts = make_experts(decode_backend="batched")
     hidden = torch.randn(3, 2)
