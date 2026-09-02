@@ -368,10 +368,19 @@ class HybridStateContextTest(unittest.TestCase):
             SimpleNamespace(state_slot=7, block_table=[1]),
             SimpleNamespace(state_slot=2, block_table=[2]),
         ]
+        captured = {}
+        original = model_runner_module.torch.tensor
+        model_runner_module.torch.tensor = lambda values, **kwargs: (
+            captured.update(kwargs) or FakeTensor(values)
+        )
 
-        slots = runner.prepare_state_slots(seqs)
+        try:
+            slots = runner.prepare_state_slots(seqs)
+        finally:
+            model_runner_module.torch.tensor = original
 
         self.assertEqual(slots.values, [7, 2])
+        self.assertIs(captured["dtype"], model_runner_module.torch.int64)
 
     def test_scheduled_hybrid_sequence_requires_state_slot(self):
         runner = self.make_hybrid_runner()

@@ -895,7 +895,7 @@ class Qwen35GatedDeltaNet(nn.Module):
         if context.state_reset_mask is not None:
             reset_slots = context.state_slots[context.state_reset_mask]
             if reset_slots.numel():
-                self.state_pool.reset(reset_slots.to(torch.long))
+                self.state_pool.reset(reset_slots)
 
         mixed_qkv = self.in_proj_qkv(hidden_states)
         z = self.in_proj_z(hidden_states)
@@ -910,7 +910,7 @@ class Qwen35GatedDeltaNet(nn.Module):
         # retain the original gate values for backward, so keep it separate.
         outputs = torch.empty_like(z) if z.requires_grad else z
         if decode_count:
-            decode_slots = context.state_slots[:decode_count].to(torch.long)
+            decode_slots = context.state_slots[:decode_count]
             outputs[:decode_count] = self._decode_batch(
                 mixed_qkv[:decode_count],
                 z[:decode_count],

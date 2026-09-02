@@ -639,7 +639,7 @@ class ModelRunner:
                 state_slots.append(seq.state_slot)
         return torch.tensor(
             state_slots,
-            dtype=torch.int32,
+            dtype=torch.int64,
             pin_memory=True,
         ).cuda(non_blocking=True)
 
@@ -1054,7 +1054,7 @@ class ModelRunner:
             state_slots = torch.full(
                 (max_bs,),
                 self.recurrent_graph_padding_slot,
-                dtype=torch.int32,
+                dtype=torch.int64,
             )
         self.graph_bs = cuda_graph_buckets(max_bs)
         self.graphs = {}
