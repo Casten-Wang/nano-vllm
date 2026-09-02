@@ -1235,20 +1235,24 @@ def test_contiguous_decode_updates_state_cache_without_gather_scatter():
     )
 
 
-def test_compressed_contiguous_decode_keeps_conversion_writeback():
+def test_compressed_contiguous_decode_avoids_gather_and_matches_indexed_path():
+    torch.manual_seed(37)
     layer = make_layer()
     layer.allocate_state_cache(
-        2,
+        3,
         "cpu",
         recurrent_dtype=torch.bfloat16,
     )
+    for parameter in layer.parameters():
+        parameter.data.normal_(mean=0.0, std=0.2)
+    hidden = torch.randn(2, 4)
     context = SimpleNamespace(
         is_mixed=False,
         is_prefill=False,
-        state_slots=torch.tensor([0], dtype=torch.int64),
-        state_reset_mask=torch.tensor([True]),
+        state_slots=torch.tensor([1, 2], dtype=torch.int64),
+        state_reset_mask=torch.tensor([True, True]),
         state_token_ranges=(),
-        decode_state_span=(0, 1),
+        decode_state_span=(1, 2),
     )
     context_module = types.ModuleType("nanovllm.utils.context")
     context_module.get_context = lambda: context
@@ -1258,11 +1262,32 @@ def test_compressed_contiguous_decode_keeps_conversion_writeback():
         patch.dict(sys.modules, {"nanovllm.utils.context": context_module}),
         patch.object(layer.state_pool, "get", wraps=layer.state_pool.get) as get,
         patch.object(layer.state_pool, "update", wraps=layer.state_pool.update) as update,
+        patch.object(
+            layer.state_pool,
+            "get_contiguous",
+            wraps=layer.state_pool.get_contiguous,
+        ) as get_contiguous,
     ):
-        layer(torch.randn(1, 4))
+        contiguous_output = layer(hidden)
 
-    assert get.call_count == 1
-    assert update.call_count == 1
+    assert get.call_count == 0
+    assert update.call_count == 0
+    assert get_contiguous.call_count == 1
+    contiguous_state = layer.state_pool.recurrent[:, 1:3].clone()
+
+    layer.state_pool.reset(torch.tensor([1, 2]))
+    context.decode_state_span = None
+    with (
+        torch.inference_mode(),
+        patch.dict(sys.modules, {"nanovllm.utils.context": context_module}),
+    ):
+        indexed_output = layer(hidden)
+
+    torch.testing.assert_close(contiguous_output, indexed_output)
+    torch.testing.assert_close(
+        contiguous_state,
+        layer.state_pool.recurrent[:, 1:3],
+    )
 
 
 def test_gated_delta_reuses_precomputed_reset_slots():

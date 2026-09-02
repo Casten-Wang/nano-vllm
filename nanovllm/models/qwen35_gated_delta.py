@@ -903,16 +903,16 @@ class Qwen35GatedDeltaNet(nn.Module):
         state_span: tuple[int, int] | None = None,
     ) -> torch.Tensor:
         assert self.state_pool is not None
-        reuse_cached_state = (
+        use_contiguous_state = (
             state_span is not None
             and not torch.is_grad_enabled()
-            and self.state_pool.recurrent.dtype == torch.float32
         )
-        if reuse_cached_state:
+        if use_contiguous_state:
             recurrent_state, conv_state = self.state_pool.get_contiguous(
                 0,
                 *state_span,
             )
+            cached_recurrent_state = recurrent_state
         else:
             recurrent_state, conv_state = self.state_pool.get(0, slots)
         convolved, conv_state = causal_conv1d_step(
@@ -939,7 +939,10 @@ class Qwen35GatedDeltaNet(nn.Module):
             recurrent_state,
             inplace_state=True,
         )
-        if not reuse_cached_state:
+        if use_contiguous_state:
+            if recurrent_state.data_ptr() != cached_recurrent_state.data_ptr():
+                cached_recurrent_state.copy_(recurrent_state)
+        else:
             self.state_pool.update(0, slots, recurrent_state, conv_state)
         return self.norm(
             output.reshape(-1, self.value_head_dim),
