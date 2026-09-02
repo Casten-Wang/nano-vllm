@@ -59,6 +59,8 @@ def result(
         "recurrent_state_dtype": "float32",
         "qwen35_moe_decode_backend": "sorted",
         "qwen35_moe_decode_chunk_size": 8,
+        "quantization_format": "bf16",
+        "weight_quant_backend": "auto",
         "kv_cache_dtype": "auto",
         "kv_dequant_backend": "fused",
         "int8_partitioned_decode_threshold": 8192,
@@ -144,6 +146,8 @@ def test_comparison_allows_explicit_optimization_variables_to_change():
     candidate["tensor_parallel_size"] = 8
     candidate["recurrent_state_dtype"] = "model"
     candidate["qwen35_moe_decode_backend"] = "batched"
+    candidate["quantization_format"] = "gptq_int4"
+    candidate["weight_quant_backend"] = "triton"
     candidate["kv_cache_dtype"] = "int8"
 
     comparison = MODULE.compare_results(
@@ -154,6 +158,23 @@ def test_comparison_allows_explicit_optimization_variables_to_change():
     assert comparison["runs"][1]["tensor_parallel_size"] == 8
     assert comparison["runs"][1]["recurrent_state_dtype"] == "model"
     assert comparison["runs"][1]["qwen35_moe_decode_backend"] == "batched"
+    assert comparison["runs"][1]["quantization_format"] == "gptq_int4"
+    assert comparison["runs"][1]["weight_quant_backend"] == "triton"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("quantization_format", "gptq_int4"),
+        ("weight_quant_backend", "triton"),
+    ],
+)
+def test_repeat_summary_rejects_mixed_weight_quantization(field, value):
+    candidate = result()
+    candidate[field] = value
+
+    with pytest.raises(ValueError, match=rf"r2\.{field}"):
+        MODULE.summarize_repeats([result(), candidate], ["r1", "r2"])
 
 
 def test_comparison_rejects_different_workloads():

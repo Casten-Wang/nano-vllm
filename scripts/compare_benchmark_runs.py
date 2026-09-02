@@ -38,6 +38,8 @@ OPTIMIZATION_FIELDS = (
     "recurrent_state_dtype",
     "qwen35_moe_decode_backend",
     "qwen35_moe_decode_chunk_size",
+    "quantization_format",
+    "weight_quant_backend",
     "kv_cache_dtype",
     "kv_dequant_backend",
     "int8_partitioned_decode_threshold",
