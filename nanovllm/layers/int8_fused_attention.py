@@ -757,6 +757,72 @@ def allocate_partitioned_workspace(
     return partial_acc, partial_m, partial_l
 
 
+def validate_partitioned_workspace(
+    workspace: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+    q: torch.Tensor,
+    num_partitions: int,
+    block_head_dim: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    partial_shape = (q.size(0), q.size(1), num_partitions)
+    expected_shapes = (
+        (*partial_shape, block_head_dim),
+        partial_shape,
+        partial_shape,
+    )
+    if len(workspace) != 3:
+        raise ValueError("partitioned workspace must contain acc, m, and l tensors")
+    ranges = []
+    for name, tensor, shape in zip(("acc", "m", "l"), workspace, expected_shapes):
+        if tensor.shape != shape:
+            raise ValueError(
+                f"partitioned workspace {name} has shape {tuple(tensor.shape)}; "
+                f"expected {shape}"
+            )
+        if tensor.dtype != torch.float32 or tensor.device != q.device:
+            raise ValueError(
+                f"partitioned workspace {name} must be float32 on {q.device}"
+            )
+        if not tensor.is_contiguous():
+            raise ValueError(f"partitioned workspace {name} must be contiguous")
+        start = tensor.data_ptr()
+        ranges.append((name, start, start + tensor.numel() * tensor.element_size()))
+    for index, (name, start, end) in enumerate(ranges):
+        for other_name, other_start, other_end in ranges[index + 1 :]:
+            if start < other_end and other_start < end:
+                raise ValueError(
+                    f"partitioned workspace {name} overlaps {other_name}"
+                )
+    return workspace
+
+
+def validate_partitioned_output(
+    output: torch.Tensor,
+    q: torch.Tensor,
+    workspace: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+) -> torch.Tensor:
+    if (
+        output.shape != q.shape
+        or output.dtype != q.dtype
+        or output.device != q.device
+        or not output.is_contiguous()
+    ):
+        raise ValueError("partitioned attention output must match q layout")
+    output_start = output.data_ptr()
+    output_end = output_start + output.numel() * output.element_size()
+    q_start = q.data_ptr()
+    q_end = q_start + q.numel() * q.element_size()
+    if output_start < q_end and q_start < output_end:
+        raise ValueError("partitioned attention output must not alias q")
+    for name, tensor in zip(("acc", "m", "l"), workspace):
+        start = tensor.data_ptr()
+        end = start + tensor.numel() * tensor.element_size()
+        if output_start < end and start < output_end:
+            raise ValueError(
+                f"partitioned attention output overlaps workspace {name}"
+            )
+    return output
+
+
 def partitioned_fused_int8_decode_attention(
     q: torch.Tensor,
     k_cache: torch.Tensor,
@@ -771,6 +837,8 @@ def partitioned_fused_int8_decode_attention(
     partition_size: int = 256,
     *,
     max_context_len: int,
+    workspace: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
+    output: torch.Tensor | None = None,
 ):
     """Partitioned INT8 decode attention for long-context eager decode.
 
@@ -819,12 +887,24 @@ def partitioned_fused_int8_decode_attention(
     flat_v_cache = v_cache.view(-1, num_kv_heads, head_dim)
     flat_k_scale = k_scale.view(-1, num_kv_heads)
     flat_v_scale = v_scale.view(-1, num_kv_heads)
-    partial_acc, partial_m, partial_l = allocate_partitioned_workspace(
-        q,
-        num_partitions,
-        block_head_dim,
-    )
-    o = torch.empty_like(q)
+    if workspace is None:
+        partial_acc, partial_m, partial_l = allocate_partitioned_workspace(
+            q,
+            num_partitions,
+            block_head_dim,
+        )
+    else:
+        partial_acc, partial_m, partial_l = validate_partitioned_workspace(
+            workspace,
+            q,
+            num_partitions,
+            block_head_dim,
+        )
+    validated_workspace = (partial_acc, partial_m, partial_l)
+    if output is None:
+        o = torch.empty_like(q)
+    else:
+        o = validate_partitioned_output(output, q, validated_workspace)
 
     _partitioned_int8_decode_attention_kernel[(num_seqs, num_heads, num_partitions)](
         q,

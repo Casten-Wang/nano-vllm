@@ -93,6 +93,44 @@ class PartitionedWorkspaceTest(unittest.TestCase):
             * partial_acc.element_size(),
         )
 
+    def test_reusable_workspace_validation_accepts_exact_layout(self):
+        q = torch.empty(2, 3, 4)
+        workspace = int8_fused_attention.allocate_partitioned_workspace(q, 5, 8)
+
+        actual = int8_fused_attention.validate_partitioned_workspace(
+            workspace, q, 5, 8
+        )
+
+        self.assertIs(actual, workspace)
+
+    def test_reusable_workspace_validation_rejects_wrong_shape(self):
+        q = torch.empty(2, 3, 4)
+        workspace = int8_fused_attention.allocate_partitioned_workspace(q, 5, 8)
+
+        with self.assertRaisesRegex(ValueError, "workspace acc has shape"):
+            int8_fused_attention.validate_partitioned_workspace(
+                (workspace[0][:-1], workspace[1], workspace[2]), q, 5, 8
+            )
+
+    def test_reusable_workspace_validation_rejects_overlap(self):
+        q = torch.empty(1, 1, 4)
+        storage = torch.empty(12, dtype=torch.float32)
+        acc = storage[:8].view(1, 1, 1, 8)
+        overlapping_m = storage[:1].view(1, 1, 1)
+        nonoverlapping_l = storage[8:9].view(1, 1, 1)
+
+        with self.assertRaisesRegex(ValueError, "workspace acc overlaps m"):
+            int8_fused_attention.validate_partitioned_workspace(
+                (acc, overlapping_m, nonoverlapping_l), q, 1, 8
+            )
+
+    def test_reusable_output_validation_rejects_q_alias(self):
+        q = torch.empty(1, 2, 4)
+        workspace = int8_fused_attention.allocate_partitioned_workspace(q, 1, 4)
+
+        with self.assertRaisesRegex(ValueError, "must not alias q"):
+            int8_fused_attention.validate_partitioned_output(q, q, workspace)
+
 
 def reference_int8_decode_attention(
     q,

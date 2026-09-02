@@ -16,6 +16,7 @@ from flash_attn import flash_attn_with_kvcache
 
 from nanovllm.benchmark_metadata import collect_benchmark_metadata
 from nanovllm.layers.int8_fused_attention import (
+    allocate_partitioned_workspace,
     fused_int8_decode_attention,
     fused_int8_decode_attention_latev,
     fused_int8_decode_attention_v3,
@@ -833,6 +834,20 @@ def main() -> None:
 
     if args.include_partitioned:
         for partition_size in partition_sizes:
+            effective_context = min(
+                args.context_len,
+                args.sliding_window_size
+                if args.sliding_window_size is not None
+                else args.context_len,
+            )
+            num_partitions = max(math.ceil(effective_context / partition_size), 1)
+            block_head_dim = 1 << (args.head_dim - 1).bit_length()
+            reusable_workspace = allocate_partitioned_workspace(
+                q,
+                num_partitions,
+                block_head_dim,
+            )
+            reusable_output = torch.empty_like(q)
 
             def run_partitioned(partition_size=partition_size):
                 return partitioned_fused_int8_decode_attention(
@@ -850,6 +865,28 @@ def main() -> None:
                     max_context_len=args.context_len,
                 )
 
+            def run_partitioned_reuse(
+                partition_size=partition_size,
+                workspace=reusable_workspace,
+                output=reusable_output,
+            ):
+                return partitioned_fused_int8_decode_attention(
+                    q,
+                    k_int8,
+                    v_int8,
+                    k_scale,
+                    v_scale,
+                    block_tables,
+                    context_lens,
+                    softmax_scale,
+                    args.sliding_window_size,
+                    block_tokens=min(args.block_size, 256),
+                    partition_size=partition_size,
+                    max_context_len=args.context_len,
+                    workspace=workspace,
+                    output=output,
+                )
+
             name = f"int8_partitioned_ps{partition_size}"
             try:
                 item, _ = benchmark_backend(
@@ -863,6 +900,27 @@ def main() -> None:
             except Exception as exc:
                 item, _ = unavailable_backend("candidate", exc)
             results[name] = item
+            reuse_name = f"{name}_workspace_reuse"
+            try:
+                reuse_item, _ = benchmark_backend(
+                    run_partitioned_reuse,
+                    role="candidate",
+                    warmup=args.warmup,
+                    iters=args.iters,
+                    repeats=args.repeats,
+                    reference_out=flash_out,
+                )
+            except Exception as exc:
+                reuse_item, _ = unavailable_backend("candidate", exc)
+            if item["status"] == "ok" and reuse_item["status"] == "ok":
+                reuse_item["speedup_vs_allocating"] = (
+                    item["median_ms"] / reuse_item["median_ms"]
+                )
+                reuse_item["avoided_peak_extra_mib"] = max(
+                    item["peak_extra_mib"] - reuse_item["peak_extra_mib"],
+                    0.0,
+                )
+            results[reuse_name] = reuse_item
 
     result = {
         **collect_benchmark_metadata(torch),
