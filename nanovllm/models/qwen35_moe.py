@@ -207,7 +207,6 @@ class Qwen35Experts(nn.Module):
         is_decode: bool | None = None,
         reduce_output: bool = True,
     ) -> torch.Tensor:
-        output = torch.zeros_like(hidden_states)
         if is_decode is None:
             is_decode = hidden_states.shape[0] == 1
         if is_decode and self.decode_backend == "batched":
@@ -222,6 +221,7 @@ class Qwen35Experts(nn.Module):
             if reduce_output and self.tp_size > 1:
                 dist.all_reduce(output)
             return output
+        output = torch.zeros_like(hidden_states)
         if hidden_states.shape[0] == 1:
             # Decode has only ``top_k`` routes. Preserve the expert-sorted
             # accumulation order without building the general flattened

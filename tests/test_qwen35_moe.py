@@ -245,6 +245,30 @@ def test_batched_single_token_decode_matches_sorted_backend():
     torch.testing.assert_close(actual, expected)
 
 
+def test_batched_decode_does_not_allocate_discarded_wrapper_output():
+    experts = make_experts(decode_backend="batched")
+    hidden = torch.randn(1, 2)
+    topk_ids = torch.tensor([[0, 1]])
+    topk_weights = torch.tensor([[0.6, 0.4]])
+    expected = torch.randn_like(hidden)
+
+    with (
+        patch.object(
+            qwen35_moe,
+            "batched_expert_dispatch",
+            return_value=expected,
+        ),
+        patch.object(
+            qwen35_moe.torch,
+            "zeros_like",
+            side_effect=AssertionError("batched output must not be preallocated"),
+        ),
+    ):
+        actual = experts(hidden, topk_ids, topk_weights, is_decode=True)
+
+    assert actual is expected
+
+
 def test_batched_multi_token_decode_matches_sorted_backend_in_chunks():
     torch.manual_seed(53)
     sorted_experts = make_experts(num_experts=4)
