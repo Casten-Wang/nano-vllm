@@ -157,7 +157,11 @@ class Scheduler:
         # 3. Return both groups so ModelRunner can execute one mixed forward.
         decode_seqs = self.schedule_decode_first()
         prefill_budget = self.max_num_batched_tokens - len(decode_seqs)
-        prefill_slots = self.max_num_seqs - len(decode_seqs)
+        # ``self.running`` still contains decode requests that did not fit the
+        # current token budget. They continue to own KV/state slots and must be
+        # counted before admitting new prefill requests.
+        active_decode_seqs = len(self.running) + len(decode_seqs)
+        prefill_slots = max(self.max_num_seqs - active_decode_seqs, 0)
         prefill_seqs = self.schedule_prefill_with_budget(prefill_budget, prefill_slots)
         if decode_seqs:
             # Rotate decoded requests to the back. Using extendleft here

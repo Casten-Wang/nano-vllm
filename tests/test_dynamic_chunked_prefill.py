@@ -231,6 +231,29 @@ def test_dynamic_decode_rotates_running_requests_when_budget_is_small():
     assert observed == running
 
 
+def test_dynamic_schedule_counts_unscheduled_running_requests_in_slot_budget():
+    scheduler = make_scheduler(max_tokens=2, max_seqs=3, block_size=4)
+    running = []
+    for token in (1, 5, 9):
+        seq = Sequence([token] * 4)
+        scheduler.block_manager.allocate(seq, 0)
+        seq.status = SequenceStatus.RUNNING
+        seq.is_prefill = False
+        seq.num_cached_tokens = len(seq)
+        scheduler.running.append(seq)
+        running.append(seq)
+    waiting = Sequence([10] * 4)
+    scheduler.waiting.append(waiting)
+
+    result = scheduler.schedule()
+
+    assert result.decode_seqs == running[:2]
+    assert result.prefill_seqs == []
+    assert list(scheduler.running) == [running[2], *running[:2]]
+    assert list(scheduler.waiting) == [waiting]
+    assert waiting.block_table == []
+
+
 def test_dynamic_prefill_only_result_uses_prefill_mode():
     scheduler = make_scheduler(max_tokens=8, max_seqs=8, block_size=4)
     waiting = Sequence([10] * 6)
