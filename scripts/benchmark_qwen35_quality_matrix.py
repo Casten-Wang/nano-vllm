@@ -124,6 +124,17 @@ def checkpoint_audit_command(
 def summarize_results(
     results: dict[QualityCase, dict],
 ) -> dict:
+    checkpoint_digests = {
+        result.get("checkpoint_manifest", {}).get("digest")
+        for result in results.values()
+    }
+    if None in checkpoint_digests or len(checkpoint_digests) != 1:
+        raise ValueError("quality matrix results use different checkpoints")
+    commits = {result.get("commit") for result in results.values()}
+    if None in commits or len(commits) != 1:
+        raise ValueError("quality matrix results use different commits")
+    if any(result.get("git_dirty") is not False for result in results.values()):
+        raise ValueError("quality matrix requires clean worktrees")
     rows = []
     by_tp: dict[str, dict] = {}
     for case, result in results.items():
@@ -263,9 +274,14 @@ def summarize_results(
         }
         for tp_name, comparison in by_tp.items()
     }
+    cross_tp_passed = all(
+        item["passed"] for item in cross_tp_comparisons
+    )
     quality_gates_passed = all(
         all(checks.values()) for checks in per_case_quality
-    ) and all(all(checks.values()) for checks in per_tp_quality.values())
+    ) and all(
+        all(checks.values()) for checks in per_tp_quality.values()
+    ) and cross_tp_passed
     return {
         "quality_scope": "teacher-forced decode tokens that read stored KV cache",
         "cases": rows,
@@ -273,9 +289,7 @@ def summarize_results(
         "case_token_digest": next(iter(case_digests)),
         "cross_tp": {
             "max_target_logprob_diff": CROSS_TP_MAX_TARGET_LOGPROB_DIFF,
-            "all_passed": all(
-                item["passed"] for item in cross_tp_comparisons
-            ),
+            "all_passed": cross_tp_passed,
             "comparisons": cross_tp_comparisons,
         },
         "quality_gates": {

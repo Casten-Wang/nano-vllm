@@ -48,6 +48,9 @@ def summary(
     js_divergence=0.001,
 ):
     return {
+        "commit": "abc",
+        "git_dirty": False,
+        "checkpoint_manifest": {"digest": "weights"},
         "case_token_digest": "cases",
         "batches": [
             {
@@ -128,6 +131,7 @@ def test_matrix_summary_requires_cross_tp_logit_parity():
     result = MODULE.summarize_results(cases)
 
     assert not result["cross_tp"]["all_passed"]
+    assert not result["quality_gates"]["all_passed"]
     model_comparison = result["cross_tp"]["comparisons"][1]
     assert model_comparison["recurrent_state_dtype"] == "model"
     assert not model_comparison["modes"]["bf16"]["passed"]
@@ -153,6 +157,34 @@ def test_matrix_summary_rejects_int8_quality_regression():
     assert result["quality_gates"]["thresholds"][
         "min_int8_top1_agreement"
     ] == 0.98
+
+
+def test_matrix_summary_rejects_mixed_checkpoint_results():
+    cases = {
+        MODULE.QualityCase(4, "float32"): summary(10.0, 10.5),
+        MODULE.QualityCase(4, "model"): summary(10.2, 10.8),
+    }
+    cases[MODULE.QualityCase(4, "model")]["checkpoint_manifest"][
+        "digest"
+    ] = "different"
+
+    with pytest.raises(ValueError, match="different checkpoints"):
+        MODULE.summarize_results(cases)
+
+
+def test_matrix_summary_rejects_dirty_or_mixed_source_results():
+    cases = {
+        MODULE.QualityCase(4, "float32"): summary(10.0, 10.5),
+        MODULE.QualityCase(4, "model"): summary(10.2, 10.8),
+    }
+    cases[MODULE.QualityCase(4, "model")]["commit"] = "def"
+    with pytest.raises(ValueError, match="different commits"):
+        MODULE.summarize_results(cases)
+
+    cases[MODULE.QualityCase(4, "model")]["commit"] = "abc"
+    cases[MODULE.QualityCase(4, "model")]["git_dirty"] = True
+    with pytest.raises(ValueError, match="clean worktrees"):
+        MODULE.summarize_results(cases)
 
 
 def test_cases_file_is_forwarded():
