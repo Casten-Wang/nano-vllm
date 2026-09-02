@@ -1033,6 +1033,14 @@ def summarize(run_dir: Path, run_id: str) -> dict:
                 ("avoided_fp32_logits_mib",),
                 {"uses_host_sampling_metadata": True},
             ),
+            "sampling_inputs": summarize_buffer_reuse_candidate(
+                result["results"]["sampling_input_buffer_reuse"],
+                (
+                    "eliminated_tensor_allocations_per_step",
+                    "persistent_sampling_input_mib",
+                ),
+                {"candidate_reuses_host_device_storage": True},
+            ),
             "decode_convolution_state": summarize_buffer_reuse_candidate(
                 result["results"]["decode_convolution_state_reuse"],
                 ("reused_convolution_state_mib",),

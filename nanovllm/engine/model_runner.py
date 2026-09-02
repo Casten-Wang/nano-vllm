@@ -15,6 +15,7 @@ from nanovllm.engine.execution import (
     supports_cudagraph_policy,
 )
 from nanovllm.engine.sequence import Sequence
+from nanovllm.engine.sampling_input_batch import SamplingInputBatch
 from nanovllm.engine.kv_cache_packing import PackedBlockMetadata, build_packed_block_metadata
 from nanovllm.models.registry import create_model
 from nanovllm.models.cache_plan import plan_cache_memory
@@ -139,6 +140,11 @@ class ModelRunner:
         self.model = create_model(model_spec.architecture, hf_config)
         load_model(self.model, config.model)
         self.sampler = Sampler()
+        self.sampling_inputs = (
+            SamplingInputBatch(config.max_num_seqs)
+            if self.rank == 0
+            else None
+        )
         self.allocate_recurrent_state_cache()
         self.warmup_model()
         self.allocate_kv_cache()
@@ -1090,9 +1096,13 @@ class ModelRunner:
             top_ps,
             int(self.config.model_config.vocab_size),
         )
-        temperatures = torch.tensor(temperatures, dtype=torch.float32, pin_memory=True).cuda(non_blocking=True)
-        top_ks = torch.tensor(top_ks, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
-        top_ps = torch.tensor(top_ps, dtype=torch.float32, pin_memory=True).cuda(non_blocking=True)
+        if self.sampling_inputs is None:
+            raise RuntimeError("sampling inputs are only available on rank 0")
+        temperatures, top_ks, top_ps = self.sampling_inputs.update(
+            temperatures,
+            top_ks,
+            top_ps,
+        )
         return temperatures, top_ks, top_ps, metadata
 
     @torch.inference_mode()

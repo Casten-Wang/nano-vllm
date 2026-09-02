@@ -48,6 +48,10 @@ SAMPLER = load_source_module(
     "qwen35_sampler_benchmark",
     "nanovllm/layers/sampler.py",
 )
+SAMPLING_INPUTS = load_source_module(
+    "qwen35_sampling_inputs_benchmark",
+    "nanovllm/engine/sampling_input_batch.py",
+)
 ROTARY = load_source_module(
     "qwen35_rotary_benchmark",
     "nanovllm/layers/rotary_embedding.py",
@@ -439,6 +443,61 @@ def benchmark_greedy_sampler(args, device, dtype) -> dict:
         logits.numel() * max(4 - logits.element_size(), 0) / 1024 / 1024
     )
     result["uses_host_sampling_metadata"] = True
+    return result
+
+
+def benchmark_sampling_input_reuse(args, device, dtype) -> dict:
+    temperatures = [0.75] * args.sampling_batch
+    top_ks = [args.sampling_top_k] * args.sampling_batch
+    top_ps = [args.sampling_top_p] * args.sampling_batch
+    pin_memory = device.type == "cuda"
+    batch = SAMPLING_INPUTS.SamplingInputBatch(
+        args.sampling_batch,
+        device=device,
+        pin_memory=pin_memory,
+    )
+
+    def reference():
+        return tuple(
+            torch.tensor(values, dtype=value_dtype, pin_memory=pin_memory).to(
+                device,
+                non_blocking=pin_memory,
+            )
+            for values, value_dtype in (
+                (temperatures, torch.float32),
+                (top_ks, torch.int32),
+                (top_ps, torch.float32),
+            )
+        )
+
+    def candidate():
+        return batch.update(temperatures, top_ks, top_ps)
+
+    result = compare(
+        reference,
+        candidate,
+        device=device,
+        warmup=args.warmup,
+        iterations=args.iterations,
+        repeats=args.repeats,
+    )
+    result["eliminated_tensor_allocations_per_step"] = 6
+    result["persistent_sampling_input_mib"] = (
+        sum(
+            tensor.numel() * tensor.element_size()
+            for tensor in (
+                batch.host_temperatures,
+                batch.host_top_ks,
+                batch.host_top_ps,
+                batch.device_temperatures,
+                batch.device_top_ks,
+                batch.device_top_ps,
+            )
+        )
+        / 1024
+        / 1024
+    )
+    result["candidate_reuses_host_device_storage"] = True
     return result
 
 
@@ -2777,6 +2836,11 @@ def main() -> None:
                 dtype,
             ),
             "greedy_sampler_precision_fast_path": benchmark_greedy_sampler(
+                args,
+                device,
+                dtype,
+            ),
+            "sampling_input_buffer_reuse": benchmark_sampling_input_reuse(
                 args,
                 device,
                 dtype,

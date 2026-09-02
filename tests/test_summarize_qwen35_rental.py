@@ -462,6 +462,15 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
                     "avoided_fp32_logits_mib": 64.0,
                     "uses_host_sampling_metadata": True,
                 },
+                "sampling_input_buffer_reuse": {
+                    "reference": {"peak_extra_mib": 1.0},
+                    "candidate": {"peak_extra_mib": 0.0},
+                    "speedup": 1.1,
+                    "errors": [{"max_abs_error": 0.0}] * 3,
+                    "eliminated_tensor_allocations_per_step": 6,
+                    "persistent_sampling_input_mib": 0.01,
+                    "candidate_reuses_host_device_storage": True,
+                },
                 "compact_top_k_sampling": {
                     "reference": {"peak_extra_mib": 32.0},
                     "candidate": {"peak_extra_mib": 2.0},
@@ -801,6 +810,15 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     assert report["buffer_reuse"]["by_tp"]["tp4"]["sampling_top_p"][
         "workspace"
     ]["avoided_top_k_mask_workspace_mib"] == 64.0
+    sampling_inputs = report["buffer_reuse"]["by_tp"]["tp4"][
+        "sampling_inputs"
+    ]
+    assert sampling_inputs["workspace"][
+        "eliminated_tensor_allocations_per_step"
+    ] == 6
+    assert sampling_inputs["metadata"][
+        "candidate_reuses_host_device_storage"
+    ]
     assert report["buffer_reuse"]["by_tp"]["tp4"][
         "batched_route_sum_output"
     ]["workspace"]["avoided_route_sum_output_mib"] == 4.0
