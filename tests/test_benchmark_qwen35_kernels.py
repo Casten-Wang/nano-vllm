@@ -408,6 +408,8 @@ def test_mixed_expert_benchmark_records_cuda_evidence_boundary():
     args = SimpleNamespace(
         mixed_decode_tokens=2,
         mixed_prefill_tokens=3,
+        mixed_decode_token_counts=(2, 4),
+        mixed_prefill_token_counts=(3, 6),
         moe_intermediate_size=6,
         tp_size=1,
         hidden_size=4,
@@ -430,6 +432,13 @@ def test_mixed_expert_benchmark_records_cuda_evidence_boundary():
     assert result["speedup_vs_grouped"] > 0
     assert not result["measured_on_cuda"]
     assert result["errors"][0]["max_abs_error"] < 1e-5
+
+    sweep = MODULE.benchmark_mixed_expert_dispatch_sweep(
+        args,
+        torch.device("cpu"),
+        torch.float32,
+    )
+    assert set(sweep) == {"decode2_prefill3", "decode4_prefill6"}
 
 
 def test_expert_dispatch_sweep_preserves_requested_token_counts(monkeypatch):

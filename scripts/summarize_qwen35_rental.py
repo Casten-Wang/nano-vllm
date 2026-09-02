@@ -201,6 +201,29 @@ def summarize_mixed_moe_dispatch(result: dict) -> dict:
     }
 
 
+def summarize_mixed_moe_dispatch_sweep(results: dict[str, dict]) -> dict:
+    if not results:
+        raise ValueError("mixed MoE dispatch sweep has no cases")
+    cases = {
+        name: summarize_mixed_moe_dispatch(result)
+        for name, result in results.items()
+    }
+    return {
+        "valid": all(case["valid"] for case in cases.values()),
+        "case_count": len(cases),
+        "minimum_speedup_vs_grouped": min(
+            case["speedup_vs_grouped"] for case in cases.values()
+        ),
+        "maximum_peak_extra_mib_delta": max(
+            case["peak_extra_mib_delta"] for case in cases.values()
+        ),
+        "maximum_abs_error": max(
+            case["max_abs_error"] for case in cases.values()
+        ),
+        "cases": cases,
+    }
+
+
 def evaluate_moe_runtime_candidate(
     *,
     output_digest_matches: bool,
@@ -840,7 +863,7 @@ def summarize(run_dir: Path, run_id: str) -> dict:
         }
         candidate = candidates_by_batch["1"]
         tp_name = path.stem
-        mixed_moe_dispatch[tp_name] = summarize_mixed_moe_dispatch(
+        mixed_moe_dispatch[tp_name] = summarize_mixed_moe_dispatch_sweep(
             result["results"]["mixed_expert_dispatch"]
         )
         normalization[tp_name] = {

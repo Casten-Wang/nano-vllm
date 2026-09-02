@@ -887,11 +887,21 @@ def benchmark_expert_dispatch_sweep(args, device, dtype) -> dict[str, dict]:
     }
 
 
-def benchmark_mixed_expert_dispatch(args, device, dtype) -> dict:
+def benchmark_mixed_expert_dispatch(
+    args,
+    device,
+    dtype,
+    decode_tokens: int | None = None,
+    prefill_tokens: int | None = None,
+) -> dict:
     """Compare whole-batch grouped dispatch with decode/prefill splitting."""
 
-    decode_tokens = args.mixed_decode_tokens
-    prefill_tokens = args.mixed_prefill_tokens
+    decode_tokens = (
+        args.mixed_decode_tokens if decode_tokens is None else decode_tokens
+    )
+    prefill_tokens = (
+        args.mixed_prefill_tokens if prefill_tokens is None else prefill_tokens
+    )
     token_count = decode_tokens + prefill_tokens
     local_intermediate_size = args.moe_intermediate_size // args.tp_size
     hidden = torch.randn(
@@ -971,6 +981,27 @@ def benchmark_mixed_expert_dispatch(args, device, dtype) -> dict:
         }
     )
     return result
+
+
+def benchmark_mixed_expert_dispatch_sweep(args, device, dtype) -> dict[str, dict]:
+    """Measure representative mixed batches from latency to throughput loads."""
+
+    return {
+        f"decode{decode_tokens}_prefill{prefill_tokens}": (
+            benchmark_mixed_expert_dispatch(
+                args,
+                device,
+                dtype,
+                decode_tokens,
+                prefill_tokens,
+            )
+        )
+        for decode_tokens, prefill_tokens in zip(
+            args.mixed_decode_token_counts,
+            args.mixed_prefill_token_counts,
+            strict=True,
+        )
+    }
 
 
 def recommend_moe_decode_chunk_size(
@@ -1787,6 +1818,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-decode-tokens", type=int, default=64)
     parser.add_argument("--mixed-decode-tokens", type=int, default=32)
     parser.add_argument("--mixed-prefill-tokens", type=int, default=512)
+    parser.add_argument(
+        "--mixed-decode-token-counts",
+        type=int,
+        nargs="+",
+        default=(8, 32, 64),
+    )
+    parser.add_argument(
+        "--mixed-prefill-token-counts",
+        type=int,
+        nargs="+",
+        default=(128, 512, 2048),
+    )
     parser.add_argument("--moe-graph-safe-min-speedup", type=float, default=1.05)
     parser.add_argument(
         "--moe-graph-safe-max-peak-extra-mib",
@@ -1838,8 +1881,16 @@ def main() -> None:
         invalid.append("moe_decode_chunk_sizes")
     if any(value <= 0 for value in args.delta_prefill_chunk_sizes):
         invalid.append("delta_prefill_chunk_sizes")
+    if any(value <= 0 for value in args.mixed_decode_token_counts):
+        invalid.append("mixed_decode_token_counts")
+    if any(value <= 0 for value in args.mixed_prefill_token_counts):
+        invalid.append("mixed_prefill_token_counts")
     if invalid:
         raise ValueError(f"benchmark values must be positive: {', '.join(invalid)}")
+    if len(args.mixed_decode_token_counts) != len(
+        args.mixed_prefill_token_counts
+    ):
+        raise ValueError("mixed MoE decode and prefill scans must have equal lengths")
     if args.moe_graph_safe_max_peak_extra_mib < 0:
         raise ValueError("MoE graph-safe peak-memory limit must be non-negative")
     if args.moe_graph_safe_max_abs_error < 0:
@@ -1935,7 +1986,7 @@ def main() -> None:
                 expert_dispatch,
                 args.max_decode_tokens,
             ),
-            "mixed_expert_dispatch": benchmark_mixed_expert_dispatch(
+            "mixed_expert_dispatch": benchmark_mixed_expert_dispatch_sweep(
                 args,
                 device,
                 dtype,
