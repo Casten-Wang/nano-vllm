@@ -56,6 +56,7 @@ def test_cache_storage_metadata_uses_tp_and_model_dtype():
 
     assert result == {
         "model_max_position_embeddings": 262_144,
+        "rotary_cache_bytes_per_position": 32,
         "kv_bytes_per_token": 32,
         "kv_bytes_per_token_by_dtype": {
             "auto": 32,

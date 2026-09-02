@@ -288,6 +288,12 @@ def validate_memory_capacity(
             raise ValueError(
                 f"checkpoint audit has no TP={tp_size} model context limit"
             )
+        runtime_limit = (
+            configured_max_model_len
+            if configured_max_model_len is not None
+            else model_max_position_embeddings
+        )
+        rotary_bytes = audit.get("rotary_cache_bytes_per_position", 0) * runtime_limit
         kv_sizes = audit.get("kv_bytes_per_token_by_dtype")
         if kv_sizes is None:
             kv_sizes = {"auto": audit.get("kv_bytes_per_token")}
@@ -307,9 +313,7 @@ def validate_memory_capacity(
             * KVCACHE_BLOCK_SIZE
             * kv_bytes_per_token
         )
-        required_bytes = (
-            parameter_bytes + state_bytes + kv_bytes + headroom_bytes
-        )
+        required_bytes = parameter_bytes + state_bytes + rotary_bytes + kv_bytes + headroom_bytes
         memory = memory_by_device[:tp_size]
         available_budgets = [
             max(
@@ -320,7 +324,7 @@ def validate_memory_capacity(
             for item in memory
         ]
         minimum_available_budget = min(available_budgets)
-        fixed_bytes = parameter_bytes + state_bytes + headroom_bytes
+        fixed_bytes = parameter_bytes + state_bytes + rotary_bytes + headroom_bytes
         limiting_rank = min(
             range(tp_size), key=available_budgets.__getitem__
         )
@@ -347,11 +351,6 @@ def validate_memory_capacity(
             memory_limit = kv_capacity_by_dtype[dtype][
                 "memory_limited_context_tokens_per_sequence"
             ]
-            runtime_limit = (
-                configured_max_model_len
-                if configured_max_model_len is not None
-                else model_max_position_embeddings
-            )
             kv_capacity_by_dtype[dtype]["effective_context_tokens_per_sequence"] = min(
                 memory_limit,
                 model_max_position_embeddings,
@@ -380,6 +379,7 @@ def validate_memory_capacity(
         results[f"tp{tp_size}"] = {
             "local_parameter_bytes": parameter_bytes,
             "max_state_bytes_per_rank": state_bytes,
+            "rotary_cache_bytes_per_rank": rotary_bytes,
             "minimum_workload_kv_bytes_per_rank": kv_bytes,
             "kv_bytes_per_token_by_dtype": kv_sizes,
             "kv_capacity_by_dtype": kv_capacity_by_dtype,

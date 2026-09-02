@@ -271,10 +271,17 @@ def cache_storage_metadata(model_spec, tp_size: int, model_dtype_bytes: int) -> 
         recurrent_dtype_bytes=model_dtype_bytes,
         convolution_dtype_bytes=model_dtype_bytes,
     )
+    config = model_spec.text_config
+    head_dim = int(
+        getattr(config, "head_dim", config.hidden_size // config.num_attention_heads)
+    )
+    rope_parameters = getattr(config, "rope_parameters", None) or {}
+    rotary_dim = int(head_dim * rope_parameters.get("partial_rotary_factor", 1.0))
     return {
         "model_max_position_embeddings": int(
-            model_spec.text_config.max_position_embeddings
+            config.max_position_embeddings
         ),
+        "rotary_cache_bytes_per_position": rotary_dim * 4,
         "kv_bytes_per_token": fp32_state.kv_bytes_per_token,
         "kv_bytes_per_token_by_dtype": {
             "auto": fp32_state.kv_bytes_per_token,

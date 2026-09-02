@@ -147,6 +147,7 @@ def test_memory_preflight_covers_each_tp_rank():
             "tp4": {
                 "local_parameter_bytes": 16 * gib,
                 "model_max_position_embeddings": 262_144,
+                "rotary_cache_bytes_per_position": 256,
                 "kv_bytes_per_token": 1024,
                 "kv_bytes_per_token_by_dtype": {"auto": 1024, "int8": 520},
                 "state_bytes_per_sequence": {"float32": 8, "model": 4},
@@ -184,7 +185,8 @@ def test_memory_preflight_covers_each_tp_rank():
         "auto": 1024,
         "int8": 520,
     }
-    available_kv_bytes = 2 * gib - 8 * 65
+    rotary_bytes = 4096 * 256
+    available_kv_bytes = 2 * gib - 8 * 65 - rotary_bytes
     auto_blocks = available_kv_bytes // (256 * 1024)
     int8_blocks = available_kv_bytes // (256 * 520)
     assert result["results"]["tp4"]["kv_capacity_by_dtype"] == {
@@ -205,8 +207,9 @@ def test_memory_preflight_covers_each_tp_rank():
     }
     assert result["results"]["tp4"]["capacity_concurrent_sequences"] == 64
     assert result["results"]["tp4"]["required_free_bytes_per_rank"] == (
-        18 * gib + 8 * 65 + 64 * 3 * 256 * 1024
+        18 * gib + 8 * 65 + rotary_bytes + 64 * 3 * 256 * 1024
     )
+    assert result["results"]["tp4"]["rotary_cache_bytes_per_rank"] == rotary_bytes
     assert result["results"]["tp4"]["limiting_rank"] == 0
     assert result["results"]["tp4"]["shortfall_bytes_by_rank"] == [0] * 4
     assert len(result["results"]["tp8"]["memory_by_rank"]) == 8
