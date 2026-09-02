@@ -115,6 +115,64 @@ def test_int8_rank_cache_round_trip_includes_scales():
     torch.testing.assert_close(destination_scales[:, :, 1], scales[:, :, 2])
 
 
+def test_host_export_preserves_order_tail_scales_and_states():
+    source = torch.arange(2 * 1 * 3 * 2 * 1 * 2, dtype=torch.int8).view(
+        2, 1, 3, 2, 1, 2
+    )
+    scales = torch.arange(2 * 1 * 3 * 2 * 1, dtype=torch.float16).view(
+        2, 1, 3, 2, 1
+    )
+    recurrent = (torch.arange(6, dtype=torch.float32).view(2, 3),)
+    convolution = (torch.arange(8, dtype=torch.float16).view(4, 2),)
+
+    payload = export_rank_cache(
+        source,
+        scales,
+        [2, 0],
+        transfer_id="request-host/attempt-1",
+        tensor_parallel_rank=0,
+        tensor_parallel_size=1,
+        block_size=2,
+        cached_tokens=3,
+        recurrent_states=recurrent,
+        convolution_states=convolution,
+        to_host=True,
+    )
+
+    assert payload.kv_blocks.device.type == "cpu"
+    assert payload.kv_scales is not None
+    assert payload.kv_scales.device.type == "cpu"
+    assert all(tensor.device.type == "cpu" for tensor in payload.recurrent_states)
+    assert all(tensor.device.type == "cpu" for tensor in payload.convolution_states)
+    torch.testing.assert_close(payload.kv_blocks[:, :, 0], source[:, :, 2])
+    torch.testing.assert_close(payload.kv_blocks[:, :, 1, :1], source[:, :, 0, :1])
+    assert torch.count_nonzero(payload.kv_blocks[:, :, 1, 1:]) == 0
+    torch.testing.assert_close(payload.kv_scales[:, :, 0], scales[:, :, 2])
+    torch.testing.assert_close(payload.kv_scales[:, :, 1, :1], scales[:, :, 0, :1])
+    assert torch.count_nonzero(payload.kv_scales[:, :, 1, 1:]) == 0
+    torch.testing.assert_close(payload.recurrent_states[0], recurrent[0])
+    torch.testing.assert_close(payload.convolution_states[0], convolution[0])
+
+
+def test_default_export_keeps_source_device_and_owns_storage():
+    source = make_float_cache()
+    payload = export_rank_cache(
+        source,
+        None,
+        [1],
+        transfer_id="request-default/attempt-1",
+        tensor_parallel_rank=0,
+        tensor_parallel_size=1,
+        block_size=2,
+        cached_tokens=2,
+    )
+
+    assert payload.kv_blocks.device == source.device
+    before = payload.kv_blocks.clone()
+    source[:, :, 1].zero_()
+    torch.testing.assert_close(payload.kv_blocks, before)
+
+
 def test_import_validation_failure_does_not_modify_destination():
     source = make_float_cache()
     payload = export_rank_cache(

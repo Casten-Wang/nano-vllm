@@ -179,7 +179,12 @@ def test_model_runner_rank_endpoint_exports_receives_and_installs():
     source = object.__new__(ModelRunner)
     source.rank = 0
     source.world_size = 1
-    source.export_sequence_cache = lambda seq, transfer_id: payload
+    exported_to_host = []
+    source.export_sequence_cache = (
+        lambda seq, transfer_id, to_host=False: (
+            exported_to_host.append(to_host) or payload
+        )
+    )
     destination = object.__new__(ModelRunner)
     destination.rank = 0
     destination.world_size = 1
@@ -211,6 +216,7 @@ def test_model_runner_rank_endpoint_exports_receives_and_installs():
     receiver_thread.join()
 
     assert send_result["rank"] == 0
+    assert exported_to_host == [True]
     assert receive_result == [{"rank": 0, "cached_tokens": 5}]
     assert len(installed) == 1
     assert installed[0][0] == "destination-seq"

@@ -820,7 +820,13 @@ class ModelRunner:
         )
         return recurrent, convolution
 
-    def export_sequence_cache(self, seq: Sequence, *, transfer_id: str):
+    def export_sequence_cache(
+        self,
+        seq: Sequence,
+        *,
+        transfer_id: str,
+        to_host: bool = False,
+    ):
         """Create the rank-local tensor payload needed by a decode worker."""
 
         from nanovllm.engine.cache_transfer import export_rank_cache
@@ -837,6 +843,7 @@ class ModelRunner:
             cached_tokens=seq.num_cached_tokens,
             recurrent_states=recurrent,
             convolution_states=convolution,
+            to_host=to_host,
         )
 
     def import_sequence_cache(
@@ -908,7 +915,11 @@ class ModelRunner:
         )
 
         host, port = self._rank_cache_endpoint(endpoints)
-        payload = self.export_sequence_cache(seq, transfer_id=transfer_id)
+        payload = self.export_sequence_cache(
+            seq,
+            transfer_id=transfer_id,
+            to_host=True,
+        )
         sent_bytes = send_rank_cache_to_endpoint(
             host,
             port,

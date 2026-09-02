@@ -161,6 +161,56 @@ def _validate_state_pairs(
         raise ValueError("cache transfer states must not be scalars")
 
 
+def _host_staging_like(
+    tensor: torch.Tensor,
+    shape: tuple[int, ...] | torch.Size | None = None,
+) -> torch.Tensor:
+    """Allocate host storage suitable for a direct device-to-host copy."""
+
+    return torch.empty(
+        tuple(tensor.shape if shape is None else shape),
+        dtype=tensor.dtype,
+        device="cpu",
+        pin_memory=tensor.device.type == "cuda",
+    )
+
+
+def _export_blocks_to_host(
+    storage: torch.Tensor,
+    block_ids: list[int],
+    *,
+    valid_last_block_tokens: int,
+) -> torch.Tensor:
+    """Copy physical blocks directly into logical-order host staging."""
+
+    shape = (*storage.shape[:2], len(block_ids), *storage.shape[3:])
+    staging = _host_staging_like(storage, shape)
+    for logical_id, physical_id in enumerate(block_ids):
+        source = storage[:, :, physical_id]
+        target = staging[:, :, logical_id]
+        if logical_id == len(block_ids) - 1 and valid_last_block_tokens:
+            target.zero_()
+            target[:, :, :valid_last_block_tokens].copy_(
+                source[:, :, :valid_last_block_tokens],
+                non_blocking=storage.device.type == "cuda",
+            )
+        else:
+            target.copy_(
+                source,
+                non_blocking=storage.device.type == "cuda",
+            )
+    return staging
+
+
+def _export_states_to_host(
+    states: tuple[torch.Tensor, ...],
+) -> tuple[torch.Tensor, ...]:
+    staging = tuple(_host_staging_like(tensor) for tensor in states)
+    for source, target in zip(states, staging):
+        target.copy_(source, non_blocking=source.device.type == "cuda")
+    return staging
+
+
 def export_rank_cache(
     kv_cache: torch.Tensor,
     kv_scale: torch.Tensor | None,
@@ -173,6 +223,7 @@ def export_rank_cache(
     cached_tokens: int,
     recurrent_states: tuple[torch.Tensor, ...] = (),
     convolution_states: tuple[torch.Tensor, ...] = (),
+    to_host: bool = False,
 ) -> RankCacheTransfer:
     """Copy one request's rank-local state in logical block order."""
 
@@ -194,14 +245,46 @@ def export_rank_cache(
         total_blocks=kv_cache.shape[2],
         device=kv_cache.device,
     )
-    kv_blocks = kv_cache.index_select(2, index).clone()
-    kv_scales = (
-        kv_scale.index_select(2, index).clone()
-        if kv_scale is not None
-        else None
-    )
     valid_last_block_tokens = cached_tokens % block_size
-    if valid_last_block_tokens:
+    if to_host:
+        kv_blocks = _export_blocks_to_host(
+            kv_cache,
+            block_ids,
+            valid_last_block_tokens=valid_last_block_tokens,
+        )
+        kv_scales = (
+            _export_blocks_to_host(
+                kv_scale,
+                block_ids,
+                valid_last_block_tokens=valid_last_block_tokens,
+            )
+            if kv_scale is not None
+            else None
+        )
+        exported_recurrent = _export_states_to_host(recurrent_states)
+        exported_convolution = _export_states_to_host(convolution_states)
+        copied_tensors = [kv_cache, *recurrent_states, *convolution_states]
+        if kv_scale is not None:
+            copied_tensors.append(kv_scale)
+        cuda_devices = {
+            tensor.device
+            for tensor in copied_tensors
+            if tensor.device.type == "cuda"
+        }
+        for device in cuda_devices:
+            torch.cuda.current_stream(device).synchronize()
+    else:
+        kv_blocks = kv_cache.index_select(2, index).clone()
+        kv_scales = (
+            kv_scale.index_select(2, index).clone()
+            if kv_scale is not None
+            else None
+        )
+        exported_recurrent = tuple(tensor.clone() for tensor in recurrent_states)
+        exported_convolution = tuple(
+            tensor.clone() for tensor in convolution_states
+        )
+    if valid_last_block_tokens and not to_host:
         # Physical tail slots can contain data from a previous block owner.
         # They are not semantically part of this request and must not cross a
         # process or host boundary.
@@ -217,10 +300,8 @@ def export_rank_cache(
         cached_tokens=cached_tokens,
         kv_blocks=kv_blocks,
         kv_scales=kv_scales,
-        recurrent_states=tuple(tensor.clone() for tensor in recurrent_states),
-        convolution_states=tuple(
-            tensor.clone() for tensor in convolution_states
-        ),
+        recurrent_states=exported_recurrent,
+        convolution_states=exported_convolution,
     )
 
 
