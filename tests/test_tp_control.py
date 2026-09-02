@@ -111,6 +111,7 @@ def load_model_runner_module():
         registry_module.create_model = lambda *args, **kwargs: object()
         cache_plan_module.plan_cache_memory = lambda *args, **kwargs: None
         sampler_module.Sampler = object
+        sampler_module.build_sampling_metadata = lambda *args, **kwargs: None
         context_module.set_context = lambda *args, **kwargs: None
         context_module.get_context = lambda: None
         context_module.reset_context = lambda: None

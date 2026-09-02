@@ -61,6 +61,7 @@ def test_sampling_filter_benchmark_covers_unfiltered_and_top_k_paths():
         for item in result.values()
     )
     assert all(item["errors"][0]["max_abs_error"] == 0 for item in result.values())
+    assert all(item["uses_host_sampling_metadata"] for item in result.values())
 
 
 def test_greedy_sampler_benchmark_tracks_avoided_fp32_logits():
@@ -80,6 +81,7 @@ def test_greedy_sampler_benchmark_tracks_avoided_fp32_logits():
 
     assert result["avoided_fp32_logits_mib"] == 4 * 16 * 2 / 1024 / 1024
     assert result["errors"][0]["max_abs_error"] == 0
+    assert result["uses_host_sampling_metadata"]
 
 
 def test_decode_convolution_benchmark_tracks_reused_state():

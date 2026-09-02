@@ -27,11 +27,27 @@ sampling_params_module = load_module(
     ROOT / "nanovllm" / "sampling_params.py",
 )
 apply_top_k_top_p = sampler_module.apply_top_k_top_p
+build_sampling_metadata = sampler_module.build_sampling_metadata
 Sampler = sampler_module.Sampler
 SamplingParams = sampling_params_module.SamplingParams
 
 
 class SamplerTest(unittest.TestCase):
+    def test_host_metadata_describes_only_sampling_rows(self):
+        metadata = build_sampling_metadata(
+            [0.0, 0.7, 1.0],
+            [-1, 3, 5],
+            [1.0, 0.9, 1.0],
+            vocab_size=4,
+        )
+
+        self.assertEqual(metadata.batch_size, 3)
+        self.assertEqual(metadata.sample_count, 2)
+        self.assertTrue(metadata.any_top_k_enabled)
+        self.assertFalse(metadata.all_top_k_enabled)
+        self.assertTrue(metadata.any_top_p_enabled)
+        self.assertEqual(metadata.max_top_k, 3)
+
     def test_sampling_params_accept_greedy_temperature(self):
         params = SamplingParams(temperature=0.0)
         self.assertEqual(params.temperature, 0.0)
@@ -164,10 +180,17 @@ class SamplerTest(unittest.TestCase):
         temperatures = torch.tensor([0.0, 1.0])
         top_ks = torch.tensor([-1, -1], dtype=torch.int32)
         top_ps = torch.ones(2)
+        metadata = build_sampling_metadata(
+            temperatures.tolist(),
+            top_ks.tolist(),
+            top_ps.tolist(),
+            vocab_size=logits.size(1),
+        )
         observed = []
 
-        def record_dtype(sample_logits, sample_top_ks, sample_top_ps):
+        def record_dtype(sample_logits, sample_top_ks, sample_top_ps, sample_metadata):
             observed.append((sample_logits.shape, sample_logits.dtype))
+            self.assertIs(sample_metadata, metadata)
             return sample_logits
 
         with unittest.mock.patch.object(
@@ -175,10 +198,76 @@ class SamplerTest(unittest.TestCase):
             "apply_top_k_top_p",
             side_effect=record_dtype,
         ):
-            actual = sampler(logits, temperatures, top_ks, top_ps)
+            actual = sampler(logits, temperatures, top_ks, top_ps, metadata)
 
         self.assertEqual(observed, [(torch.Size([1, 3]), torch.float32)])
         self.assertEqual(actual[0].item(), 1)
+
+    def test_host_metadata_avoids_device_scalar_reads(self):
+        sampler = Sampler()
+        logits = torch.tensor([[4.0, 3.0, 2.0, 1.0]])
+        temperatures = torch.ones(1)
+        top_ks = torch.tensor([2], dtype=torch.int32)
+        top_ps = torch.tensor([0.9])
+        metadata = build_sampling_metadata(
+            [1.0],
+            [2],
+            [0.9],
+            vocab_size=4,
+        )
+        original_argmax = torch.Tensor.argmax
+        argmax_inputs = []
+
+        def record_argmax(tensor, *args, **kwargs):
+            argmax_inputs.append(tensor)
+            return original_argmax(tensor, *args, **kwargs)
+
+        with (
+            unittest.mock.patch.object(
+                torch.Tensor,
+                "item",
+                side_effect=AssertionError("sampling must not read a device scalar"),
+            ),
+            unittest.mock.patch.object(
+                torch.Tensor,
+                "argmax",
+                new=record_argmax,
+            ),
+        ):
+            output = sampler(logits, temperatures, top_ks, top_ps, metadata)
+
+        self.assertEqual(output.shape, torch.Size([1]))
+        self.assertTrue(argmax_inputs)
+        self.assertTrue(
+            all(tensor.data_ptr() != logits.data_ptr() for tensor in argmax_inputs)
+        )
+
+    def test_host_metadata_matches_tensor_decision_paths(self):
+        sampler = Sampler()
+        logits = torch.tensor(
+            [[5.0, 4.0, 3.0, 2.0], [2.0, 3.0, 4.0, 5.0]]
+        )
+        cases = (
+            ([0.0, 0.0], [-1, -1], [1.0, 1.0]),
+            ([1.0, 0.8], [2, 3], [0.9, 0.8]),
+            ([0.0, 1.0], [-1, 2], [1.0, 0.9]),
+        )
+        for temperatures_list, top_ks_list, top_ps_list in cases:
+            temperatures = torch.tensor(temperatures_list)
+            top_ks = torch.tensor(top_ks_list, dtype=torch.int32)
+            top_ps = torch.tensor(top_ps_list)
+            metadata = build_sampling_metadata(
+                temperatures_list,
+                top_ks_list,
+                top_ps_list,
+                vocab_size=logits.size(1),
+            )
+            torch.manual_seed(71)
+            expected = sampler(logits, temperatures, top_ks, top_ps)
+            torch.manual_seed(71)
+            actual = sampler(logits, temperatures, top_ks, top_ps, metadata)
+
+            self.assertTrue(torch.equal(actual, expected))
 
 
 if __name__ == "__main__":

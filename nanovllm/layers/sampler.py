@@ -1,11 +1,59 @@
+from dataclasses import dataclass
+from math import isfinite
+
 import torch
 from torch import nn
+
+
+@dataclass(frozen=True, slots=True)
+class SamplingBatchMetadata:
+    batch_size: int
+    sample_count: int
+    vocab_size: int
+    all_top_k_enabled: bool
+    any_top_k_enabled: bool
+    any_top_p_enabled: bool
+    max_top_k: int
+
+
+def build_sampling_metadata(
+    temperatures: list[float],
+    top_ks: list[int],
+    top_ps: list[float],
+    vocab_size: int,
+) -> SamplingBatchMetadata:
+    if len(temperatures) != len(top_ks) or len(temperatures) != len(top_ps):
+        raise ValueError("sampling parameter batch sizes must match")
+    if vocab_size <= 0:
+        raise ValueError("vocabulary size must be positive")
+    if any(not isfinite(value) or value < 0.0 for value in temperatures):
+        raise ValueError("temperatures must be finite and non-negative")
+    if any(value != -1 and value <= 0 for value in top_ks):
+        raise ValueError("top_k must be -1 or positive")
+    if any(not isfinite(value) or not 0.0 < value <= 1.0 for value in top_ps):
+        raise ValueError("top_p must be finite and in (0, 1]")
+    sampled = [
+        (top_k, top_p)
+        for temperature, top_k, top_p in zip(temperatures, top_ks, top_ps)
+        if temperature > 1e-10
+    ]
+    enabled_top_ks = [top_k for top_k, _ in sampled if 0 < top_k < vocab_size]
+    return SamplingBatchMetadata(
+        batch_size=len(temperatures),
+        sample_count=len(sampled),
+        vocab_size=vocab_size,
+        all_top_k_enabled=bool(sampled) and len(enabled_top_ks) == len(sampled),
+        any_top_k_enabled=bool(enabled_top_ks),
+        any_top_p_enabled=any(top_p < 1.0 for _, top_p in sampled),
+        max_top_k=max(enabled_top_ks, default=0),
+    )
 
 
 def apply_top_k_top_p(
     logits: torch.Tensor,
     top_ks: torch.Tensor,
     top_ps: torch.Tensor,
+    metadata: SamplingBatchMetadata | None = None,
 ) -> torch.Tensor:
     """Mask logits according to per-request top-k and top-p settings.
 
@@ -30,16 +78,31 @@ def apply_top_k_top_p(
         raise ValueError("vocabulary dimension must be non-empty")
     if logits.size(0) == 0:
         return logits
-    if torch.any((top_ks != -1) & (top_ks <= 0)):
-        raise ValueError("top_k must be -1 or positive")
-    if torch.any(~torch.isfinite(top_ps)) or torch.any((top_ps <= 0) | (top_ps > 1)):
-        raise ValueError("top_p must be finite and in (0, 1]")
-
     vocab_size = logits.size(1)
-    top_k_enabled = (top_ks > 0) & (top_ks < vocab_size)
-    top_p_enabled = top_ps < 1.0
-    if bool(top_k_enabled.all()):
-        max_top_k = int(top_ks.max().item())
+    if metadata is None:
+        if torch.any((top_ks != -1) & (top_ks <= 0)):
+            raise ValueError("top_k must be -1 or positive")
+        if torch.any(~torch.isfinite(top_ps)) or torch.any((top_ps <= 0) | (top_ps > 1)):
+            raise ValueError("top_p must be finite and in (0, 1]")
+        top_k_enabled = (top_ks > 0) & (top_ks < vocab_size)
+        top_p_enabled = top_ps < 1.0
+        all_top_k_enabled = bool(top_k_enabled.all())
+        any_top_k_enabled = bool(top_k_enabled.any())
+        any_top_p_enabled = bool(top_p_enabled.any())
+        max_top_k = (
+            int(top_ks[top_k_enabled].max().item())
+            if any_top_k_enabled
+            else 0
+        )
+    else:
+        if metadata.sample_count != logits.size(0) or metadata.vocab_size != vocab_size:
+            raise ValueError("sampling metadata does not match logits")
+        top_k_enabled = (top_ks > 0) & (top_ks < vocab_size)
+        all_top_k_enabled = metadata.all_top_k_enabled
+        any_top_k_enabled = metadata.any_top_k_enabled
+        any_top_p_enabled = metadata.any_top_p_enabled
+        max_top_k = metadata.max_top_k
+    if all_top_k_enabled:
         selected_logits, selected_indices = torch.topk(
             logits,
             max_top_k,
@@ -48,7 +111,7 @@ def apply_top_k_top_p(
         ranks = torch.arange(max_top_k, device=logits.device).unsqueeze(0)
         top_k_keep = ranks < top_ks.unsqueeze(1)
         selected_logits.masked_fill_(~top_k_keep, float("-inf"))
-        if bool(top_p_enabled.any()):
+        if any_top_p_enabled:
             selected_probs = torch.softmax(selected_logits, dim=-1)
             cumulative_probs = torch.cumsum(selected_probs, dim=-1)
             selected_remove = cumulative_probs > top_ps.unsqueeze(1)
@@ -62,10 +125,9 @@ def apply_top_k_top_p(
             src=selected_logits,
         )
         return filtered_logits
-    if not bool(top_p_enabled.any()):
-        if not bool(top_k_enabled.any()):
+    if not any_top_p_enabled:
+        if not any_top_k_enabled:
             return logits
-        max_top_k = int(top_ks[top_k_enabled].max().item())
         selected_logits, selected_indices = torch.topk(
             logits,
             max_top_k,
@@ -87,7 +149,7 @@ def apply_top_k_top_p(
             index=selected_indices,
             src=selected_logits,
         )
-        if bool((~top_k_enabled).any()):
+        if not all_top_k_enabled:
             filtered_logits[~top_k_enabled] = logits[~top_k_enabled]
         return filtered_logits
 
@@ -137,6 +199,7 @@ class Sampler(nn.Module):
         temperatures: torch.Tensor,
         top_ks: torch.Tensor,
         top_ps: torch.Tensor,
+        metadata: SamplingBatchMetadata | None = None,
     ):
         """Sample one token for each sequence in the batch.
 
@@ -162,29 +225,47 @@ class Sampler(nn.Module):
             or top_ps.device != logits.device
         ):
             raise ValueError("sampling tensors must be on the same device as logits")
-        if torch.any(~torch.isfinite(temperatures)) or torch.any(temperatures < 0):
-            raise ValueError("temperatures must be finite and non-negative")
+        if metadata is None:
+            if torch.any(~torch.isfinite(temperatures)) or torch.any(temperatures < 0):
+                raise ValueError("temperatures must be finite and non-negative")
+        elif metadata.batch_size != logits.size(0) or metadata.vocab_size != logits.size(1):
+            raise ValueError("sampling metadata does not match logits")
 
         greedy_mask = temperatures <= 1e-10
-        greedy_tokens = logits.argmax(dim=-1)
-        if bool(greedy_mask.all()):
-            return greedy_tokens
+        all_greedy = (
+            metadata.sample_count == 0
+            if metadata is not None
+            else bool(greedy_mask.all())
+        )
+        if all_greedy:
+            return logits.argmax(dim=-1)
 
         # Only sampling rows need filtering, softmax, and random-number
         # generation. Greedy rows take the direct argmax fast path.
-        sample_mask = ~greedy_mask
-        sample_logits = logits[sample_mask].float().div(
-            temperatures[sample_mask].unsqueeze(dim=1)
+        all_sampling = (
+            metadata.sample_count == logits.size(0)
+            if metadata is not None
+            else not bool(greedy_mask.any())
+        )
+        sample_mask = None if all_sampling else ~greedy_mask
+        sample_logits = (
+            logits if all_sampling else logits[sample_mask]
+        ).float().div(
+            (temperatures if all_sampling else temperatures[sample_mask]).unsqueeze(dim=1)
         )
         sample_logits = apply_top_k_top_p(
             sample_logits,
-            top_ks[sample_mask],
-            top_ps[sample_mask],
+            top_ks if all_sampling else top_ks[sample_mask],
+            top_ps if all_sampling else top_ps[sample_mask],
+            metadata,
         )
         probs = torch.softmax(sample_logits, dim=-1)
         sample_tokens = probs.div_(
             torch.empty_like(probs).exponential_(1).clamp_min_(1e-10)
         ).argmax(dim=-1)
+        if all_sampling:
+            return sample_tokens
+        greedy_tokens = logits.argmax(dim=-1)
         output = greedy_tokens.clone()
         output[sample_mask] = sample_tokens
         return output

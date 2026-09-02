@@ -18,7 +18,7 @@ from nanovllm.engine.sequence import Sequence
 from nanovllm.engine.kv_cache_packing import PackedBlockMetadata, build_packed_block_metadata
 from nanovllm.models.registry import create_model
 from nanovllm.models.cache_plan import plan_cache_memory
-from nanovllm.layers.sampler import Sampler
+from nanovllm.layers.sampler import Sampler, build_sampling_metadata
 from nanovllm.utils.context import set_context, get_context, reset_context
 from nanovllm.utils.loader import load_model
 try:
@@ -920,10 +920,16 @@ class ModelRunner:
         temperatures = [seq.temperature for seq in seqs]
         top_ks = [seq.top_k for seq in seqs]
         top_ps = [seq.top_p for seq in seqs]
+        metadata = build_sampling_metadata(
+            temperatures,
+            top_ks,
+            top_ps,
+            int(self.config.model_config.vocab_size),
+        )
         temperatures = torch.tensor(temperatures, dtype=torch.float32, pin_memory=True).cuda(non_blocking=True)
         top_ks = torch.tensor(top_ks, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
         top_ps = torch.tensor(top_ps, dtype=torch.float32, pin_memory=True).cuda(non_blocking=True)
-        return temperatures, top_ks, top_ps
+        return temperatures, top_ks, top_ps, metadata
 
     @torch.inference_mode()
     def run_model(self, input_ids: torch.Tensor, positions: torch.Tensor, is_prefill: bool):

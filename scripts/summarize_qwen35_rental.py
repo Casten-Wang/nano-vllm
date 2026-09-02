@@ -745,18 +745,22 @@ def summarize(run_dir: Path, run_id: str) -> dict:
             "sampling_unfiltered": summarize_buffer_reuse_candidate(
                 result["results"]["sampling_filter_fast_paths"]["unfiltered"],
                 ("avoided_full_sort_workspace_mib",),
+                {"uses_host_sampling_metadata": True},
             ),
             "sampling_top_k": summarize_buffer_reuse_candidate(
                 result["results"]["sampling_filter_fast_paths"]["top_k"],
                 ("avoided_full_sort_workspace_mib",),
+                {"uses_host_sampling_metadata": True},
             ),
             "sampling_top_k_top_p": summarize_buffer_reuse_candidate(
                 result["results"]["sampling_filter_fast_paths"]["top_k_top_p"],
                 ("avoided_full_sort_workspace_mib",),
+                {"uses_host_sampling_metadata": True},
             ),
             "sampling_greedy_precision": summarize_buffer_reuse_candidate(
                 result["results"]["greedy_sampler_precision_fast_path"],
                 ("avoided_fp32_logits_mib",),
+                {"uses_host_sampling_metadata": True},
             ),
             "decode_convolution_state": summarize_buffer_reuse_candidate(
                 result["results"]["decode_convolution_state_reuse"],

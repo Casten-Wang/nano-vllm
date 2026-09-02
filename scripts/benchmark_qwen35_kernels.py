@@ -258,6 +258,12 @@ def benchmark_sampling_filter(args, device, dtype) -> dict:
         ("top_k_top_p", args.sampling_top_k, args.sampling_top_p),
     )
     for name, top_k, top_p in cases:
+        metadata = SAMPLER.build_sampling_metadata(
+            [1.0] * args.sampling_batch,
+            [top_k] * args.sampling_batch,
+            [top_p] * args.sampling_batch,
+            args.vocab_size,
+        )
         top_ks = torch.full(
             (args.sampling_batch,),
             top_k,
@@ -275,7 +281,14 @@ def benchmark_sampling_filter(args, device, dtype) -> dict:
             return (_full_sort_sampling_filter(logits, top_ks, top_ps),)
 
         def candidate():
-            return (SAMPLER.apply_top_k_top_p(logits, top_ks, top_ps),)
+            return (
+                SAMPLER.apply_top_k_top_p(
+                    logits,
+                    top_ks,
+                    top_ps,
+                    metadata,
+                ),
+            )
 
         result = compare(
             reference,
@@ -293,6 +306,7 @@ def benchmark_sampling_filter(args, device, dtype) -> dict:
         actual_values = torch.sort(candidate()[0], descending=True, dim=-1).values
         result["errors"] = [error(actual_values, expected_values)]
         result["avoided_full_sort_workspace_mib"] = full_sort_workspace_mib
+        result["uses_host_sampling_metadata"] = True
         results[name] = result
     return results
 
@@ -313,12 +327,18 @@ def benchmark_greedy_sampler(args, device, dtype) -> dict:
     )
     top_ps = torch.ones(args.sampling_batch, device=device)
     sampler = SAMPLER.Sampler()
+    metadata = SAMPLER.build_sampling_metadata(
+        [0.0] * args.sampling_batch,
+        [-1] * args.sampling_batch,
+        [1.0] * args.sampling_batch,
+        args.vocab_size,
+    )
 
     def reference():
         return (logits.float().argmax(dim=-1),)
 
     def candidate():
-        return (sampler(logits, temperatures, top_ks, top_ps),)
+        return (sampler(logits, temperatures, top_ks, top_ps, metadata),)
 
     result = compare(
         reference,
@@ -331,6 +351,7 @@ def benchmark_greedy_sampler(args, device, dtype) -> dict:
     result["avoided_fp32_logits_mib"] = (
         logits.numel() * max(4 - logits.element_size(), 0) / 1024 / 1024
     )
+    result["uses_host_sampling_metadata"] = True
     return result
 
 

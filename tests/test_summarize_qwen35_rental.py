@@ -356,6 +356,7 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
                         "speedup": 2.0,
                         "errors": [{"max_abs_error": 0.0}],
                         "avoided_full_sort_workspace_mib": 128.0,
+                        "uses_host_sampling_metadata": True,
                     }
                     for name in ("unfiltered", "top_k", "top_k_top_p")
                 },
@@ -365,6 +366,7 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
                     "speedup": 2.0,
                     "errors": [{"max_abs_error": 0.0}],
                     "avoided_fp32_logits_mib": 64.0,
+                    "uses_host_sampling_metadata": True,
                 },
                 "decode_convolution_state_reuse": {
                     "reference": {"peak_extra_mib": 16.0},
