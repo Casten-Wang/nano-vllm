@@ -149,8 +149,8 @@ class Qwen35Experts(nn.Module):
         gate, up = loaded_weight.chunk(2, dim=1)
         start = self.tp_rank * self.local_intermediate_size
         end = start + self.local_intermediate_size
-        local_weight = torch.cat((gate[:, start:end], up[:, start:end]), dim=1)
-        param.data.copy_(local_weight)
+        param.data[:, : self.local_intermediate_size].copy_(gate[:, start:end])
+        param.data[:, self.local_intermediate_size :].copy_(up[:, start:end])
 
     def _load_gate_up_slice(self, param: nn.Parameter, loaded_weight) -> None:
         expected_shape = (
@@ -172,7 +172,8 @@ class Qwen35Experts(nn.Module):
             self.intermediate_size + start : self.intermediate_size + end,
             :,
         ]
-        param.data.copy_(torch.cat((gate, up), dim=1))
+        param.data[:, : self.local_intermediate_size].copy_(gate)
+        param.data[:, self.local_intermediate_size :].copy_(up)
 
     def _load_down(
         self,

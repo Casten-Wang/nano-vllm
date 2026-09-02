@@ -946,6 +946,33 @@ def test_expert_safetensors_loader_reads_only_local_tp_slices():
     assert len(source_down.requests) == 1
 
 
+def test_expert_gate_up_loaders_do_not_materialize_local_packed_copy():
+    source = torch.arange(32, dtype=torch.float32).reshape(2, 8, 2)
+    rank1 = make_experts(rank=1, world_size=2)
+
+    with patch.object(
+        qwen35_moe.torch,
+        "cat",
+        side_effect=AssertionError("loader must copy each shard directly"),
+    ):
+        rank1._load_gate_up(rank1.gate_up_proj, source)
+
+    assert torch.equal(rank1.gate_up_proj[:, :2], source[:, 2:4])
+    assert torch.equal(rank1.gate_up_proj[:, 2:], source[:, 6:8])
+
+    tracked = TrackingSlice(source)
+    with patch.object(
+        qwen35_moe.torch,
+        "cat",
+        side_effect=AssertionError("loader must copy each shard directly"),
+    ):
+        rank1._load_gate_up_slice(rank1.gate_up_proj, tracked)
+
+    assert torch.equal(rank1.gate_up_proj[:, :2], source[:, 2:4])
+    assert torch.equal(rank1.gate_up_proj[:, 2:], source[:, 6:8])
+    assert len(tracked.requests) == 2
+
+
 def test_qwen35_rmsnorm_does_not_mutate_input():
     norm = qwen35_moe.Qwen35RMSNorm(2)
     source = torch.tensor([[3.0, 4.0]], dtype=torch.float32)
