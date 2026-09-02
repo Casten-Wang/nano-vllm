@@ -87,6 +87,7 @@ def write_cudagraph_case(root, context_name, attention_path, batch_sizes):
                         "expected_attention_path": attention_path,
                         "expected_eager_attention_path": True,
                         "expected_graph_attention_path": True,
+                        "scratch_primed_across_bucket": True,
                     },
                 }
                 for batch_size in batch_sizes
@@ -386,6 +387,9 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     assert report["performance"]["lowest_peak_memory"]["label"] == "sorted"
     assert report["graph_safe_moe"]["all_tp_promoted"]
     assert report["hybrid_cudagraph"]["all_tp_passed"]
+    assert report["hybrid_cudagraph"]["by_tp"]["tp4"]["short"][
+        "scratch_isolation_observed"
+    ]
     assert report["evidence"]["long_prefill_kernel_evidence"]
     assert report["evidence"]["mixed_workload_evidence"]
     assert report["evidence"]["normalization_workspace_evidence"]

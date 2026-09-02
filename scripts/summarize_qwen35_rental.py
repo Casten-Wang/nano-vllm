@@ -807,6 +807,12 @@ def summarize(run_dir: Path, run_id: str) -> dict:
                 )
                 for scenario in result["scenarios"]
             ),
+            "scratch_isolation_observed": all(
+                scenario["comparison"].get(
+                    "scratch_primed_across_bucket", False
+                )
+                for scenario in result["scenarios"]
+            ),
             "scenario_count": len(result["scenarios"]),
             "batch_sizes": [
                 scenario["batch_size"] for scenario in result["scenarios"]
@@ -851,6 +857,7 @@ def summarize(run_dir: Path, run_id: str) -> dict:
             and item["hybrid_graph_captured"]
             and item["kv_cache_dtype"] == "int8"
             and item["attention_path_observed"]
+            and item["scratch_isolation_observed"]
             for cases in cudagraph.values()
             for item in cases.values()
         )

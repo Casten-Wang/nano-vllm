@@ -51,6 +51,12 @@ class CudaGraphParityHelperTest(unittest.TestCase):
             [8192, 8224, 8256],
         )
 
+    def test_primer_uses_a_different_padded_graph_bucket(self):
+        self.assertEqual(module.primer_batch_size(3, 64), 5)
+        self.assertEqual(module.primer_batch_size(9, 64), 7)
+        with self.assertRaisesRegex(ValueError, "alternate padded bucket"):
+            module.primer_batch_size(1, 1)
+
     def test_comparison_requires_attention_path_on_both_modes(self):
         import torch
 
@@ -83,6 +89,13 @@ class CudaGraphParityHelperTest(unittest.TestCase):
                     {"model_path": "decode_cuda_graph", "graph_bucket": 1}
                 ],
             },
+            "primer": {
+                "execution_stats": {
+                    "execution_signatures": [
+                        {"model_path": "decode_cuda_graph", "graph_bucket": 2}
+                    ]
+                }
+            },
         }
 
         result = module.compare_artifacts(
@@ -91,12 +104,68 @@ class CudaGraphParityHelperTest(unittest.TestCase):
             atol=0,
             rtol=0,
             expected_graph_bucket=1,
+            expected_primer_bucket=2,
             expected_attention_path="int8_partitioned_decode",
         )
 
         self.assertFalse(result["passed"])
         self.assertTrue(result["expected_eager_attention_path"])
         self.assertFalse(result["expected_graph_attention_path"])
+        self.assertTrue(result["scratch_primed_across_bucket"])
+
+    def test_comparison_rejects_unprimed_graph_scratch(self):
+        import torch
+
+        step = {
+            "is_prefill": False,
+            "shape": [1, 1],
+            "logits": torch.zeros(1, 1),
+        }
+        hidden = {
+            "is_prefill": False,
+            "shape": [1, 1],
+            "hidden_states": torch.zeros(1, 1),
+        }
+        base_stats = {
+            "attention_path_counts": {"int8_fused_decode": 1},
+        }
+        eager = {
+            "output_tokens": [[1]],
+            "hidden_steps": [hidden],
+            "logits_steps": [step],
+            "execution_stats": {
+                **base_stats,
+                "model_path_counts": {"prefill_eager": 1, "decode_eager": 1},
+                "execution_signatures": [],
+            },
+        }
+        graph = {
+            **eager,
+            "execution_stats": {
+                **base_stats,
+                "model_path_counts": {
+                    "prefill_eager": 1,
+                    "decode_cuda_graph": 1,
+                },
+                "execution_signatures": [
+                    {"model_path": "decode_cuda_graph", "graph_bucket": 4}
+                ],
+            },
+            "primer": {"execution_stats": {"execution_signatures": []}},
+        }
+
+        result = module.compare_artifacts(
+            eager,
+            graph,
+            atol=0,
+            rtol=0,
+            expected_graph_bucket=4,
+            expected_primer_bucket=8,
+            expected_attention_path="int8_fused_decode",
+        )
+
+        self.assertFalse(result["scratch_primed_across_bucket"])
+        self.assertFalse(result["passed"])
 
 
 if __name__ == "__main__":

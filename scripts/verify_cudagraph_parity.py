@@ -44,6 +44,26 @@ def scenario_lengths(
     return [base + stride * index for index in range(batch_size)]
 
 
+def primer_batch_size(batch_size: int, max_num_seqs: int) -> int:
+    """Choose a padded batch whose graph bucket differs from the test batch."""
+
+    from nanovllm.engine.execution import cuda_graph_buckets
+
+    buckets = cuda_graph_buckets(min(max_num_seqs, 512))
+    target_bucket = next(bucket for bucket in buckets if bucket >= batch_size)
+    candidates = [
+        size
+        for size in range(1, min(max_num_seqs, 512) + 1)
+        if (bucket := next(item for item in buckets if item >= size)) > size
+        and bucket != target_bucket
+    ]
+    if not candidates:
+        raise ValueError(
+            "CUDA Graph scratch isolation requires an alternate padded bucket"
+        )
+    return min(candidates, key=lambda size: (abs(size - batch_size), size))
+
+
 def build_prompts(lengths: list[int], vocab_size: int, seed: int) -> list[list[int]]:
     rng = random.Random(seed)
     return [
@@ -92,6 +112,27 @@ def run_worker(args: argparse.Namespace) -> None:
         sliding_window_size=None,
         enable_dynamic_chunked_prefill=False,
     )
+
+    primer = None
+    if args.worker_mode == "graph":
+        primer_lengths = [min(8, args.max_model_len - 2)] * (
+            args.worker_primer_batch_size
+        )
+        primer_prompts = build_prompts(
+            primer_lengths,
+            args.vocab_size,
+            args.seed + 1_000_000,
+        )
+        primer_params = [
+            SamplingParams(temperature=0.0, ignore_eos=True, max_tokens=2)
+            for _ in primer_prompts
+        ]
+        llm.model_runner.call("reset_execution_stats")
+        llm.generate(primer_prompts, primer_params, use_tqdm=False)
+        primer = {
+            "batch_size": args.worker_primer_batch_size,
+            "execution_stats": llm.model_runner.call("get_execution_stats"),
+        }
 
     hidden_steps = []
     logits_steps = []
@@ -142,6 +183,7 @@ def run_worker(args: argparse.Namespace) -> None:
         "execution_stats": execution_stats,
         "shape_trace": shape_trace,
         "cudagraph_capture_stats": cudagraph_capture_stats,
+        "primer": primer,
         "config": {
             "kv_cache_dtype": args.kv_cache_dtype,
             "kv_dequant_backend": args.kv_dequant_backend,
@@ -169,6 +211,7 @@ def worker_command(
     input_lengths: list[int],
     artifact: Path,
     seed: int,
+    primer_batch_size: int,
 ) -> list[str]:
     return [
         sys.executable,
@@ -199,6 +242,8 @@ def worker_command(
         str(args.vocab_size),
         "--seed",
         str(seed),
+        "--worker-primer-batch-size",
+        str(primer_batch_size),
         "--kv-cache-dtype",
         args.kv_cache_dtype,
         "--kv-dequant-backend",
@@ -217,6 +262,7 @@ def compare_artifacts(
     atol: float,
     rtol: float,
     expected_graph_bucket: int,
+    expected_primer_bucket: int,
     expected_attention_path: str,
 ) -> dict:
     import torch
@@ -324,6 +370,18 @@ def compare_artifacts(
         if item["model_path"] == "decode_cuda_graph"
     }
     expected_bucket_observed = expected_graph_bucket in graph_buckets
+    primer = graph.get("primer") or {}
+    primer_buckets = {
+        item["graph_bucket"]
+        for item in primer.get("execution_stats", {}).get(
+            "execution_signatures", []
+        )
+        if item.get("model_path") == "decode_cuda_graph"
+    }
+    scratch_primed = (
+        expected_primer_bucket != expected_graph_bucket
+        and expected_primer_bucket in primer_buckets
+    )
     eager_attention_paths = eager["execution_stats"]["attention_path_counts"]
     graph_attention_paths = graph["execution_stats"]["attention_path_counts"]
     expected_eager_attention_path = (
@@ -339,6 +397,7 @@ def compare_artifacts(
         and expected_eager_paths
         and expected_graph_paths
         and expected_bucket_observed
+        and scratch_primed
         and expected_eager_attention_path
         and expected_graph_attention_path
     )
@@ -356,6 +415,11 @@ def compare_artifacts(
             bucket for bucket in graph_buckets if bucket is not None
         ),
         "expected_bucket_observed": expected_bucket_observed,
+        "expected_primer_bucket": expected_primer_bucket,
+        "observed_primer_buckets": sorted(
+            bucket for bucket in primer_buckets if bucket is not None
+        ),
+        "scratch_primed_across_bucket": scratch_primed,
         "expected_attention_path": expected_attention_path,
         "expected_eager_attention_path": expected_eager_attention_path,
         "expected_graph_attention_path": expected_graph_attention_path,
@@ -421,11 +485,23 @@ def main() -> None:
         default=None,
         help=argparse.SUPPRESS,
     )
+    parser.add_argument(
+        "--worker-primer-batch-size",
+        type=int,
+        default=0,
+        help=argparse.SUPPRESS,
+    )
     args = parser.parse_args()
 
     if args.worker_mode is not None:
-        if not args.worker_artifact or not args.worker_input_lengths:
-            parser.error("worker mode requires artifact and input lengths")
+        if (
+            not args.worker_artifact
+            or not args.worker_input_lengths
+            or args.worker_primer_batch_size <= 0
+        ):
+            parser.error(
+                "worker mode requires artifact, input lengths, and primer batch"
+            )
         run_worker(args)
         return
 
@@ -481,6 +557,10 @@ def main() -> None:
         expected_bucket = next(
             bucket for bucket in graph_buckets if bucket >= batch_size
         )
+        primer_size = primer_batch_size(batch_size, args.max_num_seqs)
+        expected_primer_bucket = next(
+            bucket for bucket in graph_buckets if bucket >= primer_size
+        )
         scenario_dir = run_dir / f"scenario_{scenario_index}_b{batch_size}"
         eager_artifact = scenario_dir / "eager.pt"
         graph_artifact = scenario_dir / "graph.pt"
@@ -495,6 +575,7 @@ def main() -> None:
                 input_lengths=lengths,
                 artifact=artifact,
                 seed=scenario_seed,
+                primer_batch_size=primer_size,
             )
             subprocess.run(command, check=True)
 
@@ -506,6 +587,7 @@ def main() -> None:
             atol=args.atol,
             rtol=args.rtol,
             expected_graph_bucket=expected_bucket,
+            expected_primer_bucket=expected_primer_bucket,
             expected_attention_path=(
                 "float_flash_decode"
                 if args.kv_cache_dtype == "auto"
@@ -523,6 +605,8 @@ def main() -> None:
                 "batch_size": batch_size,
                 "input_lengths": lengths,
                 "expected_graph_bucket": expected_bucket,
+                "primer_batch_size": primer_size,
+                "expected_primer_bucket": expected_primer_bucket,
                 "eager_artifact": str(eager_artifact),
                 "graph_artifact": str(graph_artifact),
                 "comparison": comparison,
