@@ -450,6 +450,29 @@ def test_chunk_rule_inference_path_does_not_mutate_inputs():
         torch.testing.assert_close(actual, expected)
 
 
+def test_chunk_rule_inference_reuses_solved_values_for_correction():
+    tensors = inputs(17)
+    expected, expected_state = recurrent_gated_delta_rule(*tensors)
+    original_subtract = torch.Tensor.sub_
+    correction_shapes = []
+
+    def track_subtract(tensor, other):
+        if tensor.ndim == 5:
+            correction_shapes.append(tuple(tensor.shape))
+        return original_subtract(tensor, other)
+
+    with torch.no_grad(), patch.object(torch.Tensor, "sub_", track_subtract):
+        actual, actual_state = chunk_gated_delta_rule(
+            *tensors,
+            chunk_size=16,
+        )
+
+    assert correction_shapes
+    assert set(correction_shapes) == {(2, 3, 1, 8, 6)}
+    torch.testing.assert_close(actual, expected, rtol=2e-4, atol=2e-4)
+    torch.testing.assert_close(actual_state, expected_state, rtol=2e-4, atol=2e-4)
+
+
 @pytest.mark.parametrize("state_dtype", [torch.float32, torch.bfloat16])
 def test_chunk_rule_inference_reuses_recurrent_state_across_chunks(state_dtype):
     tensors = inputs(17)

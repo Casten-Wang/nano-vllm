@@ -520,16 +520,22 @@ def chunk_gated_delta_rule(
     )
     reuse_state = inplace_state and not torch.is_grad_enabled()
     for chunk_index in range(num_chunks):
-        corrected_value = (
-            new_values[:, :, :, chunk_index]
-            - cumulative_keys[:, :, :, chunk_index] @ state
+        chunk_values = new_values[:, :, :, chunk_index]
+        state_prediction = cumulative_keys[:, :, :, chunk_index] @ state
+        if torch.is_grad_enabled():
+            corrected_value = chunk_values - state_prediction
+        else:
+            # ``output`` already aliases ``new_values`` during inference.
+            # Reuse the current chunk for its correction instead of keeping
+            # another [batch, value_heads, chunk, value_dim] allocation live.
+            chunk_values.sub_(state_prediction)
+            corrected_value = chunk_values
+        state_update = (
+            key[:, :, :, chunk_index].transpose(-1, -2) @ corrected_value
         )
         output[:, :, :, chunk_index] = (
             query[:, :, :, chunk_index] @ state
             + intra_attention[:, :, :, chunk_index] @ corrected_value
-        )
-        state_update = (
-            key[:, :, :, chunk_index].transpose(-1, -2) @ corrected_value
         )
         if not reuse_state:
             state = (
