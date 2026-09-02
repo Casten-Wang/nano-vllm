@@ -213,6 +213,27 @@ def summarize_memory_preflight(report: dict) -> dict[str, dict]:
         int8_bytes = kv_sizes["int8"]
         if int8_bytes >= auto_bytes:
             raise ValueError(f"INT8 KV cache does not reduce memory for {tp_name}")
+        capacities = item.get("kv_capacity_by_dtype", {})
+        capacity_fields = (
+            "memory_limited_total_token_slots",
+            "memory_limited_context_tokens_per_sequence",
+        )
+        if set(capacities) != set(kv_sizes) or not all(
+            isinstance(capacity.get(field), int) and capacity[field] >= 0
+            for capacity in capacities.values()
+            for field in capacity_fields
+        ):
+            raise ValueError(f"memory preflight has invalid KV capacity for {tp_name}")
+        if any(
+            capacities["int8"][field] < capacities["auto"][field]
+            for field in capacity_fields
+        ):
+            raise ValueError(f"INT8 KV capacity is smaller than auto for {tp_name}")
+        concurrent_sequences = item.get("capacity_concurrent_sequences")
+        if not isinstance(concurrent_sequences, int) or concurrent_sequences <= 0:
+            raise ValueError(
+                f"memory preflight has invalid capacity concurrency for {tp_name}"
+            )
         budgets = item.get("available_budget_bytes_by_rank", [])
         if not budgets:
             raise ValueError(f"memory preflight has no rank budgets for {tp_name}")
@@ -226,6 +247,8 @@ def summarize_memory_preflight(report: dict) -> dict[str, dict]:
             ],
             "kv_bytes_per_token_by_dtype": kv_sizes,
             "int8_kv_reduction_ratio": 1.0 - int8_bytes / auto_bytes,
+            "kv_capacity_by_dtype": capacities,
+            "capacity_concurrent_sequences": concurrent_sequences,
             "required_free_bytes_per_rank": required,
             "minimum_available_budget_bytes_per_rank": minimum_budget,
             "minimum_budget_margin_bytes": minimum_budget - required,

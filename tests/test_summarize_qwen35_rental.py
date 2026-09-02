@@ -79,6 +79,17 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
                         "auto": 10_240,
                         "int8": 5_160,
                     },
+                    "kv_capacity_by_dtype": {
+                        "auto": {
+                            "memory_limited_total_token_slots": 100_000,
+                            "memory_limited_context_tokens_per_sequence": 1_280,
+                        },
+                        "int8": {
+                            "memory_limited_total_token_slots": 200_000,
+                            "memory_limited_context_tokens_per_sequence": 3_072,
+                        },
+                    },
+                    "capacity_concurrent_sequences": 64,
                     "required_free_bytes_per_rank": 20_000,
                     "available_budget_bytes_by_rank": [25_000] * 4,
                 }
@@ -218,6 +229,9 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     memory = report["memory"]["by_tp"]["tp4"]
     assert memory["int8_kv_reduction_ratio"] == 0.49609375
     assert memory["minimum_budget_margin_bytes"] == 5_000
+    assert memory["kv_capacity_by_dtype"]["int8"][
+        "memory_limited_context_tokens_per_sequence"
+    ] == 3_072
 
 
 def test_summary_rejects_inaccurate_attention_kernel(tmp_path):

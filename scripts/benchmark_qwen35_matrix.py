@@ -300,6 +300,22 @@ def validate_memory_capacity(
             )
             for item in memory
         ]
+        minimum_available_budget = min(available_budgets)
+        fixed_bytes = parameter_bytes + state_bytes + headroom_bytes
+        available_kv_bytes = max(minimum_available_budget - fixed_bytes, 0)
+        kv_capacity_by_dtype = {}
+        for dtype, bytes_per_token in kv_sizes.items():
+            capacity_blocks = available_kv_bytes // (
+                KVCACHE_BLOCK_SIZE * bytes_per_token
+            )
+            kv_capacity_by_dtype[dtype] = {
+                "memory_limited_total_token_slots": (
+                    capacity_blocks * KVCACHE_BLOCK_SIZE
+                ),
+                "memory_limited_context_tokens_per_sequence": (
+                    capacity_blocks // concurrent_sequences
+                ) * KVCACHE_BLOCK_SIZE,
+            }
         insufficient = [
             rank for rank, available in enumerate(available_budgets)
             if available < required_bytes
@@ -309,6 +325,8 @@ def validate_memory_capacity(
             "max_state_bytes_per_rank": state_bytes,
             "minimum_workload_kv_bytes_per_rank": kv_bytes,
             "kv_bytes_per_token_by_dtype": kv_sizes,
+            "kv_capacity_by_dtype": kv_capacity_by_dtype,
+            "capacity_concurrent_sequences": concurrent_sequences,
             "max_num_seqs": max_num_seqs,
             "recurrent_padding_slots": recurrent_padding_slots,
             "allocated_state_slot_count": state_slot_count,

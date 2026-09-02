@@ -175,6 +175,20 @@ def test_memory_preflight_covers_each_tp_rank():
         "auto": 1024,
         "int8": 520,
     }
+    available_kv_bytes = 2 * gib - 8 * 65
+    auto_blocks = available_kv_bytes // (256 * 1024)
+    int8_blocks = available_kv_bytes // (256 * 520)
+    assert result["results"]["tp4"]["kv_capacity_by_dtype"] == {
+        "auto": {
+            "memory_limited_total_token_slots": auto_blocks * 256,
+            "memory_limited_context_tokens_per_sequence": auto_blocks // 64 * 256,
+        },
+        "int8": {
+            "memory_limited_total_token_slots": int8_blocks * 256,
+            "memory_limited_context_tokens_per_sequence": int8_blocks // 64 * 256,
+        },
+    }
+    assert result["results"]["tp4"]["capacity_concurrent_sequences"] == 64
     assert result["results"]["tp4"]["required_free_bytes_per_rank"] == (
         18 * gib + 8 * 65 + 64 * 3 * 256 * 1024
     )
