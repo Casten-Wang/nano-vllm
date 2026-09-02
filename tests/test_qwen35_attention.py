@@ -141,6 +141,48 @@ def test_query_gate_is_applied_after_attention():
     assert not torch.allclose(output_closed, output_open)
 
 
+@torch.no_grad()
+def test_query_gate_reuses_attention_output_storage_in_inference():
+    layer = make_attention()
+    storage = {}
+    attention_hook = layer.attn.register_forward_hook(
+        lambda _module, _inputs, output: storage.update(attention=output.data_ptr())
+    )
+    projection_hook = layer.o_proj.register_forward_pre_hook(
+        lambda _module, inputs: storage.update(gated=inputs[0].data_ptr())
+    )
+
+    try:
+        layer(torch.arange(3), torch.randn(3, 8))
+    finally:
+        attention_hook.remove()
+        projection_hook.remove()
+
+    assert storage["gated"] == storage["attention"]
+
+
+def test_query_gate_keeps_separate_autograd_output():
+    layer = make_attention()
+    storage = {}
+    attention_hook = layer.attn.register_forward_hook(
+        lambda _module, _inputs, output: storage.update(attention=output.data_ptr())
+    )
+    projection_hook = layer.o_proj.register_forward_pre_hook(
+        lambda _module, inputs: storage.update(gated=inputs[0].data_ptr())
+    )
+    hidden = torch.randn(3, 8, requires_grad=True)
+
+    try:
+        output = layer(torch.arange(3), hidden)
+        output.sum().backward()
+    finally:
+        attention_hook.remove()
+        projection_hook.remove()
+
+    assert storage["gated"] != storage["attention"]
+    assert hidden.grad is not None
+
+
 def test_tensor_parallel_attention_sums_to_single_rank_reference():
     torch.manual_seed(9)
     full = make_attention(world_size=1)
