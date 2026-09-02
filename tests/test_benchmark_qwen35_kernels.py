@@ -77,6 +77,26 @@ def test_gated_rmsnorm_benchmark_compares_both_reused_workspaces():
     assert result["errors"][0]["max_abs_error"] == 0
 
 
+def test_beta_gate_benchmark_reuses_projection_buffer():
+    args = SimpleNamespace(
+        router_tokens=8,
+        hidden_size=16,
+        warmup=0,
+        iterations=1,
+        repeats=1,
+    )
+
+    result = MODULE.benchmark_beta_gate(
+        args,
+        torch.device("cpu"),
+        torch.bfloat16,
+        local_value_heads=4,
+    )
+
+    assert result["reused_beta_projection_mib"] == 8 * 4 * 2 / 1024 / 1024
+    assert result["errors"][0]["max_abs_error"] == 0
+
+
 def test_moe_output_merge_benchmark_measures_buffer_reuse():
     args = SimpleNamespace(
         router_tokens=8,

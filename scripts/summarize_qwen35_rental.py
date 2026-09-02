@@ -738,6 +738,10 @@ def summarize(run_dir: Path, run_id: str) -> dict:
                 ("reused_recurrent_state_mib",),
                 {"avoided_full_state_intermediates": 2},
             ),
+            "gated_delta_beta": summarize_buffer_reuse_candidate(
+                result["results"]["gated_delta_beta_buffer_reuse"],
+                ("reused_beta_projection_mib",),
+            ),
         }
         kernels[tp_name] = {
             "promotion": {

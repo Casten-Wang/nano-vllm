@@ -787,6 +787,46 @@ def benchmark_rmsnorm(args, device, dtype) -> dict:
     return result
 
 
+def benchmark_beta_gate(args, device, dtype, local_value_heads: int) -> dict:
+    hidden = torch.randn(
+        args.router_tokens,
+        args.hidden_size,
+        device=device,
+        dtype=dtype,
+    )
+    weight = torch.randn(
+        local_value_heads,
+        args.hidden_size,
+        device=device,
+        dtype=dtype,
+    )
+
+    def reference():
+        return (torch.sigmoid(F.linear(hidden, weight)),)
+
+    def candidate():
+        beta = F.linear(hidden, weight)
+        beta.sigmoid_()
+        return (beta,)
+
+    result = compare(
+        reference,
+        candidate,
+        device=device,
+        warmup=args.warmup,
+        iterations=args.iterations,
+        repeats=args.repeats,
+    )
+    result["reused_beta_projection_mib"] = (
+        args.router_tokens
+        * local_value_heads
+        * torch.empty((), dtype=dtype).element_size()
+        / 1024
+        / 1024
+    )
+    return result
+
+
 def benchmark_gated_rmsnorm(args, device, dtype) -> dict:
     hidden = torch.randn(
         args.router_tokens,
@@ -1462,6 +1502,12 @@ def main() -> None:
                 args.max_decode_tokens,
             ),
             "rmsnorm_fp32_reuse": benchmark_rmsnorm(args, device, dtype),
+            "gated_delta_beta_buffer_reuse": benchmark_beta_gate(
+                args,
+                device,
+                dtype,
+                local_value_heads,
+            ),
             "gated_rmsnorm_fp32_reuse": benchmark_gated_rmsnorm(
                 args,
                 device,

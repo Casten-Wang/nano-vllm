@@ -380,6 +380,13 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
                     "reused_gate_fp32_workspace_mib": 4.0,
                     "candidate_reuses_fp32_workspaces": True,
                 },
+                "gated_delta_beta_buffer_reuse": {
+                    "reference": {"peak_extra_mib": 1.0},
+                    "candidate": {"peak_extra_mib": 0.0},
+                    "speedup": 1.01,
+                    "errors": [{"max_abs_error": 0.0}],
+                    "reused_beta_projection_mib": 0.01,
+                },
                 "moe_output_buffer_reuse": {
                     "reference": {"peak_extra_mib": 12.0},
                     "candidate": {"peak_extra_mib": 4.0},

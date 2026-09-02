@@ -987,6 +987,41 @@ def test_gated_delta_reuses_precomputed_reset_slots():
     assert reset.call_args.args[0] is context.state_reset_slots
 
 
+def test_gated_delta_reuses_beta_projection_during_inference():
+    layer = make_layer()
+    layer.allocate_state_cache(1, "cpu")
+    projected_beta = torch.tensor([[0.0, 1.0, -1.0, 2.0]])
+    context = SimpleNamespace(
+        is_mixed=False,
+        is_prefill=False,
+        state_slots=torch.tensor([0], dtype=torch.int32),
+        state_reset_mask=torch.tensor([True]),
+        state_token_ranges=(),
+    )
+    context_module = types.ModuleType("nanovllm.utils.context")
+    context_module.get_context = lambda: context
+    original_decode = layer._decode_batch
+    observed = {}
+
+    def capture_beta(mixed_qkv, z, beta, log_decay, slots):
+        observed["same_storage"] = beta.data_ptr() == projected_beta.data_ptr()
+        return original_decode(mixed_qkv, z, beta, log_decay, slots)
+
+    with (
+        torch.inference_mode(),
+        patch.dict(sys.modules, {"nanovllm.utils.context": context_module}),
+        patch.object(layer.in_proj_b, "forward", return_value=projected_beta),
+        patch.object(layer, "_decode_batch", side_effect=capture_beta),
+    ):
+        layer(torch.randn(1, 4))
+
+    assert observed["same_storage"]
+    torch.testing.assert_close(
+        projected_beta,
+        torch.sigmoid(torch.tensor([[0.0, 1.0, -1.0, 2.0]])),
+    )
+
+
 def test_equal_length_prefills_batch_without_changing_results():
     torch.manual_seed(23)
     layer = make_layer()

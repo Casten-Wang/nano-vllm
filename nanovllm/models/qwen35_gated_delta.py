@@ -927,7 +927,13 @@ class Qwen35GatedDeltaNet(nn.Module):
 
         mixed_qkv = self.in_proj_qkv(hidden_states)
         z = self.in_proj_z(hidden_states)
-        beta = torch.sigmoid(self.in_proj_b(hidden_states))
+        beta = self.in_proj_b(hidden_states)
+        if beta.requires_grad:
+            beta = torch.sigmoid(beta)
+        else:
+            # The projection is dead after sigmoid in inference. Reuse it to
+            # avoid one token_count x local_value_heads allocation per layer.
+            beta.sigmoid_()
         a = self.in_proj_a(hidden_states)
         log_decay = -self.A_log.float().exp() * F.softplus(
             a.float() + self.dt_bias
