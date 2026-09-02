@@ -476,6 +476,29 @@ def test_sorted_route_weighting_benchmark_measures_output_reuse():
     assert result["errors"][0]["max_abs_error"] == 0
 
 
+def test_batched_route_sum_benchmark_measures_dispatch_output_reuse():
+    args = SimpleNamespace(
+        router_tokens=8,
+        top_k=2,
+        hidden_size=16,
+        warmup=0,
+        iterations=1,
+        repeats=1,
+    )
+
+    result = MODULE.benchmark_batched_route_sum_output(
+        args,
+        torch.device("cpu"),
+        torch.bfloat16,
+    )
+
+    assert result["avoided_route_sum_output_mib"] == (
+        8 * 16 * 2 / 1024 / 1024
+    )
+    assert result["candidate_reuses_dispatch_output"]
+    assert result["errors"][0]["max_abs_error"] == 0
+
+
 def test_torch_kv_dequant_benchmark_measures_output_reuse():
     args = SimpleNamespace(
         prefill_tokens=256,

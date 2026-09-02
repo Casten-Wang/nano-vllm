@@ -597,6 +597,14 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
                     "errors": [{"max_abs_error": 0.0}],
                     "avoided_weighted_expert_output_mib": 4.0,
                 },
+                "batched_route_sum_output_reuse": {
+                    "reference": {"peak_extra_mib": 8.0},
+                    "candidate": {"peak_extra_mib": 4.0},
+                    "speedup": 1.05,
+                    "errors": [{"max_abs_error": 0.0}],
+                    "avoided_route_sum_output_mib": 4.0,
+                    "candidate_reuses_dispatch_output": True,
+                },
                 "residual_output_buffer_reuse": {
                     "reference": {"peak_extra_mib": 8.0},
                     "candidate": {"peak_extra_mib": 4.0},
@@ -780,6 +788,9 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     assert report["buffer_reuse"]["by_tp"]["tp4"][
         "sorted_route_weighting"
     ]["workspace"]["avoided_weighted_expert_output_mib"] == 4.0
+    assert report["buffer_reuse"]["by_tp"]["tp4"][
+        "batched_route_sum_output"
+    ]["workspace"]["avoided_route_sum_output_mib"] == 4.0
     assert report["graph_safe_moe"]["by_tp"]["tp4"]["promotion"][
         "selected_decode_batches"
     ] == [1, 64]

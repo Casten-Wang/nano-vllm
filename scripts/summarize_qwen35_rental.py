@@ -1065,6 +1065,11 @@ def summarize(run_dir: Path, run_id: str) -> dict:
                 result["results"]["sorted_route_weighting_reuse"],
                 ("avoided_weighted_expert_output_mib",),
             ),
+            "batched_route_sum_output": summarize_buffer_reuse_candidate(
+                result["results"]["batched_route_sum_output_reuse"],
+                ("avoided_route_sum_output_mib",),
+                {"candidate_reuses_dispatch_output": True},
+            ),
             "residual_merge": summarize_buffer_reuse_candidate(
                 result["results"]["residual_output_buffer_reuse"],
                 ("reused_branch_output_mib_per_merge",),

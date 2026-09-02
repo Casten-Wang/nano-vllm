@@ -527,6 +527,54 @@ def benchmark_sorted_route_weighting(args, device, dtype) -> dict:
     return result
 
 
+def benchmark_batched_route_sum_output(args, device, dtype) -> dict:
+    expert_output_source = torch.randn(
+        args.router_tokens * args.top_k,
+        args.hidden_size,
+        device=device,
+        dtype=dtype,
+    )
+    route_weights = torch.rand(
+        args.router_tokens,
+        args.top_k,
+        device=device,
+        dtype=dtype,
+    )
+    output = torch.empty(
+        args.router_tokens,
+        args.hidden_size,
+        device=device,
+        dtype=dtype,
+    )
+
+    def reference():
+        expert_output = expert_output_source.clone()
+        return (MOE_DISPATCH.weighted_route_sum(expert_output, route_weights),)
+
+    def candidate():
+        expert_output = expert_output_source.clone()
+        MOE_DISPATCH.weighted_route_sum(
+            expert_output,
+            route_weights,
+            output=output,
+        )
+        return (output,)
+
+    result = compare(
+        reference,
+        candidate,
+        device=device,
+        warmup=args.warmup,
+        iterations=args.iterations,
+        repeats=args.repeats,
+    )
+    result["avoided_route_sum_output_mib"] = (
+        output.numel() * output.element_size() / 1024 / 1024
+    )
+    result["candidate_reuses_dispatch_output"] = True
+    return result
+
+
 def benchmark_residual_merge(args, device, dtype) -> dict:
     residual_source = torch.randn(
         args.router_tokens,
@@ -2732,6 +2780,11 @@ def main() -> None:
                 dtype,
             ),
             "sorted_route_weighting_reuse": benchmark_sorted_route_weighting(
+                args,
+                device,
+                dtype,
+            ),
+            "batched_route_sum_output_reuse": benchmark_batched_route_sum_output(
                 args,
                 device,
                 dtype,
