@@ -81,8 +81,17 @@ def result(
         "generation_validation": {"valid": True},
         "metrics": {
             "avg_ttft_s": 2.0,
+            "p50_ttft_s": 1.8,
+            "p95_ttft_s": 3.0,
+            "p99_ttft_s": 3.5,
             "avg_tpot_s": 0.05,
+            "p50_tpot_s": 0.04,
+            "p95_tpot_s": 0.08,
+            "p99_tpot_s": 0.1,
             "avg_request_latency_s": 3.0,
+            "p50_request_latency_s": 2.8,
+            "p95_request_latency_s": 4.0,
+            "p99_request_latency_s": 4.5,
         },
         "kv_cache_storage": {"total_bytes": 1024},
         "kv_cache_storage_by_rank": [
@@ -118,6 +127,8 @@ def test_comparison_reports_relative_metrics_and_output_parity():
     candidate_row = comparison["runs"][1]
     assert candidate_row["throughput_vs_baseline"] == 1.25
     assert candidate_row["peak_memory_vs_baseline"] == 0.75
+    assert candidate_row["p99_ttft_s"] == 3.5
+    assert candidate_row["latency_vs_baseline"]["p95_tpot_s"] == 1.0
     assert comparison["all_output_digests_match"]
     assert comparison["all_execution_paths_valid"]
     assert comparison["all_generation_valid"]
@@ -221,6 +232,7 @@ def test_repeat_summary_reports_distribution_and_stability():
     assert throughput["mean"] == 100.0
     assert throughput["population_stdev"] == pytest.approx(8.1649658)
     assert throughput["coefficient_of_variation"] == pytest.approx(0.081649658)
+    assert summary["statistics"]["p99_request_latency_s"]["median"] == 4.5
     assert summary["all_output_digests_match"]
     assert summary["generated_token_ids_digest"] == "same"
     assert summary["execution_paths"] == {
@@ -266,10 +278,22 @@ def test_matrix_summary_compares_configuration_medians_and_quality():
     ]
     assert comparison["runs"][1]["vs_baseline"]["output_throughput"] == 1.25
     assert comparison["runs"][1]["vs_baseline"]["peak_memory"] == 0.75
+    assert comparison["runs"][1]["vs_baseline"]["latency"]["p99_ttft_s"] == 1.0
     assert comparison["all_repeat_output_digests_match"]
     assert not comparison["all_output_digests_match"]
     assert comparison["all_execution_paths_valid"]
     assert comparison["all_generation_valid"]
+
+
+def test_comparison_rejects_missing_tail_latency_metrics():
+    candidate = result()
+    del candidate["metrics"]["p99_ttft_s"]
+
+    with pytest.raises(ValueError, match="candidate.metrics.*p99_ttft_s"):
+        MODULE.compare_results(
+            [result(), candidate],
+            ["baseline", "candidate"],
+        )
 
 
 def test_matrix_summary_rejects_different_workloads():

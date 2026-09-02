@@ -56,6 +56,21 @@ STORAGE_FIELDS = (
     "recurrent_state_total_all_ranks_bytes",
 )
 
+LATENCY_METRIC_NAMES = (
+    "avg_ttft_s",
+    "p50_ttft_s",
+    "p95_ttft_s",
+    "p99_ttft_s",
+    "avg_tpot_s",
+    "p50_tpot_s",
+    "p95_tpot_s",
+    "p99_tpot_s",
+    "avg_request_latency_s",
+    "p50_request_latency_s",
+    "p95_request_latency_s",
+    "p99_request_latency_s",
+)
+
 
 def ratio(value: float, baseline: float) -> float | None:
     return value / baseline if baseline else None
@@ -126,6 +141,16 @@ def compare_results(results: list[dict], labels: list[str]) -> dict:
             f"were dirty: {', '.join(dirty_runs)}"
         )
     baseline = results[0]
+    for label, result in zip(labels, results):
+        missing_metrics = [
+            name for name in LATENCY_METRIC_NAMES
+            if not isinstance(result.get("metrics", {}).get(name), (int, float))
+        ]
+        if missing_metrics:
+            raise ValueError(
+                f"{label}.metrics is missing numeric fields: "
+                + ", ".join(missing_metrics)
+            )
     baseline_checkpoint = baseline["checkpoint_manifest"]["digest"]
     mismatches = []
     for label, result in zip(labels[1:], results[1:]):
@@ -155,26 +180,34 @@ def compare_results(results: list[dict], labels: list[str]) -> dict:
         raise ValueError(f"benchmark workloads are not comparable: {fields}")
 
     baseline_throughput = baseline["output_throughput_tok_s"]
-    baseline_ttft = baseline["metrics"]["avg_ttft_s"]
-    baseline_tpot = baseline["metrics"]["avg_tpot_s"]
     baseline_memory = baseline["peak_torch_allocated_mib"]
     baseline_digest = baseline["generated_token_ids"]["digest"]
     rows = []
     for label, result in zip(labels, results):
         throughput = result["output_throughput_tok_s"]
-        ttft = result["metrics"]["avg_ttft_s"]
-        tpot = result["metrics"]["avg_tpot_s"]
         memory = result["peak_torch_allocated_mib"]
+        latency_metrics = {
+            name: result["metrics"][name] for name in LATENCY_METRIC_NAMES
+        }
         rows.append(
             {
                 "label": label,
                 **{field: result[field] for field in OPTIMIZATION_FIELDS},
                 "output_throughput_tok_s": throughput,
                 "throughput_vs_baseline": ratio(throughput, baseline_throughput),
-                "avg_ttft_s": ttft,
-                "ttft_vs_baseline": ratio(ttft, baseline_ttft),
-                "avg_tpot_s": tpot,
-                "tpot_vs_baseline": ratio(tpot, baseline_tpot),
+                **latency_metrics,
+                "ttft_vs_baseline": ratio(
+                    latency_metrics["avg_ttft_s"],
+                    baseline["metrics"]["avg_ttft_s"],
+                ),
+                "tpot_vs_baseline": ratio(
+                    latency_metrics["avg_tpot_s"],
+                    baseline["metrics"]["avg_tpot_s"],
+                ),
+                "latency_vs_baseline": {
+                    name: ratio(value, baseline["metrics"][name])
+                    for name, value in latency_metrics.items()
+                },
                 "peak_torch_allocated_mib": memory,
                 "peak_memory_vs_baseline": ratio(memory, baseline_memory),
                 "output_digest_matches_baseline": (
@@ -239,11 +272,10 @@ def summarize_repeats(results: list[dict], labels: list[str]) -> dict:
         "output_throughput_tok_s": [
             result["output_throughput_tok_s"] for result in results
         ],
-        "avg_ttft_s": [result["metrics"]["avg_ttft_s"] for result in results],
-        "avg_tpot_s": [result["metrics"]["avg_tpot_s"] for result in results],
-        "avg_request_latency_s": [
-            result["metrics"]["avg_request_latency_s"] for result in results
-        ],
+        **{
+            name: [result["metrics"][name] for result in results]
+            for name in LATENCY_METRIC_NAMES
+        },
         "peak_torch_allocated_mib": [
             result["peak_torch_allocated_mib"] for result in results
         ],
@@ -289,9 +321,7 @@ def compare_repeat_summaries(summaries: list[dict], labels: list[str]) -> dict:
 
     metric_names = (
         "output_throughput_tok_s",
-        "avg_ttft_s",
-        "avg_tpot_s",
-        "avg_request_latency_s",
+        *LATENCY_METRIC_NAMES,
         "peak_torch_allocated_mib",
     )
     rows = []
@@ -348,6 +378,10 @@ def compare_repeat_summaries(summaries: list[dict], labels: list[str]) -> dict:
                 median["peak_torch_allocated_mib"],
                 baseline_median["peak_torch_allocated_mib"],
             ),
+            "latency": {
+                name: ratio(median[name], baseline_median[name])
+                for name in LATENCY_METRIC_NAMES
+            },
         }
     digests = {row["generated_token_ids_digest"] for row in rows}
     return {
