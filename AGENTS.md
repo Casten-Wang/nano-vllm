@@ -39,6 +39,27 @@
 - Compare performance on the same commit and environment. Report regressions
   and unsupported cases explicitly.
 
+## External Design Research
+
+- Before designing a runtime, kernel, quantization, parallelism, scheduling, or
+  memory optimization, inspect current primary-source implementations and
+  relevant issues or pull requests in established projects. At minimum check
+  vLLM, SGLang, and llama.cpp when the topic applies; also check projects such
+  as TensorRT-LLM, FlashAttention, FlashInfer, or PyTorch when they own the
+  relevant design.
+- Record the exact repository, commit or release, file or PR, hardware scope,
+  algorithmic idea, benchmark methodology, and known limitations used as
+  references. Do not rely on recollection, summaries, or marketing claims.
+- Adapt ideas to nano-vllm's architecture and verify them independently. Do not
+  copy incompatible code, remove attribution, or assume another project's
+  benchmark transfers to this runtime or hardware.
+- Prefer proven interfaces and invariants, but keep this repository small:
+  adopt only the minimum mechanism needed for the measured problem rather than
+  importing a large framework abstraction wholesale.
+- Track useful contribution opportunities found in any external project as
+  local review candidates. The same external-PR approval rule applies to every
+  third-party repository, not only GeeeekExplorer/nano-vllm.
+
 ## Git Safety
 
 - Review `git status`, staged file names, and `git diff --cached --check`
