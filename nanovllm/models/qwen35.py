@@ -11,6 +11,15 @@ from nanovllm.models.qwen35_gated_delta import Qwen35GatedDeltaNet
 from nanovllm.models.qwen35_moe import Qwen35RMSNorm, Qwen35SparseMoeBlock
 
 
+def _add_residual(
+    branch_output: torch.Tensor,
+    residual: torch.Tensor,
+) -> torch.Tensor:
+    if torch.is_grad_enabled():
+        return residual + branch_output
+    return branch_output.add_(residual)
+
+
 class Qwen35DecoderLayer(nn.Module):
     def __init__(self, config, layer_idx: int) -> None:
         super().__init__()
@@ -40,10 +49,10 @@ class Qwen35DecoderLayer(nn.Module):
             hidden_states = self.linear_attn(hidden_states)
         else:
             hidden_states = self.self_attn(positions, hidden_states)
-        hidden_states = residual + hidden_states
+        hidden_states = _add_residual(hidden_states, residual)
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
-        return residual + self.mlp(hidden_states)
+        return _add_residual(self.mlp(hidden_states), residual)
 
 
 class Qwen35Model(nn.Module):

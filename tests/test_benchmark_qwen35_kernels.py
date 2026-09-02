@@ -93,6 +93,28 @@ def test_moe_output_merge_benchmark_measures_buffer_reuse():
     assert result["errors"][0]["max_abs_error"] == 0
 
 
+def test_residual_merge_benchmark_measures_branch_reuse():
+    args = SimpleNamespace(
+        router_tokens=8,
+        hidden_size=16,
+        warmup=0,
+        iterations=1,
+        repeats=1,
+    )
+
+    result = MODULE.benchmark_residual_merge(
+        args,
+        torch.device("cpu"),
+        torch.bfloat16,
+    )
+
+    assert result["reused_branch_output_mib_per_merge"] == (
+        8 * 16 * 2 / 1024 / 1024
+    )
+    assert result["residual_merges_per_decoder_layer"] == 2
+    assert result["errors"][0]["max_abs_error"] == 0
+
+
 def test_expert_dispatch_matches_naive_route_accumulation():
     torch.manual_seed(101)
     hidden = torch.randn(4, 3)

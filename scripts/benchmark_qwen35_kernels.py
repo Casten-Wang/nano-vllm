@@ -235,6 +235,43 @@ def benchmark_moe_output_merge(args, device, dtype) -> dict:
     return result
 
 
+def benchmark_residual_merge(args, device, dtype) -> dict:
+    residual_source = torch.randn(
+        args.router_tokens,
+        args.hidden_size,
+        device=device,
+        dtype=dtype,
+    )
+    branch_source = torch.randn_like(residual_source)
+
+    def reference():
+        residual = residual_source.clone()
+        branch = branch_source.clone()
+        return (residual + branch,)
+
+    def candidate():
+        residual = residual_source.clone()
+        branch = branch_source.clone()
+        return (branch.add_(residual),)
+
+    result = compare(
+        reference,
+        candidate,
+        device=device,
+        warmup=args.warmup,
+        iterations=args.iterations,
+        repeats=args.repeats,
+    )
+    result["reused_branch_output_mib_per_merge"] = (
+        branch_source.numel()
+        * branch_source.element_size()
+        / 1024
+        / 1024
+    )
+    result["residual_merges_per_decoder_layer"] = 2
+    return result
+
+
 def expert_dispatch(
     hidden_states: torch.Tensor,
     topk_ids: torch.Tensor,
@@ -1328,6 +1365,11 @@ def main() -> None:
         benchmark_results = {
             "router_topk_first": benchmark_router(args, device, dtype),
             "moe_output_buffer_reuse": benchmark_moe_output_merge(
+                args,
+                device,
+                dtype,
+            ),
+            "residual_output_buffer_reuse": benchmark_residual_merge(
                 args,
                 device,
                 dtype,

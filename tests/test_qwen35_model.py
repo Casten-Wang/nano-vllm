@@ -127,3 +127,32 @@ def test_text_model_uses_declared_hybrid_layer_pattern():
     hidden = model(torch.tensor([1, 2]), torch.tensor([0, 1]))
     assert hidden.shape == (2, 4)
     assert model.compute_logits(hidden).shape == (2, 17)
+
+
+def test_residual_merge_reuses_branch_output_during_inference():
+    residual = torch.randn(3, 4)
+    branch = torch.randn(3, 4)
+    expected = residual + branch
+    branch_storage = branch.data_ptr()
+
+    with torch.inference_mode():
+        output = QWEN35._add_residual(branch, residual)
+
+    assert output.data_ptr() == branch_storage
+    torch.testing.assert_close(output, expected)
+
+
+def test_residual_merge_preserves_autograd_inputs():
+    residual = torch.randn(3, 4, requires_grad=True)
+    branch = torch.randn(3, 4, requires_grad=True)
+    residual_before = residual.detach().clone()
+    branch_before = branch.detach().clone()
+
+    output = QWEN35._add_residual(branch, residual)
+    output.square().mean().backward()
+
+    assert output.data_ptr() != branch.data_ptr()
+    assert torch.equal(residual, residual_before)
+    assert torch.equal(branch, branch_before)
+    assert residual.grad is not None
+    assert branch.grad is not None
