@@ -50,8 +50,12 @@ def test_commands_are_fail_fast_and_cover_complete_validation_suite():
         "mixed-tp4-r1",
         "mixed-tp4-r2",
         "mixed-tp4-r3",
-        "pressure-fcfs-tp4",
-        "pressure-min_recompute-tp4",
+        "pressure-fcfs-tp4-r1",
+        "pressure-fcfs-tp4-r2",
+        "pressure-fcfs-tp4-r3",
+        "pressure-min_recompute-tp4-r1",
+        "pressure-min_recompute-tp4-r2",
+        "pressure-min_recompute-tp4-r3",
         "kernels-long-prefill-tp4",
         "attention-short-tp4",
         "attention-long-tp4",
@@ -62,8 +66,12 @@ def test_commands_are_fail_fast_and_cover_complete_validation_suite():
         "mixed-tp8-r1",
         "mixed-tp8-r2",
         "mixed-tp8-r3",
-        "pressure-fcfs-tp8",
-        "pressure-min_recompute-tp8",
+        "pressure-fcfs-tp8-r1",
+        "pressure-fcfs-tp8-r2",
+        "pressure-fcfs-tp8-r3",
+        "pressure-min_recompute-tp8-r1",
+        "pressure-min_recompute-tp8-r2",
+        "pressure-min_recompute-tp8-r3",
         "kernels-long-prefill-tp8",
         "attention-short-tp8",
         "attention-long-tp8",
@@ -91,7 +99,7 @@ def test_commands_are_fail_fast_and_cover_complete_validation_suite():
     assert mixed[mixed.index("--temperature") + 1] == "0"
     assert "--enable-dynamic-chunked-prefill" in mixed
     assert mixed[mixed.index("--require-paths") + 1] == "mixed_eager"
-    pressure = commands["pressure-min_recompute-tp4"]
+    pressure = commands["pressure-min_recompute-tp4-r1"]
     assert pressure[pressure.index("--num-kvcache-blocks-override") + 1] == "5"
     assert pressure[pressure.index("--initial-input-lens") + 1] == "256,1024"
     assert pressure[pressure.index("--injected-input-lens") + 1] == "512,512"
@@ -275,18 +283,19 @@ def test_mixed_stage_collects_only_its_repeat(tmp_path):
     assert artifacts == [second]
 
 
-def test_pressure_stage_collects_its_tp_artifact(tmp_path):
+def test_pressure_stage_collects_only_its_policy_repeat(tmp_path):
     arguments = args()
     arguments.result_dir = str(tmp_path)
-    pressure_dir = tmp_path / arguments.run_id / "pressure"
+    pressure_dir = tmp_path / arguments.run_id / "pressure" / "tp4" / "fcfs"
     pressure_dir.mkdir(parents=True)
-    pressure_dir = pressure_dir / "tp4"
-    pressure_dir.mkdir()
-    artifact = pressure_dir / "fcfs.json"
+    artifact = pressure_dir / "r2.json"
     artifact.write_text('{"valid": true}\n')
-    (pressure_dir / "min_recompute.json").write_text('{"valid": true}\n')
+    (pressure_dir / "r1.json").write_text('{"valid": true}\n')
 
-    artifacts = MODULE.collect_stage_artifacts(arguments, "pressure-fcfs-tp4")
+    artifacts = MODULE.collect_stage_artifacts(
+        arguments,
+        "pressure-fcfs-tp4-r2",
+    )
 
     assert artifacts == [artifact]
 

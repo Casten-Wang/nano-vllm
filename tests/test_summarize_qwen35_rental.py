@@ -199,58 +199,64 @@ def write_mixed_case(root):
 
 
 def write_pressure_case(root):
-    for policy, token_progress, max_progress, reclaimed in (
-        ("fcfs", 1536, 1024, 6),
-        ("min_recompute", 256, 256, 1),
+    for policy, token_progress, max_progress, reclaimed, elapsed_samples in (
+        ("fcfs", 1536, 1024, 6, (9.8, 10.0, 10.2)),
+        ("min_recompute", 256, 256, 1, (7.8, 8.0, 8.2)),
     ):
-        write(
-            root / f"pressure/tp4/{policy}.json",
-            {
-            "commit": "abc",
-            "git_dirty": False,
-            "cuda_available": True,
-            "tensor_parallel_size": 4,
-            "initial_seqs": MODULE.PRESSURE_INITIAL_SEQUENCES,
-            "injected_seqs": MODULE.PRESSURE_INJECTED_SEQUENCES,
-            "initial_input_lens": MODULE.PRESSURE_INITIAL_LENGTHS,
-            "injected_input_lens": MODULE.PRESSURE_INJECTED_LENGTHS,
-            "output_len": 16,
-            "num_kvcache_blocks_override": MODULE.PRESSURE_KV_BLOCKS,
-            "num_kvcache_blocks": MODULE.PRESSURE_KV_BLOCKS,
-            "enable_dynamic_chunked_prefill": True,
-            "preemption_policy": policy,
-            "injected": True,
-            "expected_requests": 4,
-            "finished_requests": 4,
-            "total_time_s": 10.0 if policy == "fcfs" else 8.0,
-            "step_count": 63 if policy == "fcfs" else 48,
-            "peak_torch_allocated_mib": 12_000.0,
-            "generated_token_ids": {"digest": "pressure-tokens"},
-            "metrics": {
-                "preemption_count": 2 if policy == "fcfs" else 1,
-                "preempted_token_progress": token_progress,
-                "max_preempted_token_progress": max_progress,
-                "reclaimed_kv_blocks": reclaimed,
-                "avg_ttft_s": 1.0,
-                "p50_ttft_s": 0.8,
-                "p95_ttft_s": 1.8 if policy == "fcfs" else 1.5,
-                "p99_ttft_s": 1.95 if policy == "fcfs" else 1.7,
-                "max_ttft_s": 2.0,
-                "avg_tpot_s": 0.2,
-                "p50_tpot_s": 0.18,
-                "p95_tpot_s": 0.3 if policy == "fcfs" else 0.25,
-                "p99_tpot_s": 0.35 if policy == "fcfs" else 0.3,
-                "max_tpot_s": 0.4,
-                "avg_request_latency_s": 5.0,
-                "p50_request_latency_s": 4.0,
-                "p95_request_latency_s": 9.0 if policy == "fcfs" else 8.0,
-                "p99_request_latency_s": 9.8 if policy == "fcfs" else 9.0,
-                "max_request_latency_s": 10.0,
-            },
-            "execution_validation": {"valid": True},
-            "generation_validation": {"valid": True},
-            },
-        )
+        for repeat, elapsed in enumerate(elapsed_samples, start=1):
+            write(
+                root / f"pressure/tp4/{policy}/r{repeat}.json",
+                {
+                    "commit": "abc",
+                    "checkpoint_manifest": {"digest": "weights"},
+                    "git_dirty": False,
+                    "cuda_available": True,
+                    "tensor_parallel_size": 4,
+                    "initial_seqs": MODULE.PRESSURE_INITIAL_SEQUENCES,
+                    "injected_seqs": MODULE.PRESSURE_INJECTED_SEQUENCES,
+                    "initial_input_lens": MODULE.PRESSURE_INITIAL_LENGTHS,
+                    "injected_input_lens": MODULE.PRESSURE_INJECTED_LENGTHS,
+                    "output_len": 16,
+                    "num_kvcache_blocks_override": MODULE.PRESSURE_KV_BLOCKS,
+                    "num_kvcache_blocks": MODULE.PRESSURE_KV_BLOCKS,
+                    "enable_dynamic_chunked_prefill": True,
+                    "preemption_policy": policy,
+                    "injected": True,
+                    "expected_requests": 4,
+                    "finished_requests": 4,
+                    "total_time_s": elapsed,
+                    "step_count": 63 if policy == "fcfs" else 48,
+                    "peak_torch_allocated_mib": 12_000.0,
+                    "generated_token_ids": {"digest": "pressure-tokens"},
+                    "metrics": {
+                        "preemption_count": 2 if policy == "fcfs" else 1,
+                        "preempted_token_progress": token_progress,
+                        "max_preempted_token_progress": max_progress,
+                        "reclaimed_kv_blocks": reclaimed,
+                        "avg_ttft_s": 1.0,
+                        "p50_ttft_s": 0.8,
+                        "p95_ttft_s": 1.8 if policy == "fcfs" else 1.5,
+                        "p99_ttft_s": 1.95 if policy == "fcfs" else 1.7,
+                        "max_ttft_s": 2.0,
+                        "avg_tpot_s": 0.2,
+                        "p50_tpot_s": 0.18,
+                        "p95_tpot_s": 0.3 if policy == "fcfs" else 0.25,
+                        "p99_tpot_s": 0.35 if policy == "fcfs" else 0.3,
+                        "max_tpot_s": 0.4,
+                        "avg_request_latency_s": 5.0,
+                        "p50_request_latency_s": 4.0,
+                        "p95_request_latency_s": (
+                            9.0 if policy == "fcfs" else 8.0
+                        ),
+                        "p99_request_latency_s": (
+                            9.8 if policy == "fcfs" else 9.0
+                        ),
+                        "max_request_latency_s": 10.0,
+                    },
+                    "execution_validation": {"valid": True},
+                    "generation_validation": {"valid": True},
+                },
+            )
 
 
 def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
@@ -998,7 +1004,7 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     assert comparison["candidate_latency_vs_fcfs"]["p95_ttft_s"] == (
         1.5 / 1.8
     )
-    candidate_pressure_path = tmp_path / "pressure/tp4/min_recompute.json"
+    candidate_pressure_path = tmp_path / "pressure/tp4/min_recompute/r1.json"
     candidate_pressure = json.loads(candidate_pressure_path.read_text())
     candidate_pressure["generated_token_ids"]["digest"] = "different"
     write(candidate_pressure_path, candidate_pressure)
@@ -1443,3 +1449,80 @@ def test_normalization_summary_rejects_invalid_measurements():
 
     assert not summary["measurement_valid"]
     assert not summary["valid"]
+
+
+def load_pressure_repeats(root, policy):
+    return [
+        json.loads(path.read_text())
+        for path in sorted((root / f"pressure/tp4/{policy}").glob("r*.json"))
+    ]
+
+
+def test_kv_pressure_repeats_use_median_and_require_stable_evidence(tmp_path):
+    write_pressure_case(tmp_path)
+    results = load_pressure_repeats(tmp_path, "fcfs")
+
+    summary = MODULE.summarize_kv_pressure_repeats(
+        results,
+        expected_tp_size=4,
+        expected_policy="fcfs",
+    )
+
+    assert summary["valid"]
+    assert summary["repeat_count"] == 3
+    assert summary["total_time_s"] == 10.0
+    assert summary["peak_torch_allocated_mib"] == 12_000.0
+    assert summary["scheduler_counters_stable"]
+    assert summary["output_parity"]
+    assert summary["checkpoint_stable"]
+
+
+@pytest.mark.parametrize(
+    ("mutation", "failed_check"),
+    (
+        (
+            lambda result: result["generated_token_ids"].update(
+                digest="different"
+            ),
+            "output_parity",
+        ),
+        (
+            lambda result: result.update(step_count=999),
+            "scheduler_counters_stable",
+        ),
+        (
+            lambda result: result["checkpoint_manifest"].update(
+                digest="different"
+            ),
+            "checkpoint_stable",
+        ),
+    ),
+)
+def test_kv_pressure_repeats_reject_drift(tmp_path, mutation, failed_check):
+    write_pressure_case(tmp_path)
+    results = load_pressure_repeats(tmp_path, "fcfs")
+    mutation(results[-1])
+
+    summary = MODULE.summarize_kv_pressure_repeats(
+        results,
+        expected_tp_size=4,
+        expected_policy="fcfs",
+    )
+
+    assert not summary["valid"]
+    assert not summary[failed_check]
+
+
+def test_kv_pressure_repeats_reject_high_runtime_variance(tmp_path):
+    write_pressure_case(tmp_path)
+    results = load_pressure_repeats(tmp_path, "fcfs")
+    results[-1]["total_time_s"] = 20.0
+
+    summary = MODULE.summarize_kv_pressure_repeats(
+        results,
+        expected_tp_size=4,
+        expected_policy="fcfs",
+    )
+
+    assert not summary["valid"]
+    assert summary["total_time_cv"] > summary["max_allowed_cv"]

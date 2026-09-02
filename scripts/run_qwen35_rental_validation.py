@@ -233,52 +233,70 @@ def commands(args: argparse.Namespace) -> list[tuple[str, list[str]]]:
                 )
             )
         for policy in ("fcfs", "min_recompute"):
-            result.append((
-                f"pressure-{policy}-tp{tp_size}",
-                [
-                    sys.executable,
-                    str(ONLINE_MIXED_SCRIPT),
-                    "--model",
-                    args.model,
-                    "--tensor-parallel-size",
-                    str(tp_size),
-                    "--qwen35-moe-decode-backend",
-                    "batched",
-                    "--initial-seqs",
-                    str(PRESSURE_INITIAL_SEQUENCES),
-                    "--injected-seqs",
-                    str(PRESSURE_INJECTED_SEQUENCES),
-                    "--initial-input-len",
-                    "256",
-                    "--initial-input-lens",
-                    ",".join(str(value) for value in PRESSURE_INITIAL_LENGTHS),
-                    "--injected-input-len",
-                    "512",
-                    "--injected-input-lens",
-                    ",".join(str(value) for value in PRESSURE_INJECTED_LENGTHS),
-                    "--output-len",
-                    "16",
-                    "--temperature",
-                    "0",
-                    "--inject-after-decode-steps",
-                    "1",
-                    "--max-model-len",
-                    str(args.max_model_len),
-                    "--max-num-batched-tokens",
-                    "2048",
-                    "--max-num-seqs",
-                    str(PRESSURE_INITIAL_SEQUENCES + PRESSURE_INJECTED_SEQUENCES),
-                    "--num-kvcache-blocks-override",
-                    str(PRESSURE_KV_BLOCKS),
-                    "--preemption-policy",
-                    policy,
-                    "--enable-dynamic-chunked-prefill",
-                    "--require-paths",
-                    "mixed_eager",
-                    "--output",
-                    str(root / "pressure" / f"tp{tp_size}" / f"{policy}.json"),
-                ],
-            ))
+            for repeat in range(1, args.repeats + 1):
+                result.append(
+                    (
+                        f"pressure-{policy}-tp{tp_size}-r{repeat}",
+                        [
+                            sys.executable,
+                            str(ONLINE_MIXED_SCRIPT),
+                            "--model",
+                            args.model,
+                            "--tensor-parallel-size",
+                            str(tp_size),
+                            "--qwen35-moe-decode-backend",
+                            "batched",
+                            "--initial-seqs",
+                            str(PRESSURE_INITIAL_SEQUENCES),
+                            "--injected-seqs",
+                            str(PRESSURE_INJECTED_SEQUENCES),
+                            "--initial-input-len",
+                            "256",
+                            "--initial-input-lens",
+                            ",".join(
+                                str(value)
+                                for value in PRESSURE_INITIAL_LENGTHS
+                            ),
+                            "--injected-input-len",
+                            "512",
+                            "--injected-input-lens",
+                            ",".join(
+                                str(value)
+                                for value in PRESSURE_INJECTED_LENGTHS
+                            ),
+                            "--output-len",
+                            "16",
+                            "--temperature",
+                            "0",
+                            "--inject-after-decode-steps",
+                            "1",
+                            "--max-model-len",
+                            str(args.max_model_len),
+                            "--max-num-batched-tokens",
+                            "2048",
+                            "--max-num-seqs",
+                            str(
+                                PRESSURE_INITIAL_SEQUENCES
+                                + PRESSURE_INJECTED_SEQUENCES
+                            ),
+                            "--num-kvcache-blocks-override",
+                            str(PRESSURE_KV_BLOCKS),
+                            "--preemption-policy",
+                            policy,
+                            "--enable-dynamic-chunked-prefill",
+                            "--require-paths",
+                            "mixed_eager",
+                            "--output",
+                            str(
+                                root
+                                / "pressure"
+                                / f"tp{tp_size}"
+                                / policy
+                                / f"r{repeat}.json"
+                            ),
+                        ],
+                    )
+                )
         result.append(
             (
                 f"kernels-long-prefill-tp{tp_size}",
@@ -536,9 +554,11 @@ def collect_stage_artifacts(
         search_root = root / "mixed" / tp_name
         required = [search_root / f"{repeat_name}.json"]
     elif stage_name.startswith("pressure-"):
-        _, policy, tp_name = stage_name.split("-")
-        search_root = root / "pressure" / tp_name
-        required = [search_root / f"{policy}.json"]
+        policy, tp_name, repeat_name = stage_name.removeprefix(
+            "pressure-"
+        ).rsplit("-", 2)
+        search_root = root / "pressure" / tp_name / policy
+        required = [search_root / f"{repeat_name}.json"]
     elif stage_name.startswith("cudagraph-"):
         _, context_name, tp_name = stage_name.split("-")
         search_root = root / "cudagraph" / tp_name / context_name

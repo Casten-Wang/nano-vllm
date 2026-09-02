@@ -30,6 +30,7 @@ PRESSURE_INJECTED_LENGTHS = [512, 512]
 LONG_PREFILL_TOKENS = 8192
 LONG_PREFILL_MAX_ABS_ERROR = 0.05
 MIXED_MAX_COEFFICIENT_OF_VARIATION = 0.10
+PRESSURE_MAX_COEFFICIENT_OF_VARIATION = 0.10
 NORMALIZATION_MAX_ABS_ERROR = 0.05
 BUFFER_REUSE_MAX_ABS_ERROR = 0.05
 MIXED_MOE_MIN_SPEEDUP = 1.0
@@ -698,6 +699,128 @@ def summarize_kv_pressure_case(
     }
 
 
+def summarize_kv_pressure_repeats(
+    results: list[dict],
+    *,
+    expected_tp_size: int,
+    expected_policy: str,
+) -> dict:
+    if not results:
+        raise ValueError("KV-pressure benchmark has no repeat results")
+    rows = [
+        summarize_kv_pressure_case(
+            result,
+            expected_tp_size=expected_tp_size,
+            expected_policy=expected_policy,
+        )
+        for result in results
+    ]
+    stable_names = (
+        "preemption_count",
+        "preempted_token_progress",
+        "max_preempted_token_progress",
+        "reclaimed_kv_blocks",
+        "step_count",
+    )
+    counters_stable = all(
+        len({row[name] for row in rows}) == 1 for name in stable_names
+    )
+    digests = {row["generated_token_ids_digest"] for row in rows}
+    output_parity = None not in digests and len(digests) == 1
+    commits = {result.get("commit") for result in results}
+    checkpoint_digests = {
+        result.get("checkpoint_manifest", {}).get("digest")
+        for result in results
+    }
+    implementation_stable = None not in commits and len(commits) == 1
+    checkpoint_stable = (
+        None not in checkpoint_digests and len(checkpoint_digests) == 1
+    )
+    elapsed_samples = [row["total_time_s"] for row in rows]
+    memory_samples = [row["peak_torch_allocated_mib"] for row in rows]
+    measurements_valid = all(
+        isinstance(value, (int, float)) and math.isfinite(value) and value > 0
+        for value in (*elapsed_samples, *memory_samples)
+    )
+    elapsed_mean = (
+        statistics.mean(elapsed_samples) if measurements_valid else math.nan
+    )
+    elapsed_cv = (
+        statistics.pstdev(elapsed_samples) / elapsed_mean
+        if elapsed_mean > 0
+        else math.inf
+    )
+    latency_names = (
+        "avg_ttft_s",
+        "p50_ttft_s",
+        "p95_ttft_s",
+        "p99_ttft_s",
+        "max_ttft_s",
+        "avg_tpot_s",
+        "p50_tpot_s",
+        "p95_tpot_s",
+        "p99_tpot_s",
+        "max_tpot_s",
+        "avg_request_latency_s",
+        "p50_request_latency_s",
+        "p95_request_latency_s",
+        "p99_request_latency_s",
+        "max_request_latency_s",
+    )
+    return {
+        "valid": (
+            len(rows) >= 2
+            and all(row["valid"] for row in rows)
+            and counters_stable
+            and output_parity
+            and implementation_stable
+            and checkpoint_stable
+            and measurements_valid
+            and elapsed_cv <= PRESSURE_MAX_COEFFICIENT_OF_VARIATION
+        ),
+        "repeat_count": len(rows),
+        "configuration_valid": all(
+            row["configuration_valid"] for row in rows
+        ),
+        "preemption_observed": all(
+            row["preemption_observed"] for row in rows
+        ),
+        "completion_valid": all(row["completion_valid"] for row in rows),
+        "latency_metrics_valid": all(
+            row["latency_metrics_valid"] for row in rows
+        ),
+        "scheduler_counters_stable": counters_stable,
+        "output_parity": output_parity,
+        "implementation_stable": implementation_stable,
+        "checkpoint_stable": checkpoint_stable,
+        "measurements_valid": measurements_valid,
+        "commit": next(iter(commits)) if implementation_stable else None,
+        "checkpoint_digest": (
+            next(iter(checkpoint_digests)) if checkpoint_stable else None
+        ),
+        **{
+            name: rows[0][name] if counters_stable else None
+            for name in stable_names
+        },
+        "total_time_s": (
+            statistics.median(elapsed_samples) if measurements_valid else None
+        ),
+        "total_time_cv": elapsed_cv,
+        "max_allowed_cv": PRESSURE_MAX_COEFFICIENT_OF_VARIATION,
+        "peak_torch_allocated_mib": (
+            max(memory_samples) if measurements_valid else None
+        ),
+        "generated_token_ids_digest": (
+            next(iter(digests)) if output_parity else None
+        ),
+        **{
+            name: statistics.median(row[name] for row in rows)
+            for name in latency_names
+        },
+        "runs": rows,
+    }
+
+
 def summarize_memory_preflight(report: dict) -> dict[str, dict]:
     summaries = {}
     for tp_name, item in sorted(report.get("results", {}).items()):
@@ -939,7 +1062,7 @@ def summarize(run_dir: Path, run_id: str) -> dict:
     mixed_paths = sorted((run_dir / "mixed").glob("tp*/r*.json"))
     if not mixed_paths:
         raise ValueError("no mixed-workload benchmark artifacts were found")
-    pressure_paths = sorted((run_dir / "pressure").glob("tp*/*.json"))
+    pressure_paths = sorted((run_dir / "pressure").glob("tp*/*/r*.json"))
     if not pressure_paths:
         raise ValueError("no KV-pressure benchmark artifacts were found")
     cudagraph_paths = sorted(
@@ -1400,24 +1523,25 @@ def summarize(run_dir: Path, run_id: str) -> dict:
             expected_tp_size=tp_size,
         )
 
+    pressure_results = {}
     for path in pressure_paths:
         result = load_json(path)
-        tp_size = int(path.parent.name.removeprefix("tp"))
+        tp_size = int(path.parents[1].name.removeprefix("tp"))
         tp_name = f"tp{tp_size}"
-        policy = path.stem
-        by_policy = kv_pressure.setdefault(tp_name, {})
-        if policy in by_policy:
-            raise ValueError(
-                f"duplicate KV-pressure result for {tp_name}/{policy}"
-            )
-        by_policy[policy] = summarize_kv_pressure_case(
-            result,
-            expected_tp_size=tp_size,
-            expected_policy=policy,
-        )
+        policy = path.parent.name
+        pressure_results.setdefault((tp_name, policy), []).append(result)
         commits.add(result["commit"])
         clean_worktrees = clean_worktrees and not result["git_dirty"]
         cuda_measurements = cuda_measurements and result["cuda_available"]
+    for (tp_name, policy), results in sorted(pressure_results.items()):
+        tp_size = int(tp_name.removeprefix("tp"))
+        kv_pressure.setdefault(tp_name, {})[policy] = (
+            summarize_kv_pressure_repeats(
+                results,
+                expected_tp_size=tp_size,
+                expected_policy=policy,
+            )
+        )
     kv_pressure_comparisons = {}
     for tp_name, by_policy in kv_pressure.items():
         if set(by_policy) != {"fcfs", "min_recompute"}:

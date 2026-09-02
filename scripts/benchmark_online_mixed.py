@@ -16,6 +16,7 @@ import torch
 
 from nanovllm import LLM, SamplingParams
 from nanovllm.benchmark_metadata import (
+    checkpoint_manifest_metadata,
     collect_benchmark_metadata,
     kv_cache_storage_metadata,
     model_config_metadata,
@@ -353,6 +354,7 @@ def main() -> None:
     result = {
         **collect_benchmark_metadata(),
         "model": args.model,
+        "checkpoint_manifest": checkpoint_manifest_metadata(args.model),
         "initial_seqs": args.initial_seqs,
         "injected_seqs": args.injected_seqs,
         "initial_input_len": args.initial_input_len,
