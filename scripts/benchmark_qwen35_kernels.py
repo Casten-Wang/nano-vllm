@@ -1349,6 +1349,7 @@ def expert_dispatch_reference(
     return output
 
 
+@torch.inference_mode()
 def benchmark_expert_dispatch(args, device, dtype, token_count: int) -> dict:
     local_intermediate_size = args.moe_intermediate_size // args.tp_size
     hidden = torch.randn(
@@ -1702,6 +1703,7 @@ def benchmark_expert_dispatch_sweep(args, device, dtype) -> dict[str, dict]:
     }
 
 
+@torch.inference_mode()
 def benchmark_mixed_expert_dispatch(
     args,
     device,
