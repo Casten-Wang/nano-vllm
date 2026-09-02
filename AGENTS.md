@@ -62,6 +62,10 @@
 
 ## Optimization Tracks
 
+- Maintain three explicit optimization tracks: memory/VRAM efficiency,
+  scheduling, and prefill/decode disaggregation. Every experiment must name
+  its baseline, target workload, success metrics, correctness oracle, and
+  fallback path before it can become a default.
 - Execute the tracks in evidence-driven stages: first establish memory-capacity
   accounting and allocation/lifetime instrumentation; next improve the
   colocated scheduler; then prototype prefill/decode disaggregation on top of
@@ -75,6 +79,10 @@
   prefill/decode traffic, fairness, preemption, and latency SLOs. Use
   deterministic workload traces and report both aggregate throughput and tail
   latency so one class of requests is not optimized at another's expense.
+- Evaluate scheduler decisions with prompt/decode length distributions,
+  prefix-cache hit patterns, KV-block pressure, request priorities, and
+  multi-GPU topology. Report TTFT, TPOT/ITL, p50/p95/p99 request latency,
+  throughput, starvation, preemption count, and recomputed tokens.
 - Optimize host and device memory from measured tensor lifetimes. Prefer safe
   reuse of stable workspaces, staging buffers, KV-cache storage, and recurrent
   state over repeated temporary allocation. Prove shape, dtype, stream/event,
@@ -84,6 +92,11 @@
   end-to-end latency measurements, plus tests that detect overlapping live
   ranges and stale data. Do not accept lower allocator traffic alone as proof
   of an end-to-end improvement.
+- For prefill/decode disaggregation, separate the work into placement and
+  routing, KV-transfer protocol, backpressure/failure handling, and scheduler
+  policy. Require an end-to-end comparison against the colocated path under
+  both steady and bursty traffic; do not infer a win from isolated transfer
+  bandwidth.
 - For these tracks, inspect current primary-source designs and relevant PRs in
   vLLM and SGLang, plus specialized systems such as Mooncake, Dynamo, DistServe,
   TensorRT-LLM, or PyTorch where applicable. Record why a design does or does
