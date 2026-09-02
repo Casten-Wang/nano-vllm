@@ -19,6 +19,11 @@ QUALITY_SCRIPT = ROOT / "scripts" / "benchmark_qwen35_quality_matrix.py"
 ONLINE_MIXED_SCRIPT = ROOT / "scripts" / "benchmark_online_mixed.py"
 SUMMARY_SCRIPT = ROOT / "scripts" / "summarize_qwen35_rental.py"
 CUDAGRAPH_PARITY_SCRIPT = ROOT / "scripts" / "verify_cudagraph_parity.py"
+REMOTE_CHECKPOINT_AUDIT_SCRIPT = (
+    ROOT / "scripts" / "audit_remote_checkpoint_headers.py"
+)
+OFFICIAL_CHECKPOINT_REPO = "Qwen/Qwen3.5-35B-A3B"
+OFFICIAL_CHECKPOINT_REVISION = "59d61f3ce65a6d9863b86d2e96597125219dc754"
 
 
 def parse_tp_sizes(value: str) -> tuple[int, ...]:
@@ -64,6 +69,25 @@ def commands(args: argparse.Namespace) -> list[tuple[str, list[str]]]:
         args.run_id,
     ]
     result = [
+        (
+            "official-checkpoint-audit",
+            [
+                sys.executable,
+                str(REMOTE_CHECKPOINT_AUDIT_SCRIPT),
+                "--repo",
+                OFFICIAL_CHECKPOINT_REPO,
+                "--revision",
+                OFFICIAL_CHECKPOINT_REVISION,
+                "--tp-sizes",
+                tp_sizes,
+                "--output",
+                str(
+                    root
+                    / "preflight"
+                    / "official_checkpoint_header_audit.json"
+                ),
+            ],
+        ),
         (
             "preflight",
             [
@@ -321,7 +345,12 @@ def collect_stage_artifacts(
     stage_name: str,
 ) -> list[Path]:
     root = Path(args.result_dir) / args.run_id
-    if stage_name == "preflight":
+    if stage_name == "official-checkpoint-audit":
+        required = [
+            root / "preflight" / "official_checkpoint_header_audit.json"
+        ]
+        search_root = root / "preflight"
+    elif stage_name == "preflight":
         required = [
             root / "preflight" / "checkpoint_mapping_audit.json",
             root / "preflight" / "memory_preflight.json",
@@ -372,7 +401,11 @@ def collect_stage_artifacts(
         )
     artifacts = (
         required
-        if stage_name in ("preflight", "final-summary")
+        if stage_name in (
+            "official-checkpoint-audit",
+            "preflight",
+            "final-summary",
+        )
         or stage_name.startswith("kernels-")
         or stage_name.startswith("attention-")
         or stage_name.startswith("mixed-")

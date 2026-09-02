@@ -36,6 +36,7 @@ def test_commands_are_fail_fast_and_cover_complete_validation_suite():
     stages = MODULE.commands(args())
 
     assert [name for name, _ in stages] == [
+        "official-checkpoint-audit",
         "preflight",
         "kernels-tp4",
         "mixed-tp4-r1",
@@ -59,9 +60,15 @@ def test_commands_are_fail_fast_and_cover_complete_validation_suite():
         "quality-matrix",
         "final-summary",
     ]
-    assert "--preflight-only" in stages[0][1]
-    assert stages[0][1][stages[0][1].index("--max-model-len") + 1] == "16384"
-    assert stages[1][1][stages[1][1].index("--tp-size") + 1] == "4"
+    official = stages[0][1]
+    assert (
+        official[official.index("--revision") + 1]
+        == MODULE.OFFICIAL_CHECKPOINT_REVISION
+    )
+    assert official[official.index("--tp-sizes") + 1] == "4,8"
+    assert "--preflight-only" in stages[1][1]
+    assert stages[1][1][stages[1][1].index("--max-model-len") + 1] == "16384"
+    assert stages[2][1][stages[2][1].index("--tp-size") + 1] == "4"
     commands = dict(stages)
     mixed = commands["mixed-tp4-r1"]
     assert mixed[mixed.index("--tensor-parallel-size") + 1] == "4"

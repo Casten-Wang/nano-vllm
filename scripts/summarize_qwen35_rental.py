@@ -25,6 +25,17 @@ LONG_PREFILL_MAX_ABS_ERROR = 0.05
 MIXED_MAX_COEFFICIENT_OF_VARIATION = 0.10
 NORMALIZATION_MAX_ABS_ERROR = 0.05
 BUFFER_REUSE_MAX_ABS_ERROR = 0.05
+OFFICIAL_CHECKPOINT_REPO = "Qwen/Qwen3.5-35B-A3B"
+OFFICIAL_CHECKPOINT_REVISION = "59d61f3ce65a6d9863b86d2e96597125219dc754"
+OFFICIAL_CONFIG_SHA256 = (
+    "5e4d7f74fec2f360eb9cfbfcd6ec0c4c76e684d3a11caaed259d9fd9bfbc7944"
+)
+OFFICIAL_INDEX_SHA256 = (
+    "d8d0b7ca4e61ae107e3e87a3ff21136b3ac7c789e64bb24267227ca804e04205"
+)
+OFFICIAL_HEADERS_SHA256 = (
+    "39753f429d8ce99ba181f00e068b36df4ecd2603c34df5352492b21d5a32878b"
+)
 
 
 def load_json(path: Path) -> dict:
@@ -513,6 +524,9 @@ def summarize_long_prefill(result: dict, *, expected_tp_size: int) -> dict:
 
 
 def summarize(run_dir: Path, run_id: str) -> dict:
+    official_audit = load_json(
+        run_dir / "preflight" / "official_checkpoint_header_audit.json"
+    )
     audit = load_json(run_dir / "preflight" / "checkpoint_mapping_audit.json")
     memory = load_json(run_dir / "preflight" / "memory_preflight.json")
     performance = load_json(
@@ -568,6 +582,20 @@ def summarize(run_dir: Path, run_id: str) -> dict:
     expected_tp_names = {
         f"tp{row['tensor_parallel_size']}" for row in performance["runs"]
     }
+    official_checkpoint_valid = (
+        official_audit.get("valid") is True
+        and official_audit.get("repo") == OFFICIAL_CHECKPOINT_REPO
+        and official_audit.get("resolved_revision")
+        == OFFICIAL_CHECKPOINT_REVISION
+        and official_audit.get("config_sha256") == OFFICIAL_CONFIG_SHA256
+        and official_audit.get("index_sha256") == OFFICIAL_INDEX_SHA256
+        and official_audit.get("headers_sha256") == OFFICIAL_HEADERS_SHA256
+        and set(official_audit.get("results", {})) == expected_tp_names
+        and all(
+            result.get("valid") is True
+            for result in official_audit.get("results", {}).values()
+        )
+    )
     memory_by_tp = summarize_memory_preflight(memory)
     attention = {}
     attention_valid = True
@@ -863,6 +891,7 @@ def summarize(run_dir: Path, run_id: str) -> dict:
         )
     )
     evidence = {
+        "official_checkpoint_headers_valid": official_checkpoint_valid,
         "checkpoint_mapping_valid": audit["valid"] and audit["complete"],
         "memory_preflight_valid": (
             memory["valid"] and set(memory_by_tp) == expected_tp_names
@@ -935,6 +964,18 @@ def summarize(run_dir: Path, run_id: str) -> dict:
         "valid": all(evidence.values()),
         "commits": sorted(commits),
         "checkpoint_digests": sorted(checkpoint_digests),
+        "official_checkpoint": {
+            key: official_audit[key]
+            for key in (
+                "repo",
+                "resolved_revision",
+                "config_sha256",
+                "index_sha256",
+                "headers_sha256",
+                "source_tensor_count",
+                "shard_count",
+            )
+        },
         "performance": {
             "best_throughput": best_throughput,
             "lowest_peak_memory": lowest_memory,

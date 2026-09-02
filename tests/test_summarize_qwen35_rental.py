@@ -174,6 +174,20 @@ def write_mixed_case(root):
 
 def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     run_id = "rental-a"
+    write(
+        tmp_path / "preflight/official_checkpoint_header_audit.json",
+        {
+            "valid": True,
+            "repo": MODULE.OFFICIAL_CHECKPOINT_REPO,
+            "resolved_revision": MODULE.OFFICIAL_CHECKPOINT_REVISION,
+            "config_sha256": MODULE.OFFICIAL_CONFIG_SHA256,
+            "index_sha256": MODULE.OFFICIAL_INDEX_SHA256,
+            "headers_sha256": MODULE.OFFICIAL_HEADERS_SHA256,
+            "source_tensor_count": 1811,
+            "shard_count": 14,
+            "results": {"tp4": {"valid": True}},
+        },
+    )
     write(tmp_path / "preflight/checkpoint_mapping_audit.json", {"valid": True, "complete": True})
     write(
         tmp_path / "preflight/memory_preflight.json",
