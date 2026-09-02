@@ -386,6 +386,7 @@ def chunk_gated_delta_rule(
     *,
     chunk_size: int = 64,
     inplace_state: bool = True,
+    materialize_decay_scaled_qk: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Matrix-based official Qwen3.5 prefill reference.
 
@@ -534,7 +535,19 @@ def chunk_gated_delta_rule(
         intra_attention = intra_attention * pairwise_decay
     else:
         intra_attention.mul_(pairwise_decay)
-    cumulative_decay_exp = cumulative_decay.exp()
+    if torch.is_grad_enabled():
+        cumulative_decay_exp = cumulative_decay.exp()
+        key_decay = (
+            cumulative_decay[..., -1:] - cumulative_decay
+        ).exp()
+    else:
+        # Pairwise decay is fully materialized above, so the cumulative
+        # workspace can now hold its exponential. Keep the key decay separate
+        # because it needs the original cumulative values.
+        key_decay = cumulative_decay[..., -1:] - cumulative_decay
+        key_decay.exp_()
+        cumulative_decay.exp_()
+        cumulative_decay_exp = cumulative_decay
     key_beta_scale = cumulative_decay_exp.unsqueeze(-1)
     if key_beta.requires_grad:
         decayed_key_beta = key_beta * key_beta_scale
@@ -595,16 +608,24 @@ def chunk_gated_delta_rule(
         if new_values.requires_grad
         else new_values
     )
-    query = query * cumulative_decay_exp.unsqueeze(-1)
-    key = key * (
-        cumulative_decay[..., -1:] - cumulative_decay
-    ).exp().unsqueeze(-1)
+    retained_decay_scaled_qk = None
+    if torch.is_grad_enabled():
+        query = query * cumulative_decay_exp.unsqueeze(-1)
+        key = key * key_decay.unsqueeze(-1)
+    elif materialize_decay_scaled_qk:
+        # Benchmark-only allocation baseline: retain the former expanded Q/K
+        # workspaces while the optimized contractions run unchanged.
+        retained_decay_scaled_qk = (
+            query * cumulative_decay_exp.unsqueeze(-1),
+            key * key_decay.unsqueeze(-1),
+        )
     chunk_decay = cumulative_decay_exp[..., -1, None, None]
     # The solves and decay projections no longer need these large
     # intermediates. Dropping the Python references before the sequential scan
     # lets the inference allocator reuse their storage for per-chunk results.
     del (
         decayed_key_beta,
+        decay,
         key_beta,
         key_beta_scale,
         pairwise_decay,
@@ -624,19 +645,43 @@ def chunk_gated_delta_rule(
             # another [batch, value_heads, chunk, value_dim] allocation live.
             chunk_values.sub_(state_prediction)
             corrected_value = chunk_values
-        state_update = (
-            key[:, :, :, chunk_index].transpose(-1, -2) @ corrected_value
-        )
-        output[:, :, :, chunk_index] = (
-            query[:, :, :, chunk_index] @ state
-            + intra_attention[:, :, :, chunk_index] @ corrected_value
-        )
+        if torch.is_grad_enabled():
+            state_update = (
+                key[:, :, :, chunk_index].transpose(-1, -2)
+                @ corrected_value
+            )
+            output[:, :, :, chunk_index] = (
+                query[:, :, :, chunk_index] @ state
+                + intra_attention[:, :, :, chunk_index] @ corrected_value
+            )
+        else:
+            # Applying decay after the query contraction avoids expanding Q
+            # from one key-head group to every value-head group. Materialize
+            # the intra-chunk contraction before reusing the correction buffer
+            # for key decay and the state update.
+            intra_output = (
+                intra_attention[:, :, :, chunk_index] @ corrected_value
+            )
+            corrected_value.mul_(
+                key_decay[:, :, :, chunk_index].unsqueeze(-1)
+            )
+            state_update = (
+                key[:, :, :, chunk_index].transpose(-1, -2)
+                @ corrected_value
+            )
+            chunk_output = query[:, :, :, chunk_index] @ state
+            chunk_output.mul_(
+                cumulative_decay_exp[:, :, :, chunk_index].unsqueeze(-1)
+            )
+            chunk_output.add_(intra_output)
+            output[:, :, :, chunk_index] = chunk_output
         if not reuse_state:
             state = (
                 state * chunk_decay[:, :, :, chunk_index] + state_update
             )
         else:
             state.mul_(chunk_decay[:, :, :, chunk_index]).add_(state_update)
+    del retained_decay_scaled_qk
     output = output.reshape(batch_size, value_heads, total_length, value_dim)
     output = output[:, :, :sequence_length].transpose(1, 2).contiguous()
     return output.to(input_dtype), state.reshape(

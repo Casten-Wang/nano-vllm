@@ -655,6 +655,64 @@ def test_chunk_rule_inference_reuses_solved_values_for_correction():
     torch.testing.assert_close(actual_state, expected_state, rtol=2e-4, atol=2e-4)
 
 
+def test_chunk_rule_inference_reuses_decay_and_contraction_workspaces():
+    torch.manual_seed(453)
+    query = torch.randn(2, 16, 2, 4)
+    key = torch.randn_like(query)
+    value = torch.randn(2, 16, 6, 3)
+    decay = -torch.rand(2, 16, 6)
+    beta = torch.rand(2, 16, 6)
+    tensors = (query, key, value, decay, beta)
+    expected, expected_state = recurrent_gated_delta_rule(
+        query.repeat_interleave(3, dim=2),
+        key.repeat_interleave(3, dim=2),
+        value,
+        decay,
+        beta,
+    )
+    scaled_workspace_ptrs = []
+    decay_workspace_ptrs = []
+    broadcast_projection_multiplies = []
+    original_multiply = torch.Tensor.mul_
+    original_out_of_place_multiply = torch.Tensor.__mul__
+    original_exp = torch.Tensor.exp_
+
+    def track_multiply(tensor, other, *args, **kwargs):
+        if tensor.shape == (2, 2, 3, 16, 3):
+            scaled_workspace_ptrs.append(tensor.data_ptr())
+        return original_multiply(tensor, other, *args, **kwargs)
+
+    def track_out_of_place_multiply(tensor, other):
+        if (
+            tensor.shape == (2, 2, 1, 1, 16, 4)
+            and other.shape == (2, 2, 3, 1, 16, 1)
+        ):
+            broadcast_projection_multiplies.append(tensor.data_ptr())
+        return original_out_of_place_multiply(tensor, other)
+
+    def track_exp(tensor, *args, **kwargs):
+        if tensor.shape == (2, 2, 3, 1, 16):
+            decay_workspace_ptrs.append(tensor.data_ptr())
+        return original_exp(tensor, *args, **kwargs)
+
+    with (
+        torch.inference_mode(),
+        patch.object(torch.Tensor, "mul_", track_multiply),
+        patch.object(torch.Tensor, "__mul__", track_out_of_place_multiply),
+        patch.object(torch.Tensor, "exp_", track_exp),
+    ):
+        actual, actual_state = chunk_gated_delta_rule(
+            *tensors,
+            chunk_size=16,
+        )
+
+    assert len(set(scaled_workspace_ptrs)) == 2
+    assert len(set(decay_workspace_ptrs)) == 2
+    assert broadcast_projection_multiplies == []
+    torch.testing.assert_close(actual, expected, rtol=2e-4, atol=2e-4)
+    torch.testing.assert_close(actual_state, expected_state, rtol=2e-4, atol=2e-4)
+
+
 @pytest.mark.parametrize("state_dtype", [torch.float32, torch.bfloat16])
 def test_chunk_rule_inference_reuses_recurrent_state_across_chunks(state_dtype):
     tensors = inputs(17)
@@ -664,7 +722,10 @@ def test_chunk_rule_inference_reuses_recurrent_state_across_chunks(state_dtype):
     original_multiply = torch.Tensor.mul_
 
     def record_state_multiply(tensor, other, *args, **kwargs):
-        if tensor.shape == (2, 3, 1, 4, 6):
+        if (
+            tensor.shape == (2, 3, 1, 4, 6)
+            and other.shape == (2, 3, 1, 1, 1)
+        ):
             state_updates.append(tensor.data_ptr())
         return original_multiply(tensor, other, *args, **kwargs)
 

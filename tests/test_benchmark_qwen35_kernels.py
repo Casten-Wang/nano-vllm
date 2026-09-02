@@ -965,6 +965,33 @@ def test_delta_prefill_state_reuse_compares_allocation_paths():
     assert all(item["max_abs_error"] == 0 for item in result["errors"])
 
 
+def test_delta_prefill_decay_workspace_benchmark_keeps_exact_baseline():
+    args = SimpleNamespace(
+        prefill_batch=2,
+        prefill_tokens=5,
+        key_head_dim=4,
+        value_head_dim=3,
+        warmup=0,
+        iterations=1,
+        repeats=1,
+    )
+
+    result = MODULE.benchmark_delta_prefill_decay_workspace_reuse(
+        args,
+        torch.device("cpu"),
+        torch.float32,
+        2,
+        6,
+        chunk_size=4,
+    )
+
+    assert result["eliminated_expanded_qk_allocations"] == 2
+    assert result["avoided_expanded_fp32_qk_mib"] == (
+        2 * 2 * 5 * 6 * 4 * 4 / 1024 / 1024
+    )
+    assert all(item["max_abs_error"] == 0 for item in result["errors"])
+
+
 def test_delta_decode_benchmark_records_state_workspace_reuse():
     args = SimpleNamespace(
         decode_batch=2,

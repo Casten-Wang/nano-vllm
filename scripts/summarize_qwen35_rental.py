@@ -1193,6 +1193,17 @@ def summarize(run_dir: Path, run_id: str) -> dict:
                 ),
             ),
         }
+        delta_prefill_decay = result["results"].get(
+            "delta_prefill_decay_workspace_reuse"
+        )
+        if delta_prefill_decay is not None:
+            buffer_reuse[tp_name]["delta_prefill_decay_workspace"] = (
+                summarize_buffer_reuse_candidate(
+                    delta_prefill_decay,
+                    ("avoided_expanded_fp32_qk_mib",),
+                    {"eliminated_expanded_qk_allocations": 2},
+                )
+            )
         kernels[tp_name] = {
             "promotion": {
                 "promote_to_runtime": all(

@@ -2551,6 +2551,90 @@ def benchmark_delta_prefill_state_reuse(
     return result
 
 
+def benchmark_delta_prefill_decay_workspace_reuse(
+    args,
+    device,
+    dtype,
+    local_key_heads,
+    local_value_heads,
+    chunk_size=64,
+) -> dict:
+    query = torch.randn(
+        args.prefill_batch,
+        args.prefill_tokens,
+        local_key_heads,
+        args.key_head_dim,
+        device=device,
+        dtype=dtype,
+    )
+    key = torch.randn_like(query)
+    value = torch.randn(
+        args.prefill_batch,
+        args.prefill_tokens,
+        local_value_heads,
+        args.value_head_dim,
+        device=device,
+        dtype=dtype,
+    )
+    decay = -torch.rand(
+        args.prefill_batch,
+        args.prefill_tokens,
+        local_value_heads,
+        device=device,
+    )
+    beta = torch.rand_like(decay, dtype=dtype)
+    state = torch.randn(
+        args.prefill_batch,
+        local_value_heads,
+        args.key_head_dim,
+        args.value_head_dim,
+        device=device,
+        dtype=torch.float32,
+    )
+
+    def run(materialize_decay_scaled_qk):
+        return GDN.chunk_gated_delta_rule(
+            query,
+            key,
+            value,
+            decay,
+            beta,
+            state,
+            chunk_size=chunk_size,
+            materialize_decay_scaled_qk=materialize_decay_scaled_qk,
+        )
+
+    with torch.inference_mode():
+        result = compare(
+            lambda: run(True),
+            lambda: run(False),
+            device=device,
+            warmup=args.warmup,
+            iterations=args.iterations,
+            repeats=args.repeats,
+        )
+    expanded_qk_elements = (
+        2
+        * args.prefill_batch
+        * args.prefill_tokens
+        * local_value_heads
+        * args.key_head_dim
+    )
+    result.update(
+        {
+            "chunk_size": chunk_size,
+            "avoided_expanded_fp32_qk_mib": (
+                expanded_qk_elements
+                * torch.empty((), dtype=torch.float32).element_size()
+                / 1024
+                / 1024
+            ),
+            "eliminated_expanded_qk_allocations": 2,
+        }
+    )
+    return result
+
+
 def benchmark_delta_prefill_chunk_sweep(
     args,
     device,
@@ -2945,6 +3029,15 @@ def main() -> None:
                 local_key_heads,
                 local_value_heads,
             ),
+            "delta_prefill_decay_workspace_reuse": (
+                benchmark_delta_prefill_decay_workspace_reuse(
+                    args,
+                    device,
+                    dtype,
+                    local_key_heads,
+                    local_value_heads,
+                )
+            ),
             "grouped_delta_prefill_chunk_sweep": (
                 benchmark_delta_prefill_chunk_sweep(
                     args,
@@ -3099,6 +3192,15 @@ def main() -> None:
                 dtype,
                 local_key_heads,
                 local_value_heads,
+            ),
+            "delta_prefill_decay_workspace_reuse": (
+                benchmark_delta_prefill_decay_workspace_reuse(
+                    args,
+                    device,
+                    dtype,
+                    local_key_heads,
+                    local_value_heads,
+                )
             ),
             "specialized_delta_decode": benchmark_delta_decode(
                 args,
