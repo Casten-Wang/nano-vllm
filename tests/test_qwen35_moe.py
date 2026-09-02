@@ -2,6 +2,7 @@ from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 import sys
 import types
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -360,6 +361,124 @@ def test_official_expert_count_matches_across_tp4_and_tp8():
                 for rank_experts in ranks
             )
         torch.testing.assert_close(actual, expected, rtol=3e-5, atol=3e-5)
+
+
+def test_sparse_moe_combines_tp_outputs_before_single_all_reduce():
+    config = SimpleNamespace(
+        hidden_size=4,
+        num_experts=4,
+        num_experts_per_tok=2,
+        moe_intermediate_size=8,
+        shared_expert_intermediate_size=8,
+        qwen35_moe_decode_backend="batched",
+        qwen35_moe_decode_chunk_size=2,
+    )
+    with (
+        patch.object(qwen35_moe.dist, "get_world_size", return_value=2),
+        patch.object(qwen35_moe.dist, "get_rank", return_value=0),
+        patch.object(linear.dist, "get_world_size", return_value=2),
+        patch.object(linear.dist, "get_rank", return_value=0),
+    ):
+        block = qwen35_moe.Qwen35SparseMoeBlock(config)
+    hidden = torch.randn(3, 4)
+    routed = torch.full_like(hidden, 2.0)
+    shared = torch.full_like(hidden, 4.0)
+    context_module = types.ModuleType("nanovllm.utils.context")
+    context_module.get_context = lambda: SimpleNamespace(is_prefill=False)
+    block.shared_expert_gate.weight.data.zero_()
+    topk_weights = torch.ones(3, 2)
+    topk_ids = torch.zeros(3, 2, dtype=torch.long)
+
+    with (
+        patch.dict(sys.modules, {"nanovllm.utils.context": context_module}),
+        patch.object(
+            block.gate,
+            "forward",
+            return_value=(topk_weights, topk_ids),
+        ),
+        patch.object(block.experts, "forward", return_value=routed) as experts,
+        patch.object(block.shared_expert, "forward", return_value=shared) as shared_expert,
+        patch.object(qwen35_moe.dist, "all_reduce", return_value=None) as all_reduce,
+    ):
+        output = block(hidden)
+
+    assert experts.call_count == 1
+    expert_args, expert_kwargs = experts.call_args
+    assert torch.equal(expert_args[0], hidden)
+    assert expert_args[1] is topk_ids
+    assert expert_args[2] is topk_weights
+    assert expert_kwargs == {"is_decode": True, "reduce_output": False}
+    assert shared_expert.call_args.kwargs == {"reduce_output": False}
+    assert all_reduce.call_count == 1
+    assert torch.equal(all_reduce.call_args.args[0], output)
+    torch.testing.assert_close(output, routed + 0.5 * shared)
+
+
+def test_combined_routed_and_shared_tp_partials_match_full_reference():
+    torch.manual_seed(61)
+
+    def make_components(rank, world_size):
+        with (
+            patch.object(qwen35_moe.dist, "get_world_size", return_value=world_size),
+            patch.object(qwen35_moe.dist, "get_rank", return_value=rank),
+            patch.object(linear.dist, "get_world_size", return_value=world_size),
+            patch.object(linear.dist, "get_rank", return_value=rank),
+        ):
+            experts = qwen35_moe.Qwen35Experts(4, 8, 4)
+            shared_expert = qwen35_moe.Qwen35SharedExpert(4, 8)
+        return experts, shared_expert
+
+    source_expert_gate_up = torch.randn(4, 16, 4)
+    source_expert_down = torch.randn(4, 4, 8)
+    source_shared_gate = torch.randn(8, 4)
+    source_shared_up = torch.randn(8, 4)
+    source_shared_down = torch.randn(4, 8)
+
+    def load(experts, shared_expert):
+        experts._load_gate_up(experts.gate_up_proj, source_expert_gate_up)
+        experts._load_down(experts.down_proj, source_expert_down)
+        shared_expert.gate_up_proj.weight_loader(
+            shared_expert.gate_up_proj.weight,
+            source_shared_gate,
+            0,
+        )
+        shared_expert.gate_up_proj.weight_loader(
+            shared_expert.gate_up_proj.weight,
+            source_shared_up,
+            1,
+        )
+        shared_expert.down_proj.weight_loader(
+            shared_expert.down_proj.weight,
+            source_shared_down,
+        )
+
+    full = make_components(0, 1)
+    ranks = [make_components(rank, 2) for rank in range(2)]
+    load(*full)
+    for components in ranks:
+        load(*components)
+
+    hidden = torch.randn(5, 4)
+    topk_ids = torch.randint(0, 4, (5, 2))
+    topk_weights = torch.rand(5, 2)
+    topk_weights /= topk_weights.sum(dim=-1, keepdim=True)
+    shared_gate = torch.sigmoid(torch.randn(5, 1))
+    expected = (
+        full[0](hidden, topk_ids, topk_weights)
+        + shared_gate * full[1](hidden)
+    )
+    actual = sum(
+        experts(
+            hidden,
+            topk_ids,
+            topk_weights,
+            reduce_output=False,
+        )
+        + shared_gate * shared_expert(hidden, reduce_output=False)
+        for experts, shared_expert in ranks
+    )
+
+    torch.testing.assert_close(actual, expected, rtol=3e-5, atol=3e-5)
 
 
 def test_expert_weights_are_sharded_and_replicable_across_tp_ranks():

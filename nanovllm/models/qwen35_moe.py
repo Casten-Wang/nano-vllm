@@ -182,6 +182,7 @@ class Qwen35Experts(nn.Module):
         topk_weights: torch.Tensor,
         *,
         is_decode: bool | None = None,
+        reduce_output: bool = True,
     ) -> torch.Tensor:
         output = torch.zeros_like(hidden_states)
         if is_decode is None:
@@ -195,7 +196,7 @@ class Qwen35Experts(nn.Module):
                 self.down_proj,
                 self.decode_chunk_size,
             )
-            if self.tp_size > 1:
+            if reduce_output and self.tp_size > 1:
                 dist.all_reduce(output)
             return output
         if hidden_states.shape[0] == 1:
@@ -216,7 +217,7 @@ class Qwen35Experts(nn.Module):
                 output.add_(
                     expert_output * topk_weights[0, route_index]
                 )
-            if self.tp_size > 1:
+            if reduce_output and self.tp_size > 1:
                 dist.all_reduce(output)
             return output
 
@@ -254,7 +255,7 @@ class Qwen35Experts(nn.Module):
             expert_output = expert_output * sorted_weights[offset:end].unsqueeze(-1)
             output.index_add_(0, token_index, expert_output.to(output.dtype))
             offset = end
-        if self.tp_size > 1:
+        if reduce_output and self.tp_size > 1:
             dist.all_reduce(output)
         return output
 
@@ -274,8 +275,20 @@ class Qwen35SharedExpert(nn.Module):
         )
         self.activation = SiluAndMul()
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        return self.down_proj(self.activation(self.gate_up_proj(hidden_states)))
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        *,
+        reduce_output: bool = True,
+    ) -> torch.Tensor:
+        activated = self.activation(self.gate_up_proj(hidden_states))
+        if reduce_output:
+            return self.down_proj(activated)
+        return F.linear(
+            activated,
+            self.down_proj.weight,
+            self.down_proj.bias if self.down_proj.tp_rank == 0 else None,
+        )
 
 
 class Qwen35SparseMoeBlock(nn.Module):
@@ -311,7 +324,11 @@ class Qwen35SparseMoeBlock(nn.Module):
             topk_ids,
             topk_weights,
             is_decode=not get_context().is_prefill,
+            reduce_output=False,
         )
-        shared = self.shared_expert(flat_states)
+        shared = self.shared_expert(flat_states, reduce_output=False)
         shared = torch.sigmoid(self.shared_expert_gate(flat_states)) * shared
-        return (routed + shared).reshape(original_shape)
+        output = routed + shared
+        if self.experts.tp_size > 1:
+            dist.all_reduce(output)
+        return output.reshape(original_shape)
