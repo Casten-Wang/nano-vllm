@@ -55,6 +55,13 @@ def write_attention_case(
             "max_abs_diff_vs_flash_reference": 0.015,
             "peak_extra_mib": 3.0,
         }
+        results["int8_partitioned_ps512_workspace_reuse"] = {
+            "status": "ok",
+            "median_ms": 0.85,
+            "max_abs_diff_vs_flash_reference": 0.015,
+            "peak_extra_mib": 0.0,
+            "speedup_vs_allocating": 0.9 / 0.85,
+        }
     write(
         root / f"attention/tp4/{name}.json",
         {
@@ -917,6 +924,9 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
         "int8_partitioned_ps512"
     )
     assert attention["long"]["partitioned_workspace_valid"]
+    assert attention["long"]["production_workspace_reuse"][
+        "promote_to_runtime"
+    ]
     memory = report["memory"]["by_tp"]["tp4"]
     assert memory["int8_kv_reduction_ratio"] == 0.49609375
     assert memory["minimum_budget_margin_bytes"] == 5_000
@@ -1063,6 +1073,47 @@ def test_partitioned_attention_requires_shared_workspace_evidence():
     assert summary["partitioned_correctness_valid"]
     assert not summary["partitioned_workspace_valid"]
     assert summary["max_allowed_abs_error"] == 0.05
+
+
+def test_partitioned_attention_reports_workspace_reuse_regression():
+    result = {
+        "results": {
+            "flash_reference": {"status": "ok", "median_ms": 2.0},
+            "int8_v3_bt256_w8_s2": {
+                "status": "ok",
+                "median_ms": 1.0,
+                "max_abs_diff_vs_flash_reference": 0.01,
+                "peak_extra_mib": 2.0,
+            },
+            "int8_partitioned_ps512": {
+                "status": "ok",
+                "median_ms": 0.9,
+                "max_abs_diff_vs_flash_reference": 0.01,
+                "peak_extra_mib": 3.0,
+            },
+            "int8_partitioned_ps512_workspace_reuse": {
+                "status": "ok",
+                "median_ms": 1.0,
+                "max_abs_diff_vs_flash_reference": 0.01,
+                "peak_extra_mib": 0.0,
+                "speedup_vs_allocating": 0.9,
+            },
+        },
+        "context_len": MODULE.ATTENTION_LONG_CONTEXT,
+        "batch_size": 4,
+        "shape_manifest": {
+            "workspace": {
+                "partitioned": {
+                    "512": {"allocation_count": 1, "shared_storage": True}
+                }
+            }
+        },
+    }
+
+    summary = MODULE.summarize_attention_case(result, partitioned=True)
+
+    assert summary["workspace_reuse_measurement_valid"]
+    assert not summary["production_workspace_reuse"]["promote_to_runtime"]
 
 
 def test_long_context_requires_production_partition_size():

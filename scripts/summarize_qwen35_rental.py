@@ -21,6 +21,7 @@ ATTENTION_LONG_CONTEXT = 16385
 ATTENTION_MAX_CONTEXT = 262143
 ATTENTION_MAX_ABS_ERROR = 0.05
 PRODUCTION_PARTITION_SIZE = 512
+ATTENTION_WORKSPACE_REUSE_MIN_SPEEDUP = 1.0
 LONG_PREFILL_TOKENS = 8192
 LONG_PREFILL_MAX_ABS_ERROR = 0.05
 MIXED_MAX_COEFFICIENT_OF_VARIATION = 0.10
@@ -507,7 +508,9 @@ def summarize_attention_case(result: dict, *, partitioned: bool) -> dict:
         }
 
     production_name = f"int8_partitioned_ps{PRODUCTION_PARTITION_SIZE}"
+    production_reuse_name = f"{production_name}_workspace_reuse"
     production_item = result["results"].get(production_name)
+    production_reuse_item = result["results"].get(production_reuse_name)
     production_accurate = (
         isinstance(production_item, dict)
         and production_item.get("status") == "ok"
@@ -532,6 +535,52 @@ def summarize_attention_case(result: dict, *, partitioned: bool) -> dict:
             and production_workspace.get("shared_storage") is True
         )
     )
+    workspace_reuse_measurement_valid = (
+        not partitioned
+        or (
+            isinstance(production_reuse_item, dict)
+            and production_reuse_item.get("status") == "ok"
+            and production_reuse_item.get(
+                "max_abs_diff_vs_flash_reference", math.inf
+            )
+            <= ATTENTION_MAX_ABS_ERROR
+            and math.isfinite(
+                production_reuse_item.get("speedup_vs_allocating", math.nan)
+            )
+            and production_reuse_item.get("speedup_vs_allocating", 0) > 0
+            and math.isfinite(
+                production_reuse_item.get("peak_extra_mib", math.nan)
+            )
+            and production_reuse_item.get("peak_extra_mib", -1) >= 0
+        )
+    )
+    workspace_reuse = None
+    if isinstance(production_reuse_item, dict):
+        speedup = production_reuse_item.get("speedup_vs_allocating", math.nan)
+        baseline_peak = (
+            production_item.get("peak_extra_mib", math.nan)
+            if isinstance(production_item, dict)
+            else math.nan
+        )
+        reuse_peak = production_reuse_item.get("peak_extra_mib", math.nan)
+        workspace_reuse = {
+            "backend": production_reuse_name,
+            "measurement_valid": workspace_reuse_measurement_valid,
+            "speedup_vs_allocating": speedup,
+            "allocating_peak_extra_mib": baseline_peak,
+            "reuse_peak_extra_mib": reuse_peak,
+            "avoided_peak_extra_mib": (
+                baseline_peak - reuse_peak
+                if math.isfinite(baseline_peak) and math.isfinite(reuse_peak)
+                else math.nan
+            ),
+            "promote_to_runtime": (
+                workspace_reuse_measurement_valid
+                and speedup >= ATTENTION_WORKSPACE_REUSE_MIN_SPEEDUP
+                and reuse_peak <= baseline_peak
+            ),
+            "minimum_speedup": ATTENTION_WORKSPACE_REUSE_MIN_SPEEDUP,
+        }
     return {
         "context_len": result["context_len"],
         "batch_size": result["batch_size"],
@@ -545,10 +594,12 @@ def summarize_attention_case(result: dict, *, partitioned: bool) -> dict:
             )
         ),
         "partitioned_workspace_valid": partitioned_workspace_valid,
+        "workspace_reuse_measurement_valid": workspace_reuse_measurement_valid,
         "best_fused": best_accurate(fused),
         "best_partitioned": best_accurate(partitioned_results),
         "production_partition_size": PRODUCTION_PARTITION_SIZE,
         "production_partitioned": production_summary,
+        "production_workspace_reuse": workspace_reuse,
     }
 
 
@@ -980,6 +1031,7 @@ def summarize(run_dir: Path, run_id: str) -> dict:
                 and cases[case_name]["fused_correctness_valid"]
                 and cases[case_name]["partitioned_correctness_valid"]
                 and cases[case_name]["partitioned_workspace_valid"]
+                and cases[case_name]["workspace_reuse_measurement_valid"]
             )
             commits.add(result["commit"])
             clean_worktrees = clean_worktrees and not result["git_dirty"]
