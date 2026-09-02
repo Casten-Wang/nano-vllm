@@ -188,7 +188,23 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
             "results": {"tp4": {"valid": True}},
         },
     )
-    write(tmp_path / "preflight/checkpoint_mapping_audit.json", {"valid": True, "complete": True})
+    write(
+        tmp_path / "preflight/checkpoint_mapping_audit.json",
+        {
+            "valid": True,
+            "complete": True,
+            "checkpoint_manifest": {
+                "digest": "weights",
+                "strength": "metadata-only",
+                "config_sha256": MODULE.OFFICIAL_CONFIG_SHA256,
+                "index_sha256": MODULE.OFFICIAL_INDEX_SHA256,
+                "shard_count": 14,
+                "present_shard_count": 14,
+                "missing_shards": [],
+                "total_size_bytes": 71_903_655_008,
+            },
+        },
+    )
     write(
         tmp_path / "preflight/memory_preflight.json",
         {
@@ -397,6 +413,12 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     report = MODULE.summarize(tmp_path, run_id)
 
     assert report["valid"]
+    assert report["evidence"]["official_checkpoint_headers_valid"]
+    assert report["evidence"]["local_checkpoint_matches_official"]
+    assert (
+        report["local_checkpoint_manifest"]["index_sha256"]
+        == MODULE.OFFICIAL_INDEX_SHA256
+    )
     assert report["performance"]["best_throughput"]["label"] == "batched"
     assert report["performance"]["lowest_peak_memory"]["label"] == "sorted"
     assert report["graph_safe_moe"]["all_tp_promoted"]
@@ -455,6 +477,20 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     assert memory["kv_capacity_by_dtype"]["int8"][
         "memory_limited_context_tokens_per_sequence"
     ] == 3_072
+
+    local_audit_path = tmp_path / "preflight/checkpoint_mapping_audit.json"
+    local_audit = json.loads(local_audit_path.read_text())
+    local_audit["checkpoint_manifest"]["index_sha256"] = "different"
+    write(local_audit_path, local_audit)
+    mismatched_checkpoint_report = MODULE.summarize(tmp_path, run_id)
+    assert not mismatched_checkpoint_report["evidence"][
+        "local_checkpoint_matches_official"
+    ]
+    assert not mismatched_checkpoint_report["valid"]
+    local_audit["checkpoint_manifest"][
+        "index_sha256"
+    ] = MODULE.OFFICIAL_INDEX_SHA256
+    write(local_audit_path, local_audit)
 
     mixed_path = tmp_path / "mixed/tp4/r1.json"
     mixed_result = json.loads(mixed_path.read_text())

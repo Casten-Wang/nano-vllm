@@ -596,6 +596,18 @@ def summarize(run_dir: Path, run_id: str) -> dict:
             for result in official_audit.get("results", {}).values()
         )
     )
+    local_checkpoint_manifest = audit.get("checkpoint_manifest", {})
+    local_checkpoint_identity_valid = (
+        local_checkpoint_manifest.get("config_sha256")
+        == official_audit.get("config_sha256")
+        and local_checkpoint_manifest.get("index_sha256")
+        == official_audit.get("index_sha256")
+        and local_checkpoint_manifest.get("shard_count")
+        == official_audit.get("shard_count")
+        and local_checkpoint_manifest.get("present_shard_count")
+        == official_audit.get("shard_count")
+        and not local_checkpoint_manifest.get("missing_shards")
+    )
     memory_by_tp = summarize_memory_preflight(memory)
     attention = {}
     attention_valid = True
@@ -892,6 +904,7 @@ def summarize(run_dir: Path, run_id: str) -> dict:
     )
     evidence = {
         "official_checkpoint_headers_valid": official_checkpoint_valid,
+        "local_checkpoint_matches_official": local_checkpoint_identity_valid,
         "checkpoint_mapping_valid": audit["valid"] and audit["complete"],
         "memory_preflight_valid": (
             memory["valid"] and set(memory_by_tp) == expected_tp_names
@@ -974,6 +987,19 @@ def summarize(run_dir: Path, run_id: str) -> dict:
                 "headers_sha256",
                 "source_tensor_count",
                 "shard_count",
+            )
+        },
+        "local_checkpoint_manifest": {
+            key: local_checkpoint_manifest.get(key)
+            for key in (
+                "digest",
+                "strength",
+                "config_sha256",
+                "index_sha256",
+                "shard_count",
+                "present_shard_count",
+                "missing_shards",
+                "total_size_bytes",
             )
         },
         "performance": {
