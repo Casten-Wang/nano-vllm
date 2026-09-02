@@ -6,9 +6,14 @@ import argparse
 import json
 from pathlib import Path
 import statistics
+import sys
 import time
 
 import torch
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from nanovllm.benchmark_metadata import collect_benchmark_metadata
 from nanovllm.layers.gptq_w4a16 import gptq_w4a16_linear
