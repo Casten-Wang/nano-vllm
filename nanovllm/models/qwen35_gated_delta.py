@@ -892,10 +892,11 @@ class Qwen35GatedDeltaNet(nn.Module):
         )
         if len(ranges) + decode_count != context.state_slots.numel():
             raise RuntimeError("sequence ranges and recurrent state slots differ")
-        if context.state_reset_mask is not None:
+        reset_slots = getattr(context, "state_reset_slots", None)
+        if reset_slots is None and context.state_reset_mask is not None:
             reset_slots = context.state_slots[context.state_reset_mask]
-            if reset_slots.numel():
-                self.state_pool.reset(reset_slots)
+        if reset_slots is not None and reset_slots.numel():
+            self.state_pool.reset(reset_slots)
 
         mixed_qkv = self.in_proj_qkv(hidden_states)
         z = self.in_proj_z(hidden_states)

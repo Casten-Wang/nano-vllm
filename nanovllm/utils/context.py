@@ -45,6 +45,17 @@ def build_state_prefill_groups(
     return tuple(result)
 
 
+def build_state_reset_slots(
+    state_slots: torch.Tensor | None,
+    state_reset_mask: torch.Tensor | None,
+) -> torch.Tensor | None:
+    """Select recurrent slots to reset once for reuse by every layer."""
+
+    if state_slots is None or state_reset_mask is None:
+        return None
+    return state_slots[state_reset_mask]
+
+
 @dataclass(slots=True)
 class Context:
     is_prefill: bool = False
@@ -76,6 +87,7 @@ class Context:
     prefill_dequant_block_ids: torch.Tensor | None = None
     prefill_dequant_block_tables: torch.Tensor | None = None
     state_reset_mask: torch.Tensor | None = None
+    state_reset_slots: torch.Tensor | None = None
     state_token_ranges: tuple[tuple[int, int], ...] = ()
     state_prefill_groups: tuple[StatePrefillGroup, ...] = ()
 
@@ -122,6 +134,10 @@ def set_context(
         state_slots,
         decode_token_count,
     )
+    state_reset_slots = build_state_reset_slots(
+        state_slots,
+        state_reset_mask,
+    )
     _CONTEXT = Context(
         is_prefill=is_prefill,
         cu_seqlens_q=cu_seqlens_q,
@@ -152,6 +168,7 @@ def set_context(
         prefill_dequant_block_ids=prefill_dequant_block_ids,
         prefill_dequant_block_tables=prefill_dequant_block_tables,
         state_reset_mask=state_reset_mask,
+        state_reset_slots=state_reset_slots,
         state_token_ranges=state_token_ranges,
         state_prefill_groups=state_prefill_groups,
     )

@@ -861,6 +861,31 @@ def test_decode_padding_scratch_slot_does_not_change_real_states():
     )
 
 
+def test_gated_delta_reuses_precomputed_reset_slots():
+    layer = make_layer()
+    layer.allocate_state_cache(1, "cpu")
+    context = SimpleNamespace(
+        is_mixed=False,
+        is_prefill=False,
+        state_slots=torch.tensor([0], dtype=torch.int64),
+        state_reset_mask=object(),
+        state_reset_slots=torch.tensor([0], dtype=torch.int64),
+        state_token_ranges=(),
+        state_prefill_groups=(),
+    )
+    context_module = types.ModuleType("nanovllm.utils.context")
+    context_module.get_context = lambda: context
+
+    with (
+        patch.dict(sys.modules, {"nanovllm.utils.context": context_module}),
+        patch.object(layer.state_pool, "reset", wraps=layer.state_pool.reset) as reset,
+    ):
+        layer(torch.randn(1, 4))
+
+    assert reset.call_count == 1
+    assert reset.call_args.args[0] is context.state_reset_slots
+
+
 def test_equal_length_prefills_batch_without_changing_results():
     torch.manual_seed(23)
     layer = make_layer()
