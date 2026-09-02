@@ -618,7 +618,7 @@ class ModelRunner:
         num_kv_heads = cache_plan.local_kv_heads
         head_dim = getattr(hf_config, "head_dim", hf_config.hidden_size // hf_config.num_attention_heads)
         kv_data_bytes = cache_plan.kv_bytes_per_token * self.block_size
-        scale_bytes = 2 * num_layers * self.block_size * num_kv_heads * dtype_nbytes(torch.float16)
+        scale_bytes = cache_plan.int8_scale_bytes_per_token * self.block_size
         block_bytes = kv_data_bytes + scale_bytes
         local_num_blocks = int(
             total * config.gpu_memory_utilization - used - peak + current
