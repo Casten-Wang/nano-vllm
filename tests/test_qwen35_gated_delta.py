@@ -450,6 +450,36 @@ def test_chunk_rule_inference_path_does_not_mutate_inputs():
         torch.testing.assert_close(actual, expected)
 
 
+@pytest.mark.parametrize("state_dtype", [torch.float32, torch.bfloat16])
+def test_chunk_rule_inference_reuses_recurrent_state_across_chunks(state_dtype):
+    tensors = inputs(17)
+    state = torch.randn(2, 3, 4, 6, dtype=state_dtype)
+    state_before = state.clone()
+    state_updates = []
+    original_multiply = torch.Tensor.mul_
+
+    def record_state_multiply(tensor, other, *args, **kwargs):
+        if tensor.shape == (2, 3, 1, 4, 6):
+            state_updates.append(tensor.data_ptr())
+        return original_multiply(tensor, other, *args, **kwargs)
+
+    with (
+        torch.inference_mode(),
+        patch.object(torch.Tensor, "mul_", record_state_multiply),
+    ):
+        _, next_state = chunk_gated_delta_rule(
+            *tensors,
+            initial_state=state,
+            chunk_size=4,
+        )
+
+    assert len(state_updates) >= 2
+    assert len(set(state_updates)) == 1
+    assert next_state.data_ptr() == state_updates[0]
+    assert next_state.data_ptr() != state.data_ptr()
+    torch.testing.assert_close(state, state_before)
+
+
 def test_grouped_chunk_rule_handles_empty_prefill():
     query = torch.empty(2, 0, 2, 4, dtype=torch.bfloat16)
     value = torch.empty(2, 0, 6, 3, dtype=torch.bfloat16)

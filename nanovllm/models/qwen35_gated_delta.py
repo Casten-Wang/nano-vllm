@@ -478,6 +478,15 @@ def chunk_gated_delta_rule(
                 f"expected {expected_state_shape}"
             )
         state = initial_state.float()
+        if (
+            not torch.is_grad_enabled()
+            and state.data_ptr() == initial_state.data_ptr()
+        ):
+            # The caller still owns its recurrent state. Copy it once so the
+            # chunk scan can reuse one state allocation without mutating the
+            # input or allocating a replacement for every chunk. A compressed
+            # input already received private storage from the fp32 conversion.
+            state = state.clone()
     state = state.reshape(batch_size, key_heads, groups, key_dim, value_dim)
     # In inference ``new_values`` is consumed one chunk at a time, so its
     # storage can hold the corresponding output after the correction has been
@@ -505,6 +514,7 @@ def chunk_gated_delta_rule(
         upper_mask,
         value_beta,
     )
+    reuse_state = not torch.is_grad_enabled()
     for chunk_index in range(num_chunks):
         corrected_value = (
             new_values[:, :, :, chunk_index]
@@ -514,10 +524,15 @@ def chunk_gated_delta_rule(
             query[:, :, :, chunk_index] @ state
             + intra_attention[:, :, :, chunk_index] @ corrected_value
         )
-        state = (
-            state * chunk_decay[:, :, :, chunk_index]
-            + key[:, :, :, chunk_index].transpose(-1, -2) @ corrected_value
+        state_update = (
+            key[:, :, :, chunk_index].transpose(-1, -2) @ corrected_value
         )
+        if not reuse_state:
+            state = (
+                state * chunk_decay[:, :, :, chunk_index] + state_update
+            )
+        else:
+            state.mul_(chunk_decay[:, :, :, chunk_index]).add_(state_update)
     output = output.reshape(batch_size, value_heads, total_length, value_dim)
     output = output[:, :, :sequence_length].transpose(1, 2).contiguous()
     return output.to(input_dtype), state.reshape(
