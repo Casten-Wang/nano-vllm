@@ -83,7 +83,8 @@ final diff and changed files, exact commit SHA(s), focused and full test
 results, known limitations, and the proposed PR title and body. After approval,
 submit only that reviewed revision. If the code or PR text changes materially,
 request approval again. The same rule applies to updating, reopening, or
-closing an existing upstream PR.
+closing an existing upstream PR. A review-ready candidate remains local until
+then and does not pause ongoing development in this fork.
 
 Upstream contribution branches must start from the upstream repository rather
 than this fork's `main`:

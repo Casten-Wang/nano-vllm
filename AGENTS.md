@@ -60,6 +60,8 @@
   changed-file list, commit history, focused and full test results, known
   limitations, and proposed PR title and body. Submit only the reviewed commit
   SHA and text; any material change requires renewed approval.
+- Keep review-ready upstream candidates local and record them for later user
+  review. Waiting for that review must not block normal fork development.
 - Start an upstream contribution from `upstream/main` on an
   `upstream-fix/<topic>` branch. Reproduce the problem on unmodified upstream
   first.
