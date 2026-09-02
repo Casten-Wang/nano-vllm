@@ -82,8 +82,8 @@ class Scheduler:
             result = self.schedule_legacy()
         seqs = result.seqs if isinstance(result, ScheduleResult) else result[0]
         if self.state_manager is not None:
-            for seq in seqs:
-                slot = self.state_manager.acquire(seq.seq_id)
+            slots = self.state_manager.acquire_many(seq.seq_id for seq in seqs)
+            for seq, slot in zip(seqs, slots):
                 if seq.state_slot is not None and seq.state_slot != slot:
                     raise RuntimeError("sequence recurrent state slot changed unexpectedly")
                 seq.state_slot = slot
