@@ -744,7 +744,11 @@ def summarize(run_dir: Path, run_id: str) -> dict:
             ),
             "gated_delta_decay": summarize_buffer_reuse_candidate(
                 result["results"]["gated_delta_decay_rate_precompute"],
-                ("precomputed_decay_rate_mib",),
+                (
+                    "precomputed_decay_rate_mib",
+                    "reused_decay_projection_fp32_mib",
+                    "reused_softplus_output_mib",
+                ),
             ),
         }
         kernels[tp_name] = {

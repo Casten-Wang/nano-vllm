@@ -949,9 +949,18 @@ class Qwen35GatedDeltaNet(nn.Module):
             if not torch.is_grad_enabled() and self._decay_rate is not None
             else -self.A_log.float().exp()
         )
-        log_decay = decay_rate * F.softplus(
-            a.float() + self.dt_bias
-        )
+        if torch.is_grad_enabled():
+            log_decay = decay_rate * F.softplus(
+                a.float() + self.dt_bias
+            )
+        else:
+            # Reuse both short-lived FP32 intermediates: the converted
+            # projection can absorb the bias, and the softplus output can
+            # become the final log-decay tensor.
+            a_float = a.float()
+            a_float.add_(self.dt_bias)
+            log_decay = F.softplus(a_float)
+            log_decay.mul_(decay_rate)
         # The gate projection is consumed before each slice is written. During
         # inference its storage can therefore hold normalized GDN outputs and
         # avoid another token_count x local_value_dim allocation. Autograd may

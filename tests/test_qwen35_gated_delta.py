@@ -1001,21 +1001,32 @@ def test_gated_delta_reuses_beta_projection_during_inference():
     context_module = types.ModuleType("nanovllm.utils.context")
     context_module.get_context = lambda: context
     original_decode = layer._decode_batch
+    original_softplus = qwen35_gated_delta.F.softplus
     observed = {}
 
     def capture_beta(mixed_qkv, z, beta, log_decay, slots):
         observed["same_storage"] = beta.data_ptr() == projected_beta.data_ptr()
+        observed["decay_reuses_softplus"] = (
+            log_decay.data_ptr() == observed["softplus_output"]
+        )
         return original_decode(mixed_qkv, z, beta, log_decay, slots)
+
+    def capture_softplus(value):
+        result = original_softplus(value)
+        observed["softplus_output"] = result.data_ptr()
+        return result
 
     with (
         torch.inference_mode(),
         patch.dict(sys.modules, {"nanovllm.utils.context": context_module}),
         patch.object(layer.in_proj_b, "forward", return_value=projected_beta),
+        patch.object(qwen35_gated_delta.F, "softplus", side_effect=capture_softplus),
         patch.object(layer, "_decode_batch", side_effect=capture_beta),
     ):
         layer(torch.randn(1, 4))
 
     assert observed["same_storage"]
+    assert observed["decay_reuses_softplus"]
     torch.testing.assert_close(
         projected_beta,
         torch.sigmoid(torch.tensor([[0.0, 1.0, -1.0, 2.0]])),

@@ -114,6 +114,8 @@ def test_decay_rate_benchmark_reports_precomputed_storage():
     )
 
     assert result["precomputed_decay_rate_mib"] == 4 * 4 / 1024 / 1024
+    assert result["reused_decay_projection_fp32_mib"] == 8 * 4 * 4 / 1024 / 1024
+    assert result["reused_softplus_output_mib"] == 8 * 4 * 4 / 1024 / 1024
     assert result["errors"][0]["max_abs_error"] == 0
 
 

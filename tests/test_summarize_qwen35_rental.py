@@ -393,6 +393,8 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
                     "speedup": 1.01,
                     "errors": [{"max_abs_error": 0.0}],
                     "precomputed_decay_rate_mib": 0.001,
+                    "reused_decay_projection_fp32_mib": 0.01,
+                    "reused_softplus_output_mib": 0.01,
                 },
                 "moe_output_buffer_reuse": {
                     "reference": {"peak_extra_mib": 12.0},

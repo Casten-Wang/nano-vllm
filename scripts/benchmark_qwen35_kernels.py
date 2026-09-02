@@ -850,7 +850,11 @@ def benchmark_decay_rate(args, device, dtype, local_value_heads: int) -> dict:
 
     def candidate():
         a = F.linear(hidden, weight)
-        return (decay_rate * F.softplus(a.float() + dt_bias),)
+        a_float = a.float()
+        a_float.add_(dt_bias)
+        log_decay = F.softplus(a_float)
+        log_decay.mul_(decay_rate)
+        return (log_decay,)
 
     result = compare(
         reference,
@@ -863,6 +867,11 @@ def benchmark_decay_rate(args, device, dtype, local_value_heads: int) -> dict:
     result["precomputed_decay_rate_mib"] = (
         decay_rate.numel() * decay_rate.element_size() / 1024 / 1024
     )
+    reused_workspace_mib = (
+        args.router_tokens * local_value_heads * 4 / 1024 / 1024
+    )
+    result["reused_decay_projection_fp32_mib"] = reused_workspace_mib
+    result["reused_softplus_output_mib"] = reused_workspace_mib
     return result
 
 
