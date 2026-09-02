@@ -16,6 +16,11 @@ ROOT = Path(__file__).resolve().parents[1]
 QUALITY_SCRIPT = ROOT / "scripts" / "measure_kv_quality_teacher_forcing.py"
 AUDIT_SCRIPT = ROOT / "scripts" / "audit_checkpoint_mapping.py"
 CROSS_TP_MAX_TARGET_LOGPROB_DIFF = 0.05
+MIN_INT8_TOP1_AGREEMENT = 0.98
+MAX_INT8_JS_DIVERGENCE = 0.01
+MAX_INT8_PPL_RELATIVE_CHANGE = 0.10
+MAX_MODEL_STATE_BF16_PPL_RELATIVE_CHANGE = 0.05
+MAX_MODEL_STATE_INT8_PPL_RELATIVE_CHANGE = 0.10
 
 
 @dataclass(frozen=True)
@@ -218,6 +223,35 @@ def summarize_results(
                     ),
                 }
             )
+    per_case_quality = [
+        {
+            "tensor_parallel_size": row["tensor_parallel_size"],
+            "recurrent_state_dtype": row["recurrent_state_dtype"],
+            "int8_ppl": abs(row["int8_kv_relative_change"])
+            <= MAX_INT8_PPL_RELATIVE_CHANGE,
+            "int8_top1": row["decode_top1_agreement"]
+            >= MIN_INT8_TOP1_AGREEMENT,
+            "int8_js": row["decode_js_divergence"]
+            <= MAX_INT8_JS_DIVERGENCE,
+        }
+        for row in rows
+    ]
+    per_tp_quality = {
+        tp_name: {
+            "model_state_bf16_ppl": abs(
+                comparison["model_state_bf16_kv_relative_change"]
+            )
+            <= MAX_MODEL_STATE_BF16_PPL_RELATIVE_CHANGE,
+            "model_state_int8_ppl": abs(
+                comparison["model_state_int8_kv_relative_change"]
+            )
+            <= MAX_MODEL_STATE_INT8_PPL_RELATIVE_CHANGE,
+        }
+        for tp_name, comparison in by_tp.items()
+    }
+    quality_gates_passed = all(
+        all(checks.values()) for checks in per_case_quality
+    ) and all(all(checks.values()) for checks in per_tp_quality.values())
     return {
         "quality_scope": "teacher-forced decode tokens that read stored KV cache",
         "cases": rows,
@@ -229,6 +263,24 @@ def summarize_results(
                 item["passed"] for item in cross_tp_comparisons
             ),
             "comparisons": cross_tp_comparisons,
+        },
+        "quality_gates": {
+            "all_passed": quality_gates_passed,
+            "thresholds": {
+                "min_int8_top1_agreement": MIN_INT8_TOP1_AGREEMENT,
+                "max_int8_js_divergence": MAX_INT8_JS_DIVERGENCE,
+                "max_abs_int8_ppl_relative_change": (
+                    MAX_INT8_PPL_RELATIVE_CHANGE
+                ),
+                "max_abs_model_state_bf16_ppl_relative_change": (
+                    MAX_MODEL_STATE_BF16_PPL_RELATIVE_CHANGE
+                ),
+                "max_abs_model_state_int8_ppl_relative_change": (
+                    MAX_MODEL_STATE_INT8_PPL_RELATIVE_CHANGE
+                ),
+            },
+            "per_case": per_case_quality,
+            "per_tp": per_tp_quality,
         },
     }
 

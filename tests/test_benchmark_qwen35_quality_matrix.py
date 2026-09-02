@@ -36,7 +36,15 @@ def args(**overrides):
     return Namespace(**values)
 
 
-def summary(ppl_bf16, ppl_int8, *, top1=7, logprob=-2.0):
+def summary(
+    ppl_bf16,
+    ppl_int8,
+    *,
+    top1=7,
+    logprob=-2.0,
+    top1_agreement=0.99,
+    js_divergence=0.001,
+):
     return {
         "case_token_digest": "cases",
         "batches": [
@@ -56,8 +64,8 @@ def summary(ppl_bf16, ppl_int8, *, top1=7, logprob=-2.0):
                 "relative_change": ppl_int8 / ppl_bf16 - 1.0,
             },
             "decode_aggregate": {
-                "top1_agreement": 0.99,
-                "js_divergence": 0.001,
+                "top1_agreement": top1_agreement,
+                "js_divergence": js_divergence,
             },
             "kv_sensitive_token_rows_compared": 100,
         }
@@ -117,6 +125,25 @@ def test_matrix_summary_requires_cross_tp_logit_parity():
     assert model_comparison["modes"]["bf16"][
         "max_target_logprob_diff"
     ] == pytest.approx(0.06)
+
+
+def test_matrix_summary_rejects_int8_quality_regression():
+    cases = {
+        MODULE.QualityCase(4, "float32"): summary(
+            10.0,
+            10.5,
+            top1_agreement=0.97,
+        ),
+        MODULE.QualityCase(4, "model"): summary(10.2, 10.8),
+    }
+
+    result = MODULE.summarize_results(cases)
+
+    assert not result["quality_gates"]["all_passed"]
+    assert not result["quality_gates"]["per_case"][0]["int8_top1"]
+    assert result["quality_gates"]["thresholds"][
+        "min_int8_top1_agreement"
+    ] == 0.98
 
 
 def test_cases_file_is_forwarded():
