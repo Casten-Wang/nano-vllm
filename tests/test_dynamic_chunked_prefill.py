@@ -607,6 +607,39 @@ def test_fairness_reserve_keeps_half_of_multi_token_budget_for_decode():
     assert waiting.num_scheduled_tokens == 2
 
 
+def test_fairness_reserve_does_not_waste_budget_on_short_prefill():
+    scheduler = make_scheduler(
+        max_tokens=8,
+        max_seqs=9,
+        block_size=4,
+        starvation_token_budget=256,
+    )
+    scheduler.prefill_starvation_threshold = 1
+    running = []
+    for token in range(8):
+        seq = Sequence([token + 1] * 4)
+        scheduler.block_manager.allocate(seq, 0)
+        seq.status = SequenceStatus.RUNNING
+        seq.is_prefill = False
+        seq.num_cached_tokens = len(seq)
+        scheduler.running.append(seq)
+        running.append(seq)
+    waiting = Sequence([99])
+    scheduler.waiting.append(waiting)
+
+    first = scheduler.schedule()
+    assert first.decode_seqs == running
+    assert first.prefill_seqs == []
+    scheduler.postprocess_mixed(first, [100] * len(first.seqs))
+
+    second = scheduler.schedule()
+
+    assert len(second.decode_seqs) == 7
+    assert second.prefill_seqs == [waiting]
+    assert waiting.num_scheduled_tokens == 1
+    assert second.num_decode_tokens + second.num_prefill_tokens == 8
+
+
 def test_kv_pressure_workload_preempts_and_eventually_completes():
     scheduler = make_scheduler(
         max_tokens=2048,

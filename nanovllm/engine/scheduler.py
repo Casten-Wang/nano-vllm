@@ -361,9 +361,15 @@ class Scheduler:
             # Reserve a useful prefill chunk instead of merely one token, but
             # retain at least half of a multi-token step for decode latency.
             reserve_cap = max(1, self.max_num_batched_tokens // 2)
+            head = self.waiting[0]
+            head_remaining_tokens = max(
+                head.num_tokens - head.num_cached_tokens,
+                0,
+            )
             prefill_reserve = min(
                 self.prefill_starvation_token_budget,
                 reserve_cap,
+                head_remaining_tokens,
             )
             decode_budget = max(decode_budget - prefill_reserve, 0)
         decode_seqs = self.schedule_decode_first(decode_budget)
