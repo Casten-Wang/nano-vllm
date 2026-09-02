@@ -31,6 +31,7 @@ MIXED_MOE_MAX_PEAK_EXTRA_MIB = 64.0
 MIXED_MOE_MAX_ABS_ERROR = 0.05
 KVCACHE_BLOCK_SIZE = 256
 OFFICIAL_CHECKPOINT_REPO = "Qwen/Qwen3.5-35B-A3B"
+OFFICIAL_SKIPPED_WEIGHT_GROUPS = {"model.visual": 333, "mtp": 785}
 OFFICIAL_CHECKPOINT_REVISION = "59d61f3ce65a6d9863b86d2e96597125219dc754"
 OFFICIAL_CONFIG_SHA256 = (
     "5e4d7f74fec2f360eb9cfbfcd6ec0c4c76e684d3a11caaed259d9fd9bfbc7944"
@@ -1337,7 +1338,15 @@ def summarize(run_dir: Path, run_id: str) -> dict:
     evidence = {
         "official_checkpoint_headers_valid": official_checkpoint_valid,
         "local_checkpoint_matches_official": local_checkpoint_identity_valid,
-        "checkpoint_mapping_valid": audit["valid"] and audit["complete"],
+        "checkpoint_mapping_valid": (
+            audit["valid"]
+            and audit["complete"]
+            and all(
+                result.get("skipped_tensor_groups")
+                == OFFICIAL_SKIPPED_WEIGHT_GROUPS
+                for result in audit.get("results", {}).values()
+            )
+        ),
         "memory_preflight_valid": (
             memory["valid"] and set(memory_by_tp) == expected_tp_names
         ),

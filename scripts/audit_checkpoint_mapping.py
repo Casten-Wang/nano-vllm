@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 from glob import glob
 from importlib.util import find_spec
 import json
@@ -204,6 +205,15 @@ def audit_checkpoint_mapping(model: torch.nn.Module, model_path: str | Path) -> 
             record_source(source_name)
 
     missing = sorted(expected - loaded)
+    skipped_groups = Counter()
+    for source_name in skipped:
+        parts = source_name.split(".")
+        group = (
+            ".".join(parts[:2])
+            if len(parts) > 1 and parts[0] == "model"
+            else parts[0]
+        )
+        skipped_groups[group] += 1
     return {
         "scope": (
             "parameter names and shapes from safetensors headers; tensor values are not read"
@@ -217,6 +227,7 @@ def audit_checkpoint_mapping(model: torch.nn.Module, model_path: str | Path) -> 
         "expected_parameter_count": len(expected),
         "mapped_parameter_count": len(loaded),
         "skipped_tensor_count": len(skipped),
+        "skipped_tensor_groups": dict(sorted(skipped_groups.items())),
         "missing_parameters": missing,
         "unexpected_weights": unexpected,
         "shape_errors": shape_errors,

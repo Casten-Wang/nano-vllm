@@ -220,6 +220,14 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
         {
             "valid": True,
             "complete": True,
+            "results": {
+                "tp4": {
+                    "skipped_tensor_groups": {
+                        "model.visual": 333,
+                        "mtp": 785,
+                    }
+                }
+            },
             "checkpoint_manifest": {
                 "digest": "weights",
                 "strength": "metadata-only",
@@ -924,6 +932,14 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     local_audit["checkpoint_manifest"][
         "index_sha256"
     ] = MODULE.OFFICIAL_INDEX_SHA256
+    write(local_audit_path, local_audit)
+
+    local_audit["results"]["tp4"]["skipped_tensor_groups"]["other"] = 1
+    write(local_audit_path, local_audit)
+    unexpected_skip_report = MODULE.summarize(tmp_path, run_id)
+    assert not unexpected_skip_report["evidence"]["checkpoint_mapping_valid"]
+    assert not unexpected_skip_report["valid"]
+    del local_audit["results"]["tp4"]["skipped_tensor_groups"]["other"]
     write(local_audit_path, local_audit)
 
     mixed_path = tmp_path / "mixed/tp4/r1.json"

@@ -1,5 +1,6 @@
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
+import json
 from types import SimpleNamespace
 import types
 from unittest.mock import patch
@@ -94,3 +95,32 @@ def test_meta_model_falls_back_when_only_flash_attention_is_missing(monkeypatch)
 
     assert isinstance(model, torch.nn.Module)
     assert len(calls) == 1
+
+
+def test_mapping_audit_classifies_intentionally_skipped_weights(tmp_path):
+    class Model(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.empty(1))
+
+        @staticmethod
+        def map_weight_name(name):
+            if name.startswith("model.visual.") or name.startswith("mtp."):
+                return None
+            return name
+
+    index = {
+        "weight_map": {
+            "weight": "model.safetensors",
+            "model.visual.patch.weight": "model.safetensors",
+            "mtp.layers.0.weight": "model.safetensors",
+            "mtp.norm.weight": "model.safetensors",
+        }
+    }
+    (tmp_path / "model.safetensors.index.json").write_text(json.dumps(index))
+
+    result = MODULE.audit_checkpoint_mapping(Model(), tmp_path)
+
+    assert result["valid"]
+    assert result["skipped_tensor_count"] == 3
+    assert result["skipped_tensor_groups"] == {"model.visual": 1, "mtp": 2}
