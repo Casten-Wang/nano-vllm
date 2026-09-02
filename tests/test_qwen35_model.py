@@ -37,8 +37,10 @@ class FakeNorm(nn.Module):
     def __init__(self, hidden_size, eps=1e-6):
         super().__init__()
         self.weight = nn.Parameter(torch.zeros(hidden_size))
+        self.last_inplace_output = None
 
-    def forward(self, x):
+    def forward(self, x, *, inplace_output=False):
+        self.last_inplace_output = inplace_output
         return x
 
 
@@ -127,6 +129,7 @@ def test_text_model_uses_declared_hybrid_layer_pattern():
     hidden = model(torch.tensor([1, 2]), torch.tensor([0, 1]))
     assert hidden.shape == (2, 4)
     assert model.compute_logits(hidden).shape == (2, 17)
+    assert model.model.norm.last_inplace_output is True
 
 
 def test_residual_merge_reuses_branch_output_during_inference():

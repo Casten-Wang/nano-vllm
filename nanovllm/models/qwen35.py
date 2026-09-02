@@ -77,7 +77,10 @@ class Qwen35Model(nn.Module):
         hidden_states = self.embed_tokens(input_ids)
         for layer in self.layers:
             hidden_states = layer(positions, hidden_states)
-        return self.norm(hidden_states)
+        # The final hidden state has no residual consumer. Reuse its storage
+        # for inference instead of allocating another [tokens, hidden_size]
+        # output; Qwen35RMSNorm keeps the autograd path out of place.
+        return self.norm(hidden_states, inplace_output=True)
 
 
 class Qwen3_5MoeForCausalLM(nn.Module):
