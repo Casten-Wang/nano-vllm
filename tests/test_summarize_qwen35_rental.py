@@ -18,7 +18,14 @@ def write(path, value):
     path.write_text(json.dumps(value))
 
 
-def write_attention_case(root, name, context_len, *, partitioned):
+def write_attention_case(
+    root,
+    name,
+    context_len,
+    *,
+    partitioned,
+    max_abs_diff=0.01,
+):
     results = {
         "flash_reference": {
             "status": "ok",
@@ -27,7 +34,7 @@ def write_attention_case(root, name, context_len, *, partitioned):
         "int8_v3_bt256_w8_s2": {
             "status": "ok",
             "median_ms": 1.0,
-            "max_abs_diff_vs_flash_reference": 0.01,
+            "max_abs_diff_vs_flash_reference": max_abs_diff,
             "peak_extra_mib": 2.0,
         },
     }
@@ -188,6 +195,28 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     assert attention["long"]["best_partitioned"]["backend"] == (
         "int8_partitioned_ps256"
     )
+
+
+def test_summary_rejects_inaccurate_attention_kernel(tmp_path):
+    result = {
+        "results": {
+            "flash_reference": {"status": "ok", "median_ms": 2.0},
+            "int8_v3_bt256_w8_s2": {
+                "status": "ok",
+                "median_ms": 0.5,
+                "max_abs_diff_vs_flash_reference": 0.051,
+                "peak_extra_mib": 1.0,
+            },
+        },
+        "context_len": 4096,
+        "batch_size": 4,
+    }
+
+    summary = MODULE.summarize_attention_case(result, partitioned=False)
+
+    assert not summary["fused_correctness_valid"]
+    assert summary["best_fused"] is None
+    assert summary["max_allowed_abs_error"] == 0.05
 
 
 def test_runtime_promotion_rejects_unstable_or_regressing_candidate():

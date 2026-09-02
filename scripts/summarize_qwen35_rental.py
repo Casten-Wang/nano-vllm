@@ -16,6 +16,7 @@ QWEN35_KV_HEADS_PER_RANK = 1
 QWEN35_HEAD_DIM = 256
 ATTENTION_SHORT_CONTEXT = 4096
 ATTENTION_LONG_CONTEXT = 16384
+ATTENTION_MAX_ABS_ERROR = 0.05
 
 
 def load_json(path: Path) -> dict:
@@ -162,10 +163,16 @@ def summarize_attention_case(result: dict, *, partitioned: bool) -> dict:
             "long-context attention benchmark has no successful partitioned kernel"
         )
 
-    def best(items: list[tuple[str, dict]]) -> dict | None:
-        if not items:
+    def best_accurate(items: list[tuple[str, dict]]) -> dict | None:
+        accurate = [
+            pair
+            for pair in items
+            if pair[1]["max_abs_diff_vs_flash_reference"]
+            <= ATTENTION_MAX_ABS_ERROR
+        ]
+        if not accurate:
             return None
-        name, item = min(items, key=lambda pair: pair[1]["median_ms"])
+        name, item = min(accurate, key=lambda pair: pair[1]["median_ms"])
         return {
             "backend": name,
             "median_ms": item["median_ms"],
@@ -181,8 +188,13 @@ def summarize_attention_case(result: dict, *, partitioned: bool) -> dict:
     return {
         "context_len": result["context_len"],
         "batch_size": result["batch_size"],
-        "best_fused": best(fused),
-        "best_partitioned": best(partitioned_results),
+        "max_allowed_abs_error": ATTENTION_MAX_ABS_ERROR,
+        "fused_correctness_valid": best_accurate(fused) is not None,
+        "partitioned_correctness_valid": (
+            not partitioned or best_accurate(partitioned_results) is not None
+        ),
+        "best_fused": best_accurate(fused),
+        "best_partitioned": best_accurate(partitioned_results),
     }
 
 
@@ -260,6 +272,11 @@ def summarize(run_dir: Path, run_id: str) -> dict:
                 "dimensions_valid": dimensions_valid,
                 **summarize_attention_case(result, partitioned=partitioned),
             }
+            attention_valid = (
+                attention_valid
+                and cases[case_name]["fused_correctness_valid"]
+                and cases[case_name]["partitioned_correctness_valid"]
+            )
             commits.add(result["commit"])
             clean_worktrees = clean_worktrees and not result["git_dirty"]
         attention[tp_name] = cases
