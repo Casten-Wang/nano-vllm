@@ -1,3 +1,4 @@
+from contextlib import nullcontext
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 import sys
@@ -550,6 +551,48 @@ def test_gated_delta_layer_chunked_prefill_matches_one_shot():
     torch.testing.assert_close(torch.cat((first, second)), expected)
     torch.testing.assert_close(layer.state_pool.recurrent[:, 1], expected_recurrent)
     torch.testing.assert_close(layer.state_pool.convolution[:, 1], expected_convolution)
+
+
+@pytest.mark.parametrize(
+    ("grad_enabled", "shares_storage"),
+    [(False, True), (True, False)],
+)
+def test_gated_delta_reuses_gate_projection_only_in_inference(
+    grad_enabled,
+    shares_storage,
+):
+    torch.manual_seed(7)
+    layer = make_layer()
+    layer.allocate_state_cache(1, "cpu")
+    context = SimpleNamespace(
+        is_mixed=False,
+        is_prefill=True,
+        state_token_ranges=((0, 3),),
+        state_slots=torch.tensor([0], dtype=torch.int32),
+        state_reset_mask=torch.tensor([True]),
+    )
+    context_module = types.ModuleType("nanovllm.utils.context")
+    context_module.get_context = lambda: context
+    storage = {}
+    z_hook = layer.in_proj_z.register_forward_hook(
+        lambda _module, _inputs, output: storage.update(z=output.data_ptr())
+    )
+    output_hook = layer.out_proj.register_forward_pre_hook(
+        lambda _module, inputs: storage.update(output=inputs[0].data_ptr())
+    )
+    grad_context = nullcontext() if grad_enabled else torch.inference_mode()
+
+    try:
+        with (
+            patch.dict(sys.modules, {"nanovllm.utils.context": context_module}),
+            grad_context,
+        ):
+            layer(torch.randn(3, 4, requires_grad=grad_enabled))
+    finally:
+        z_hook.remove()
+        output_hook.remove()
+
+    assert (storage["output"] == storage["z"]) is shares_storage
 
 
 def test_tensor_parallel_layers_sum_to_single_rank_reference():

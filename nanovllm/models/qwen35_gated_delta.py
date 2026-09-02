@@ -904,7 +904,11 @@ class Qwen35GatedDeltaNet(nn.Module):
         log_decay = -self.A_log.float().exp() * F.softplus(
             a.float() + self.dt_bias
         )
-        outputs = torch.empty_like(z)
+        # The gate projection is consumed before each slice is written. During
+        # inference its storage can therefore hold normalized GDN outputs and
+        # avoid another token_count x local_value_dim allocation. Autograd may
+        # retain the original gate values for backward, so keep it separate.
+        outputs = torch.empty_like(z) if z.requires_grad else z
         if decode_count:
             decode_slots = context.state_slots[:decode_count].to(torch.long)
             outputs[:decode_count] = self._decode_batch(
