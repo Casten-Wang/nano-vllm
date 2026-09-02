@@ -190,6 +190,46 @@ def test_manifest_rejects_changed_resume_commands(tmp_path):
         MODULE.prepare_manifest(path, changed, resume=True)
 
 
+def test_manifest_rejects_results_from_different_source_tree(tmp_path):
+    arguments = args()
+    plan = MODULE.manifest_plan(arguments, MODULE.commands(arguments))
+    path = tmp_path / "manifest.json"
+    MODULE.prepare_manifest(path, plan, resume=False)
+    changed = {**plan, "source_tree_sha256": "0" * 64}
+
+    with pytest.raises(ValueError, match="does not match"):
+        MODULE.prepare_manifest(path, changed, resume=True)
+
+
+def test_source_fingerprint_ignores_results_and_documentation(monkeypatch, tmp_path):
+    source = tmp_path / "nanovllm"
+    scripts = tmp_path / "scripts"
+    source.mkdir()
+    scripts.mkdir()
+    (source / "model.py").write_text("VALUE = 1\n")
+    (scripts / "run.py").write_text("print('run')\n")
+    project = tmp_path / "pyproject.toml"
+    project.write_text("[project]\nname = 'test'\n")
+    monkeypatch.setattr(MODULE, "ROOT", tmp_path)
+    monkeypatch.setattr(MODULE, "SOURCE_ROOTS", (source, scripts))
+    monkeypatch.setattr(MODULE, "SOURCE_FILES", (project,))
+
+    baseline = MODULE.source_tree_sha256()
+    (tmp_path / "benchmark_results.json").write_text("{}\n")
+    (tmp_path / "notes.md").write_text("private notes\n")
+
+    assert MODULE.source_tree_sha256() == baseline
+    (source / "model.py").write_text("VALUE = 2\n")
+    assert MODULE.source_tree_sha256() != baseline
+
+
+def test_source_validation_detects_mid_run_code_change(monkeypatch):
+    monkeypatch.setattr(MODULE, "source_tree_sha256", lambda: "current")
+
+    with pytest.raises(ValueError, match="changed during the run"):
+        MODULE.validate_source_tree({"source_tree_sha256": "original"})
+
+
 def test_manifest_refuses_accidental_overwrite(tmp_path):
     arguments = args()
     plan = MODULE.manifest_plan(arguments, MODULE.commands(arguments))

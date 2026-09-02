@@ -24,6 +24,8 @@ REMOTE_CHECKPOINT_AUDIT_SCRIPT = (
 )
 OFFICIAL_CHECKPOINT_REPO = "Qwen/Qwen3.5-35B-A3B"
 OFFICIAL_CHECKPOINT_REVISION = "59d61f3ce65a6d9863b86d2e96597125219dc754"
+SOURCE_ROOTS = (ROOT / "nanovllm", ROOT / "scripts")
+SOURCE_FILES = (ROOT / "pyproject.toml",)
 
 
 def parse_tp_sizes(value: str) -> tuple[int, ...]:
@@ -43,6 +45,23 @@ def validate_run_id(value: str) -> str:
             "run id may contain only letters, digits, dot, dash, and underscore"
         )
     return value
+
+
+def source_tree_sha256() -> str:
+    """Fingerprint executable project sources used by rental validation."""
+
+    paths = list(SOURCE_FILES)
+    for source_root in SOURCE_ROOTS:
+        paths.extend(source_root.rglob("*.py"))
+    digest = hashlib.sha256()
+    for path in sorted(paths, key=lambda item: item.relative_to(ROOT).as_posix()):
+        relative = path.relative_to(ROOT).as_posix().encode()
+        digest.update(len(relative).to_bytes(4, "big"))
+        digest.update(relative)
+        content = path.read_bytes()
+        digest.update(len(content).to_bytes(8, "big"))
+        digest.update(content)
+    return digest.hexdigest()
 
 
 def commands(args: argparse.Namespace) -> list[tuple[str, list[str]]]:
@@ -319,6 +338,7 @@ def manifest_plan(
     return {
         "run_id": args.run_id,
         "model": str(Path(args.model).expanduser().resolve()),
+        "source_tree_sha256": source_tree_sha256(),
         "stages": [
             {"name": name, "command": command}
             for name, command in stages
@@ -449,6 +469,13 @@ def validate_completed_artifacts(path: Path, manifest: dict) -> None:
                 )
 
 
+def validate_source_tree(manifest: dict) -> None:
+    expected = manifest.get("source_tree_sha256")
+    actual = source_tree_sha256()
+    if not expected or actual != expected:
+        raise ValueError("validation source tree changed during the run")
+
+
 def prepare_manifest(
     path: Path,
     plan: dict,
@@ -462,6 +489,7 @@ def prepare_manifest(
         if {
             "run_id": manifest.get("run_id"),
             "model": manifest.get("model"),
+            "source_tree_sha256": manifest.get("source_tree_sha256"),
             "stages": manifest.get("stages"),
         } != plan:
             raise ValueError("resume manifest does not match requested run")
@@ -565,6 +593,10 @@ def main() -> None:
         print(f"[{index}/{len(stages)}] {name}", flush=True)
         print(subprocess.list2cmdline(command), flush=True)
         if not args.dry_run:
+            try:
+                validate_source_tree(manifest)
+            except ValueError as error:
+                raise SystemExit(str(error)) from error
             subprocess.run(command, cwd=ROOT, check=True)
             artifacts = collect_stage_artifacts(args, name)
             mark_stage_completed(manifest_path, manifest, name, artifacts)
