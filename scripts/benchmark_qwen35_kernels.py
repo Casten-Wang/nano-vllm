@@ -827,6 +827,26 @@ def benchmark_delta_prefill_head_groups(
         / 1024
         / 1024
     )
+    effective_chunk = GDN.effective_chunk_size(
+        args.prefill_tokens,
+        chunk_size,
+    )
+    padded_tokens = (
+        (args.prefill_tokens + effective_chunk - 1)
+        // effective_chunk
+        * effective_chunk
+    )
+    output_elements = (
+        args.prefill_batch
+        * local_value_heads
+        * padded_tokens
+        * args.value_head_dim
+    )
+    result["reused_fp32_output_buffer_mib"] = (
+        output_elements * torch.empty((), dtype=torch.float32).element_size()
+        / 1024
+        / 1024
+    )
     result["chunk_size"] = chunk_size
     return result
 

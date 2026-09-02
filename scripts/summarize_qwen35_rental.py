@@ -346,6 +346,16 @@ def summarize_long_prefill(result: dict, *, expected_tp_size: int) -> dict:
             "peak_extra_mib": peak_extra_mib,
             "max_abs_error": max_abs_error,
         }
+        if name == "grouped_delta_prefill":
+            reused_mib = item.get("reused_fp32_output_buffer_mib")
+            cases[name]["reused_fp32_output_buffer_mib"] = reused_mib
+            cases[name]["buffer_reuse_evidence_valid"] = (
+                isinstance(reused_mib, (int, float)) and reused_mib > 0
+            )
+            cases[name]["valid"] = (
+                cases[name]["valid"]
+                and cases[name]["buffer_reuse_evidence_valid"]
+            )
     configured_chunk_sizes = configuration.get("delta_prefill_chunk_sizes", [])
     sweep_result = result.get("results", {}).get(
         "grouped_delta_prefill_chunk_sweep",

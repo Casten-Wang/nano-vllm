@@ -238,6 +238,27 @@ def test_chunk_rule_broadcasts_key_heads_without_replication(sequence_length):
     torch.testing.assert_close(actual_state, expected_state, rtol=2e-4, atol=2e-4)
 
 
+def test_chunk_rule_preserves_autograd_with_separate_output_buffer():
+    q, k, v, decay, beta = inputs(5)
+    q.requires_grad_()
+    k.requires_grad_()
+    v.requires_grad_()
+
+    output, state = chunk_gated_delta_rule(
+        q,
+        k,
+        v,
+        decay,
+        beta,
+        chunk_size=4,
+    )
+    (output.square().mean() + state.square().mean()).backward()
+
+    assert q.grad is not None
+    assert k.grad is not None
+    assert v.grad is not None
+
+
 def test_grouped_chunk_rule_handles_empty_prefill():
     query = torch.empty(2, 0, 2, 4, dtype=torch.bfloat16)
     value = torch.empty(2, 0, 6, 3, dtype=torch.bfloat16)

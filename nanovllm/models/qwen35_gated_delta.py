@@ -400,7 +400,15 @@ def chunk_gated_delta_rule(
             )
         state = initial_state.float()
     state = state.reshape(batch_size, key_heads, groups, key_dim, value_dim)
-    output = torch.zeros_like(new_values)
+    # In inference ``new_values`` is consumed one chunk at a time, so its
+    # storage can hold the corresponding output after the correction has been
+    # formed. Keep a separate buffer only for autograd, whose backward graph
+    # may still need the original solve result.
+    output = (
+        torch.empty_like(new_values)
+        if new_values.requires_grad
+        else new_values
+    )
     query = query * cumulative_decay.exp().unsqueeze(-1)
     key = key * (
         cumulative_decay[..., -1:] - cumulative_decay
