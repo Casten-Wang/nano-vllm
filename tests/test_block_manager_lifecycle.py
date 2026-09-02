@@ -402,6 +402,33 @@ class BlockManagerLifecycleTest(unittest.TestCase):
         self.assertEqual(list(scheduler.running), waiting)
         self.assertFalse(scheduler.waiting)
 
+    def test_legacy_partial_prefill_uses_one_remaining_sequence_slot(self):
+        scheduler = Scheduler(
+            FakeConfig(
+                max_num_seqs=2,
+                max_num_batched_tokens=4,
+                num_kvcache_blocks=8,
+                kvcache_block_size=4,
+                enable_dynamic_chunked_prefill=False,
+            )
+        )
+        running = Sequence([1, 2, 3, 4])
+        scheduler.block_manager.allocate(running, num_cached_blocks=0)
+        running.num_cached_tokens = len(running)
+        running.status = SequenceStatus.RUNNING
+        running.is_prefill = False
+        scheduler.running.append(running)
+        waiting = Sequence([5] * 8)
+        scheduler.add(waiting)
+
+        scheduled, is_prefill = scheduler.schedule()
+
+        self.assertTrue(is_prefill)
+        self.assertEqual(scheduled, [waiting])
+        self.assertEqual(waiting.num_scheduled_tokens, 4)
+        self.assertEqual(list(scheduler.running), [running])
+        self.assertEqual(list(scheduler.waiting), [waiting])
+
     def test_scheduler_releases_recurrent_state_slot_on_preemption(self):
         scheduler = Scheduler(
             FakeConfig(
