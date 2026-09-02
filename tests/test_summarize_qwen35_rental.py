@@ -631,15 +631,23 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
                     "reused_recurrent_state_mib": 8.0,
                     "avoided_state_reallocations": 127,
                 },
-                    "specialized_delta_decode": {
+                "specialized_delta_decode": {
                     "reference": {"peak_extra_mib": 24.0},
                     "candidate": {"peak_extra_mib": 8.0},
                     "speedup": 1.2,
                     "errors": [{"max_abs_error": 0.0}],
-                        "reused_recurrent_state_mib": 8.0,
-                        "reused_prediction_workspace_mib": 0.25,
-                        "reused_decay_exp_mib": 0.01,
-                        "avoided_full_state_intermediates": 2,
+                    "reused_recurrent_state_mib": 8.0,
+                    "reused_prediction_workspace_mib": 0.25,
+                    "reused_decay_exp_mib": 0.01,
+                    "avoided_full_state_intermediates": 2,
+                },
+                "delta_state_contraction": {
+                    "reference": {"peak_extra_mib": 48.0},
+                    "candidate": {"peak_extra_mib": 16.0},
+                    "speedup": 1.2,
+                    "errors": [{"max_abs_error": 0.0}],
+                    "avoided_state_product_mib_per_contraction": 32.0,
+                    "state_contractions_per_decode": 2,
                 },
             },
         },
@@ -747,6 +755,13 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     assert report["buffer_reuse"]["by_tp"]["tp4"]["recurrent_decode"][
         "workspace"
     ]["reused_decay_exp_mib"] == 0.01
+    contraction = report["buffer_reuse"]["by_tp"]["tp4"][
+        "recurrent_state_contraction"
+    ]
+    assert contraction["workspace"][
+        "avoided_state_product_mib_per_contraction"
+    ] == 32.0
+    assert contraction["metadata"]["state_contractions_per_decode"] == 2
     assert report["buffer_reuse"]["by_tp"]["tp4"]["recurrent_prefill"][
         "workspace"
     ]["reused_recurrent_state_mib"] == 8.0

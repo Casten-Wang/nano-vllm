@@ -2033,6 +2033,57 @@ def benchmark_delta_decode(
     return result
 
 
+def benchmark_delta_state_contraction(
+    args,
+    device,
+    local_key_heads: int,
+    local_value_heads: int,
+) -> dict:
+    groups = local_value_heads // local_key_heads
+    state = torch.randn(
+        args.decode_batch,
+        local_key_heads,
+        groups,
+        args.key_head_dim,
+        args.value_head_dim,
+        device=device,
+        dtype=torch.float32,
+    )
+    query = torch.randn(
+        args.decode_batch,
+        local_key_heads,
+        1,
+        args.key_head_dim,
+        device=device,
+        dtype=torch.float32,
+    )
+    key = torch.randn_like(query)
+
+    def reference():
+        prediction = (state * key.unsqueeze(-1)).sum(dim=-2)
+        output = (state * query.unsqueeze(-1)).sum(dim=-2)
+        return prediction, output
+
+    def candidate():
+        prediction = torch.matmul(key.unsqueeze(-2), state).squeeze(-2)
+        output = torch.matmul(query.unsqueeze(-2), state).squeeze(-2)
+        return prediction, output
+
+    result = compare(
+        reference,
+        candidate,
+        device=device,
+        warmup=args.warmup,
+        iterations=args.iterations,
+        repeats=args.repeats,
+    )
+    result["avoided_state_product_mib_per_contraction"] = (
+        state.numel() * state.element_size() / 1024 / 1024
+    )
+    result["state_contractions_per_decode"] = 2
+    return result
+
+
 def benchmark_delta_prefill_head_groups(
     args,
     device,
@@ -2791,6 +2842,12 @@ def main() -> None:
                 args,
                 device,
                 dtype,
+                local_key_heads,
+                local_value_heads,
+            ),
+            "delta_state_contraction": benchmark_delta_state_contraction(
+                args,
+                device,
                 local_key_heads,
                 local_value_heads,
             ),

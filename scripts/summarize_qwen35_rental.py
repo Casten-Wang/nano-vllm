@@ -1071,6 +1071,11 @@ def summarize(run_dir: Path, run_id: str) -> dict:
                 ),
                 {"avoided_full_state_intermediates": 2},
             ),
+            "recurrent_state_contraction": summarize_buffer_reuse_candidate(
+                result["results"]["delta_state_contraction"],
+                ("avoided_state_product_mib_per_contraction",),
+                {"state_contractions_per_decode": 2},
+            ),
             "recurrent_prefill": summarize_buffer_reuse_candidate(
                 result["results"]["delta_prefill_state_reuse"],
                 ("reused_recurrent_state_mib",),

@@ -885,6 +885,30 @@ def test_delta_decode_benchmark_records_state_workspace_reuse():
     assert all(item["max_abs_error"] < 1e-4 for item in result["errors"])
 
 
+def test_delta_state_contraction_benchmark_isolates_full_state_products():
+    args = SimpleNamespace(
+        decode_batch=2,
+        key_head_dim=4,
+        value_head_dim=3,
+        warmup=0,
+        iterations=1,
+        repeats=1,
+    )
+
+    result = MODULE.benchmark_delta_state_contraction(
+        args,
+        torch.device("cpu"),
+        local_key_heads=2,
+        local_value_heads=6,
+    )
+
+    assert result["avoided_state_product_mib_per_contraction"] == (
+        2 * 6 * 4 * 3 * 4 / 1024 / 1024
+    )
+    assert result["state_contractions_per_decode"] == 2
+    assert all(item["max_abs_error"] < 1e-5 for item in result["errors"])
+
+
 def test_graph_safe_candidate_requires_every_promotion_gate():
     promoted = MODULE.evaluate_graph_safe_moe_candidate(
         device_type="cuda",
