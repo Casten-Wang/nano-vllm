@@ -535,6 +535,14 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
                     "avoided_output_workspace_mib": 16.0,
                     "avoided_block_id_cast_mib": 0.01,
                 },
+                "delta_prefill_state_reuse": {
+                    "reference": {"peak_extra_mib": 16.0},
+                    "candidate": {"peak_extra_mib": 8.0},
+                    "speedup": 1.05,
+                    "errors": [{"max_abs_error": 0.0}],
+                    "reused_recurrent_state_mib": 8.0,
+                    "avoided_state_reallocations": 127,
+                },
                     "specialized_delta_decode": {
                     "reference": {"peak_extra_mib": 24.0},
                     "candidate": {"peak_extra_mib": 8.0},
@@ -613,6 +621,9 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     assert report["buffer_reuse"]["by_tp"]["tp4"]["recurrent_decode"][
         "workspace"
     ]["reused_prediction_workspace_mib"] == 0.25
+    assert report["buffer_reuse"]["by_tp"]["tp4"]["recurrent_prefill"][
+        "workspace"
+    ]["reused_recurrent_state_mib"] == 8.0
     assert report["graph_safe_moe"]["by_tp"]["tp4"]["promotion"][
         "selected_decode_batches"
     ] == [1, 64]

@@ -55,6 +55,7 @@ def synchronize(device: torch.device) -> None:
         torch.cuda.synchronize(device)
 
 
+@torch.inference_mode()
 def measure(
     fn: Callable[[], object],
     *,
@@ -1684,6 +1685,88 @@ def benchmark_delta_prefill_head_groups(
     return result
 
 
+def benchmark_delta_prefill_state_reuse(
+    args,
+    device,
+    dtype,
+    local_key_heads,
+    local_value_heads,
+    chunk_size=64,
+) -> dict:
+    query = torch.randn(
+        args.prefill_batch,
+        args.prefill_tokens,
+        local_key_heads,
+        args.key_head_dim,
+        device=device,
+        dtype=dtype,
+    )
+    key = torch.randn_like(query)
+    value = torch.randn(
+        args.prefill_batch,
+        args.prefill_tokens,
+        local_value_heads,
+        args.value_head_dim,
+        device=device,
+        dtype=dtype,
+    )
+    decay = -torch.rand(
+        args.prefill_batch,
+        args.prefill_tokens,
+        local_value_heads,
+        device=device,
+    )
+    beta = torch.rand_like(decay, dtype=dtype)
+    state = torch.randn(
+        args.prefill_batch,
+        local_value_heads,
+        args.key_head_dim,
+        args.value_head_dim,
+        device=device,
+        dtype=torch.float32,
+    )
+
+    def run(inplace_state):
+        return GDN.chunk_gated_delta_rule(
+            query,
+            key,
+            value,
+            decay,
+            beta,
+            state,
+            chunk_size=chunk_size,
+            inplace_state=inplace_state,
+        )
+
+    with torch.inference_mode():
+        result = compare(
+            lambda: run(False),
+            lambda: run(True),
+            device=device,
+            warmup=args.warmup,
+            iterations=args.iterations,
+            repeats=args.repeats,
+        )
+    effective_chunk = GDN.effective_chunk_size(
+        args.prefill_tokens,
+        chunk_size,
+    )
+    num_chunks = (
+        args.prefill_tokens + effective_chunk - 1
+    ) // effective_chunk
+    result.update(
+        {
+            "chunk_size": chunk_size,
+            "num_chunks": num_chunks,
+            "reused_recurrent_state_mib": (
+                state.numel() * state.element_size() / 1024 / 1024
+            ),
+            "avoided_state_reallocations": max(num_chunks - 1, 0),
+        }
+    )
+    return result
+
+
 def benchmark_delta_prefill_chunk_sweep(
     args,
     device,
@@ -2053,6 +2136,13 @@ def main() -> None:
                 local_key_heads,
                 local_value_heads,
             ),
+            "delta_prefill_state_reuse": benchmark_delta_prefill_state_reuse(
+                args,
+                device,
+                dtype,
+                local_key_heads,
+                local_value_heads,
+            ),
             "grouped_delta_prefill_chunk_sweep": (
                 benchmark_delta_prefill_chunk_sweep(
                     args,
@@ -2128,6 +2218,13 @@ def main() -> None:
                 local_conv_channels,
             ),
             "grouped_delta_prefill": benchmark_delta_prefill_head_groups(
+                args,
+                device,
+                dtype,
+                local_key_heads,
+                local_value_heads,
+            ),
+            "delta_prefill_state_reuse": benchmark_delta_prefill_state_reuse(
                 args,
                 device,
                 dtype,

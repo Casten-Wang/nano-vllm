@@ -29,6 +29,20 @@ def test_measure_preserves_every_raw_repeat():
     assert result["median_ms"] == sorted(result["samples_ms"])[1]
 
 
+def test_measure_runs_the_inference_path():
+    grad_modes = []
+
+    MODULE.measure(
+        lambda: grad_modes.append(torch.is_grad_enabled()),
+        device=torch.device("cpu"),
+        warmup=1,
+        iterations=2,
+        repeats=1,
+    )
+
+    assert grad_modes == [False, False, False]
+
+
 def test_error_treats_matching_negative_infinity_as_equal():
     result = MODULE.error(
         torch.tensor([1.0, float("-inf")]),
@@ -580,6 +594,34 @@ def test_delta_prefill_chunk_sweep_compares_shared_input_to_chunk64():
             item["max_abs_error"]
             for item in candidate["errors_vs_chunk64"]
         ) < 1e-4
+
+
+def test_delta_prefill_state_reuse_compares_allocation_paths():
+    args = SimpleNamespace(
+        prefill_batch=2,
+        prefill_tokens=5,
+        key_head_dim=4,
+        value_head_dim=3,
+        warmup=0,
+        iterations=1,
+        repeats=1,
+    )
+
+    result = MODULE.benchmark_delta_prefill_state_reuse(
+        args,
+        torch.device("cpu"),
+        torch.float32,
+        2,
+        6,
+        chunk_size=4,
+    )
+
+    assert result["num_chunks"] == 2
+    assert result["avoided_state_reallocations"] == 1
+    assert result["reused_recurrent_state_mib"] == (
+        2 * 6 * 4 * 3 * 4 / 1024 / 1024
+    )
+    assert all(item["max_abs_error"] == 0 for item in result["errors"])
 
 
 def test_delta_decode_benchmark_records_state_workspace_reuse():

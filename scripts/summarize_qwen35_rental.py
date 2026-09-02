@@ -962,6 +962,10 @@ def summarize(run_dir: Path, run_id: str) -> dict:
                 ),
                 {"avoided_full_state_intermediates": 2},
             ),
+            "recurrent_prefill": summarize_buffer_reuse_candidate(
+                result["results"]["delta_prefill_state_reuse"],
+                ("reused_recurrent_state_mib",),
+            ),
             "gated_delta_beta": summarize_buffer_reuse_candidate(
                 result["results"]["gated_delta_beta_buffer_reuse"],
                 ("reused_beta_projection_mib",),

@@ -294,6 +294,7 @@ def chunk_gated_delta_rule(
     initial_state: torch.Tensor | None = None,
     *,
     chunk_size: int = 64,
+    inplace_state: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Matrix-based official Qwen3.5 prefill reference.
 
@@ -479,7 +480,8 @@ def chunk_gated_delta_rule(
             )
         state = initial_state.float()
         if (
-            not torch.is_grad_enabled()
+            inplace_state
+            and not torch.is_grad_enabled()
             and state.data_ptr() == initial_state.data_ptr()
         ):
             # The caller still owns its recurrent state. Copy it once so the
@@ -514,7 +516,7 @@ def chunk_gated_delta_rule(
         upper_mask,
         value_beta,
     )
-    reuse_state = not torch.is_grad_enabled()
+    reuse_state = inplace_state and not torch.is_grad_enabled()
     for chunk_index in range(num_chunks):
         corrected_value = (
             new_values[:, :, :, chunk_index]
