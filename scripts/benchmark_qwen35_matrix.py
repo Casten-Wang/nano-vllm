@@ -318,6 +318,12 @@ def validate_memory_capacity(
         ]
         minimum_available_budget = min(available_budgets)
         fixed_bytes = parameter_bytes + state_bytes + headroom_bytes
+        limiting_rank = min(
+            range(tp_size), key=available_budgets.__getitem__
+        )
+        fixed_budget_margin_by_rank = [
+            available - fixed_bytes for available in available_budgets
+        ]
         available_kv_bytes = max(minimum_available_budget - fixed_bytes, 0)
         kv_capacity_by_dtype = {}
         for dtype, bytes_per_token in kv_sizes.items():
@@ -331,6 +337,9 @@ def validate_memory_capacity(
                 "memory_limited_context_tokens_per_sequence": (
                     capacity_blocks // concurrent_sequences
                 ) * KVCACHE_BLOCK_SIZE,
+                "memory_limited_concurrent_sequences_at_workload_length": (
+                    capacity_blocks // blocks_per_sequence
+                ),
             }
             memory_limit = kv_capacity_by_dtype[dtype][
                 "memory_limited_context_tokens_per_sequence"
@@ -345,9 +354,25 @@ def validate_memory_capacity(
                 model_max_position_embeddings,
                 runtime_limit,
             )
+            kv_capacity_by_dtype[dtype][
+                "effective_concurrent_sequences_at_workload_length"
+            ] = min(
+                capacity_blocks // blocks_per_sequence,
+                max_num_seqs,
+            )
+        workload_budget_margin_by_rank = [
+            available - required_bytes for available in available_budgets
+        ]
+        shortfall_bytes_by_rank = [
+            max(-margin, 0) for margin in workload_budget_margin_by_rank
+        ]
         insufficient = [
             rank for rank, available in enumerate(available_budgets)
             if available < required_bytes
+        ]
+        fixed_insufficient = [
+            rank for rank, margin in enumerate(fixed_budget_margin_by_rank)
+            if margin < 0
         ]
         results[f"tp{tp_size}"] = {
             "local_parameter_bytes": parameter_bytes,
@@ -366,13 +391,37 @@ def validate_memory_capacity(
             "gpu_memory_utilization": gpu_memory_utilization,
             "memory_by_rank": memory,
             "available_budget_bytes_by_rank": available_budgets,
+            "fixed_required_bytes_per_rank": fixed_bytes,
+            "fixed_budget_margin_bytes_by_rank": fixed_budget_margin_by_rank,
+            "workload_budget_margin_bytes_by_rank": (
+                workload_budget_margin_by_rank
+            ),
+            "shortfall_bytes_by_rank": shortfall_bytes_by_rank,
+            "limiting_rank": limiting_rank,
+            "limiting_available_budget_bytes": minimum_available_budget,
             "valid": not insufficient,
         }
         if insufficient:
             ranks = ", ".join(str(rank) for rank in insufficient)
+            shortfalls = ", ".join(
+                f"rank {rank}: {shortfall_bytes_by_rank[rank]} bytes"
+                for rank in insufficient
+            )
+            if fixed_insufficient:
+                fixed_ranks = ", ".join(str(rank) for rank in fixed_insufficient)
+                fixed_shortfalls = ", ".join(
+                    f"rank {rank}: {-fixed_budget_margin_by_rank[rank]} bytes"
+                    for rank in fixed_insufficient
+                )
+                raise ValueError(
+                    f"TP={tp_size} ranks {fixed_ranks}: fixed "
+                    "model/state/headroom exceeds the usable budget; "
+                    f"fixed shortfall by rank: {fixed_shortfalls}"
+                )
             raise ValueError(
                 f"TP={tp_size} ranks {ranks} lack free memory for model "
-                "parameters, recurrent state, KV cache, and configured headroom"
+                "parameters, recurrent state, KV cache, and configured "
+                f"headroom; shortfall by rank: {shortfalls}"
             )
     return {"valid": True, "results": results}
 

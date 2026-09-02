@@ -190,18 +190,24 @@ def test_memory_preflight_covers_each_tp_rank():
         "auto": {
             "memory_limited_total_token_slots": auto_blocks * 256,
             "memory_limited_context_tokens_per_sequence": auto_blocks // 64 * 256,
+            "memory_limited_concurrent_sequences_at_workload_length": auto_blocks // 3,
             "effective_context_tokens_per_sequence": 4096,
+            "effective_concurrent_sequences_at_workload_length": 64,
         },
         "int8": {
             "memory_limited_total_token_slots": int8_blocks * 256,
             "memory_limited_context_tokens_per_sequence": int8_blocks // 64 * 256,
+            "memory_limited_concurrent_sequences_at_workload_length": int8_blocks // 3,
             "effective_context_tokens_per_sequence": 4096,
+            "effective_concurrent_sequences_at_workload_length": 64,
         },
     }
     assert result["results"]["tp4"]["capacity_concurrent_sequences"] == 64
     assert result["results"]["tp4"]["required_free_bytes_per_rank"] == (
         18 * gib + 8 * 65 + 64 * 3 * 256 * 1024
     )
+    assert result["results"]["tp4"]["limiting_rank"] == 0
+    assert result["results"]["tp4"]["shortfall_bytes_by_rank"] == [0] * 4
     assert len(result["results"]["tp8"]["memory_by_rank"]) == 8
 
 
@@ -286,6 +292,69 @@ def test_memory_preflight_respects_runtime_utilization_limit():
             1,
             0.8,
         )
+
+
+def test_memory_preflight_reports_fixed_memory_shortfall():
+    report = {
+        "results": {
+            "tp2": {
+                "local_parameter_bytes": 900,
+                "model_max_position_embeddings": 4096,
+                "kv_bytes_per_token": 1,
+                "state_bytes_per_sequence": {"float32": 10, "model": 5},
+            }
+        }
+    }
+
+    with pytest.raises(
+        ValueError,
+        match=r"fixed model/state/headroom.*rank 1: 30 bytes",
+    ):
+        MODULE.validate_memory_capacity(
+            report,
+            (2,),
+            [{"free": 1200, "total": 1200}, {"free": 1000, "total": 1000}],
+            100,
+            2,
+            1,
+            1,
+            1.0,
+            1,
+        )
+
+
+def test_memory_preflight_reports_dtype_concurrency_boundary():
+    report = {
+        "results": {
+            "tp1": {
+                "local_parameter_bytes": 1,
+                "model_max_position_embeddings": 4096,
+                "kv_bytes_per_token_by_dtype": {"auto": 2, "int8": 1},
+                "state_bytes_per_sequence": {"float32": 0, "model": 0},
+            }
+        }
+    }
+
+    result = MODULE.validate_memory_capacity(
+        report,
+        (1,),
+        [{"free": 1537, "total": 1537}],
+        0,
+        8,
+        1,
+        256,
+        1.0,
+    )["results"]["tp1"]
+
+    assert result["kv_capacity_by_dtype"]["auto"][
+        "memory_limited_concurrent_sequences_at_workload_length"
+    ] == 3
+    assert result["kv_capacity_by_dtype"]["auto"][
+        "effective_concurrent_sequences_at_workload_length"
+    ] == 3
+    assert result["kv_capacity_by_dtype"]["int8"][
+        "effective_concurrent_sequences_at_workload_length"
+    ] == 6
 
 
 def test_case_command_is_eager_and_fully_identified():
