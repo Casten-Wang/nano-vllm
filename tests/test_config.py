@@ -129,6 +129,32 @@ def test_gptq_reference_backend_is_explicitly_admitted(monkeypatch, tmp_path):
     assert config.model_config.nanovllm_quantization_spec is quantization
 
 
+def test_gptq_triton_backend_is_forwarded(monkeypatch, tmp_path):
+    text_config = SimpleNamespace(max_position_embeddings=32768)
+    quantization = QuantizationSpec(
+        format="gptq_int4",
+        weight_bits=4,
+        group_size=128,
+    )
+    monkeypatch.setattr(
+        config_module.AutoConfig,
+        "from_pretrained",
+        lambda _model: SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        config_module,
+        "resolve_model_spec",
+        lambda _config: SimpleNamespace(
+            text_config=text_config,
+            quantization=quantization,
+        ),
+    )
+
+    config_module.Config(str(tmp_path), weight_quant_backend="triton")
+
+    assert text_config.nanovllm_weight_quant_backend == "triton"
+
+
 def test_gptq_reference_rejects_incompatible_moe_backend(monkeypatch, tmp_path):
     text_config = SimpleNamespace(max_position_embeddings=32768)
     quantization = QuantizationSpec(

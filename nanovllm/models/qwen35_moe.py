@@ -399,6 +399,7 @@ class Qwen35SparseMoeBlock(nn.Module):
                 int(config.moe_intermediate_size),
                 int(config.num_experts),
                 int(quantization.group_size),
+                getattr(config, "nanovllm_weight_quant_backend", "reference"),
             )
         else:
             self.experts = Qwen35Experts(

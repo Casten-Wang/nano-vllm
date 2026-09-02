@@ -98,8 +98,10 @@ class Config:
             )
         if self.qwen35_moe_decode_chunk_size <= 0:
             raise ValueError("qwen35_moe_decode_chunk_size must be positive")
-        if self.weight_quant_backend not in ("auto", "reference"):
-            raise ValueError("weight_quant_backend must be 'auto' or 'reference'")
+        if self.weight_quant_backend not in ("auto", "reference", "triton"):
+            raise ValueError(
+                "weight_quant_backend must be 'auto', 'reference', or 'triton'"
+            )
         if self.distributed_port is not None and not 1 <= self.distributed_port <= 65535:
             raise ValueError("distributed_port must be in [1, 65535]")
         if self.shared_memory_name is not None and not self.shared_memory_name:
@@ -108,13 +110,17 @@ class Config:
         self.model_spec = resolve_model_spec(self.hf_config)
         self.model_config = self.model_spec.text_config
         quantization = self.model_spec.quantization
-        if quantization.format == "gptq_int4" and self.weight_quant_backend == "reference":
+        if quantization.format == "gptq_int4" and self.weight_quant_backend in (
+            "reference",
+            "triton",
+        ):
             if self.qwen35_moe_decode_backend != "sorted":
                 raise ValueError(
                     "the GPTQ reference backend requires "
                     "qwen35_moe_decode_backend='sorted'"
                 )
             self.model_config.nanovllm_quantization_spec = quantization
+            self.model_config.nanovllm_weight_quant_backend = self.weight_quant_backend
         elif not quantization.is_quantized and self.weight_quant_backend == "reference":
             raise ValueError(
                 "weight_quant_backend='reference' requires a GPTQ-Int4 checkpoint"

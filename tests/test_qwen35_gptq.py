@@ -1,6 +1,7 @@
 from unittest.mock import patch
 
 import torch
+import pytest
 
 from nanovllm.models.qwen35_gptq import (
     GPTQ_PACK_FACTOR,
@@ -145,3 +146,32 @@ def test_tp8_down_loader_normalizes_partial_group_indices():
     assert experts.down_g_idx[0].tolist() == [0] * 8
     actual = experts._weight("down", 0, torch.float32)
     torch.testing.assert_close(actual, weight[:, 24:32])
+
+
+def test_triton_backend_never_silently_runs_on_cpu():
+    experts = make_experts()
+    experts.backend = "triton"
+
+    with pytest.raises(ValueError, match="requires CUDA"):
+        experts._linear(torch.ones(1, 8), "gate", 0)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_triton_w4a16_matches_reference_dequantization():
+    from nanovllm.layers.gptq_w4a16 import gptq_w4a16_linear
+
+    torch.manual_seed(71)
+    weight = torch.randint(-7, 8, (64, 128), dtype=torch.int32).float()
+    qweight, qzeros, scales, g_idx = quantize_reference(weight, 32)
+    inputs = torch.randn(5, 128, dtype=torch.float16, device="cuda")
+
+    actual = gptq_w4a16_linear(
+        inputs,
+        qweight.cuda(),
+        qzeros.cuda(),
+        scales.half().cuda(),
+        g_idx.cuda(),
+    )
+    expected = torch.nn.functional.linear(inputs, weight.half().cuda())
+
+    torch.testing.assert_close(actual, expected, rtol=2e-2, atol=2e-2)

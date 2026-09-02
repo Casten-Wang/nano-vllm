@@ -86,12 +86,16 @@ class Qwen35GPTQExperts(nn.Module):
         intermediate_size: int,
         num_experts: int,
         group_size: int,
+        backend: str = "reference",
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size
         self.num_experts = num_experts
         self.group_size = group_size
+        if backend not in ("reference", "triton"):
+            raise ValueError("GPTQ expert backend must be 'reference' or 'triton'")
+        self.backend = backend
         self.tp_size = dist.get_world_size()
         self.tp_rank = dist.get_rank()
         if intermediate_size % self.tp_size:
@@ -206,6 +210,27 @@ class Qwen35GPTQExperts(nn.Module):
             output_dtype=dtype,
         )
 
+    def _linear(
+        self,
+        inputs: torch.Tensor,
+        projection: str,
+        expert_id: int,
+    ) -> torch.Tensor:
+        if self.backend == "triton":
+            from nanovllm.layers.gptq_w4a16 import gptq_w4a16_linear
+
+            return gptq_w4a16_linear(
+                inputs,
+                getattr(self, f"{projection}_qweight")[expert_id],
+                getattr(self, f"{projection}_qzeros")[expert_id],
+                getattr(self, f"{projection}_scales")[expert_id],
+                getattr(self, f"{projection}_g_idx")[expert_id],
+            )
+        return F.linear(
+            inputs,
+            self._weight(projection, expert_id, inputs.dtype),
+        )
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -223,15 +248,12 @@ class Qwen35GPTQExperts(nn.Module):
             token_ids = routes[:, 0]
             slots = routes[:, 1]
             expert_input = hidden_states[token_ids]
-            gate = F.linear(
-                expert_input, self._weight("gate", expert_id, hidden_states.dtype)
-            )
-            up = F.linear(
-                expert_input, self._weight("up", expert_id, hidden_states.dtype)
-            )
-            value = F.linear(
+            gate = self._linear(expert_input, "gate", expert_id)
+            up = self._linear(expert_input, "up", expert_id)
+            value = self._linear(
                 F.silu(gate) * up,
-                self._weight("down", expert_id, hidden_states.dtype),
+                "down",
+                expert_id,
             )
             value = weight_expert_output(value, topk_weights[token_ids, slots])
             output.index_add_(0, token_ids, value.to(output.dtype))
