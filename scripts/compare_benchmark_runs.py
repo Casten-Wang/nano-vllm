@@ -47,6 +47,12 @@ OPTIMIZATION_FIELDS = (
     "enforce_eager",
 )
 
+STORAGE_FIELDS = (
+    "kv_cache_storage",
+    "recurrent_state_storage",
+    "recurrent_state_total_all_ranks_bytes",
+)
+
 
 def ratio(value: float, baseline: float) -> float | None:
     return value / baseline if baseline else None
@@ -85,6 +91,7 @@ def load_result(path: Path) -> dict:
             "execution_validation",
             "generation_validation",
             "metrics",
+            *STORAGE_FIELDS,
         )
         if field not in result
     ]
@@ -202,7 +209,7 @@ def summarize_repeats(results: list[dict], labels: list[str]) -> dict:
     baseline = results[0]
     mismatches = []
     for label, result in zip(labels[1:], results[1:]):
-        for field in ("commit", *OPTIMIZATION_FIELDS):
+        for field in ("commit", *OPTIMIZATION_FIELDS, *STORAGE_FIELDS):
             if result[field] != baseline[field]:
                 mismatches.append(f"{label}.{field}")
     if mismatches:
@@ -231,6 +238,7 @@ def summarize_repeats(results: list[dict], labels: list[str]) -> dict:
         "configuration": {
             field: baseline[field] for field in OPTIMIZATION_FIELDS
         },
+        "storage": {field: baseline[field] for field in STORAGE_FIELDS},
         "checkpoint_identity_strength": comparison[
             "checkpoint_identity_strength"
         ],
@@ -272,6 +280,7 @@ def compare_repeat_summaries(summaries: list[dict], labels: list[str]) -> dict:
             {
                 "label": label,
                 **summary["configuration"],
+                "storage": summary["storage"],
                 "commit": summary["commit"],
                 "generated_token_ids_digest": summary[
                     "generated_token_ids_digest"

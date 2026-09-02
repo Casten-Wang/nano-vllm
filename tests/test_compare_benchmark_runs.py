@@ -76,6 +76,13 @@ def result(
             "avg_tpot_s": 0.05,
             "avg_request_latency_s": 3.0,
         },
+        "kv_cache_storage": {"total_bytes": 1024},
+        "recurrent_state_storage": {
+            "total_bytes_local_rank": 2048,
+            "rotary_cache_bytes_local_rank": 512,
+            "total_model_state_bytes_local_rank": 2560,
+        },
+        "recurrent_state_total_all_ranks_bytes": 8192,
     }
 
 
@@ -196,6 +203,9 @@ def test_repeat_summary_reports_distribution_and_stability():
     assert throughput["coefficient_of_variation"] == pytest.approx(0.081649658)
     assert summary["all_output_digests_match"]
     assert summary["generated_token_ids_digest"] == "same"
+    assert summary["storage"]["recurrent_state_storage"][
+        "rotary_cache_bytes_local_rank"
+    ] == 512
 
 
 def test_matrix_summary_compares_configuration_medians_and_quality():
@@ -218,6 +228,9 @@ def test_matrix_summary_compares_configuration_medians_and_quality():
 
     assert comparison["runs"][0]["median"]["output_throughput_tok_s"] == 100.0
     assert comparison["runs"][1]["median"]["peak_torch_allocated_mib"] == 750.0
+    assert comparison["runs"][0]["storage"]["kv_cache_storage"][
+        "total_bytes"
+    ] == 1024
     assert comparison["baseline"] == "float"
     assert comparison["runs"][0]["vs_baseline"]["output_throughput"] == 1.0
     assert comparison["runs"][1]["vs_baseline"]["output_throughput"] == 1.25
