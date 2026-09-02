@@ -434,6 +434,15 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
                     "compact_fp32_logits_mib": 1.0,
                     "avoided_fp32_logits_mib": 31.0,
                 },
+                "gated_delta_packed_projection": {
+                    "reference": {"peak_extra_mib": 2.0},
+                    "candidate": {"peak_extra_mib": 2.0},
+                    "speedup": 1.1,
+                    "errors": [{"max_abs_error": 0.0}],
+                    "reference_gemm_launches": 3,
+                    "candidate_gemm_launches": 1,
+                    "avoided_gemm_launches": 2,
+                },
                 "decode_convolution_state_reuse": {
                     "reference": {"peak_extra_mib": 16.0},
                     "candidate": {"peak_extra_mib": 8.0},
@@ -649,6 +658,9 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     assert report["buffer_reuse"]["by_tp"]["tp4"]["sampling_compact_top_k"][
         "workspace"
     ]["avoided_fp32_logits_mib"] == 31.0
+    assert report["buffer_reuse"]["by_tp"]["tp4"][
+        "gated_delta_packed_projection"
+    ]["workspace"]["avoided_gemm_launches"] == 2
     assert report["buffer_reuse"]["by_tp"]["tp4"]["attention_norm_output"][
         "workspace"
     ]["reused_projection_output_mib"] == 4.0

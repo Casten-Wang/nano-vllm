@@ -101,6 +101,29 @@ def test_compact_top_k_sampling_benchmark_tracks_fp32_reduction():
     assert result["errors"][0]["max_abs_error"] == 0
 
 
+def test_gated_delta_packed_projection_replaces_three_gemms():
+    args = SimpleNamespace(
+        decode_batch=2,
+        hidden_size=8,
+        value_head_dim=4,
+        warmup=0,
+        iterations=1,
+        repeats=1,
+    )
+
+    result = MODULE.benchmark_gated_delta_packed_projection(
+        args,
+        torch.device("cpu"),
+        torch.float32,
+        local_value_heads=2,
+    )
+
+    assert result["reference_gemm_launches"] == 3
+    assert result["candidate_gemm_launches"] == 1
+    assert result["avoided_gemm_launches"] == 2
+    assert all(item["max_abs_error"] <= 1e-6 for item in result["errors"])
+
+
 def test_greedy_sampler_benchmark_tracks_avoided_fp32_logits():
     args = SimpleNamespace(
         sampling_batch=4,

@@ -85,6 +85,9 @@ class Qwen3_5MoeForCausalLM(nn.Module):
     packed_modules_mapping = {
         "gate_proj": ("gate_up_proj", 0),
         "up_proj": ("gate_up_proj", 1),
+        "in_proj_z": ("in_proj_zba", 0),
+        "in_proj_b": ("in_proj_zba", 1),
+        "in_proj_a": ("in_proj_zba", 2),
     }
 
     def __init__(self, config) -> None:

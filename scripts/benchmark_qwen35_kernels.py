@@ -1480,6 +1480,46 @@ def benchmark_beta_gate(args, device, dtype, local_value_heads: int) -> dict:
     return result
 
 
+def benchmark_gated_delta_packed_projection(
+    args,
+    device,
+    dtype,
+    local_value_heads: int,
+) -> dict:
+    hidden = torch.randn(
+        args.decode_batch,
+        args.hidden_size,
+        device=device,
+        dtype=dtype,
+    )
+    local_value_dim = local_value_heads * args.value_head_dim
+    output_sizes = (local_value_dim, local_value_heads, local_value_heads)
+    weights = tuple(
+        torch.randn(size, args.hidden_size, device=device, dtype=dtype)
+        for size in output_sizes
+    )
+    packed_weight = torch.cat(weights, dim=0)
+
+    def reference():
+        return tuple(F.linear(hidden, weight) for weight in weights)
+
+    def candidate():
+        return F.linear(hidden, packed_weight).split(output_sizes, dim=-1)
+
+    result = compare(
+        reference,
+        candidate,
+        device=device,
+        warmup=args.warmup,
+        iterations=args.iterations,
+        repeats=args.repeats,
+    )
+    result["reference_gemm_launches"] = 3
+    result["candidate_gemm_launches"] = 1
+    result["avoided_gemm_launches"] = 2
+    return result
+
+
 def benchmark_decay_rate(args, device, dtype, local_value_heads: int) -> dict:
     hidden = torch.randn(
         args.router_tokens,
@@ -2446,6 +2486,12 @@ def main() -> None:
                 dtype,
             ),
             "gated_delta_beta_buffer_reuse": benchmark_beta_gate(
+                args,
+                device,
+                dtype,
+                local_value_heads,
+            ),
+            "gated_delta_packed_projection": benchmark_gated_delta_packed_projection(
                 args,
                 device,
                 dtype,

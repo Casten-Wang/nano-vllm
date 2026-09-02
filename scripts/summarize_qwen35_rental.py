@@ -925,6 +925,14 @@ def summarize(run_dir: Path, run_id: str) -> dict:
                 result["results"]["compact_top_k_sampling"],
                 ("avoided_fp32_logits_mib",),
             ),
+            "gated_delta_packed_projection": summarize_buffer_reuse_candidate(
+                result["results"]["gated_delta_packed_projection"],
+                ("avoided_gemm_launches",),
+                {
+                    "reference_gemm_launches": 3,
+                    "candidate_gemm_launches": 1,
+                },
+            ),
             "sampling_greedy_precision": summarize_buffer_reuse_candidate(
                 result["results"]["greedy_sampler_precision_fast_path"],
                 ("avoided_fp32_logits_mib",),

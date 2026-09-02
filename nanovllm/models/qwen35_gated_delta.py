@@ -7,6 +7,8 @@ import torch.distributed as dist
 import torch.nn.functional as F
 from torch import nn
 
+from nanovllm.layers.linear import MergedColumnParallelLinear
+
 
 def l2_normalize(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
     """Match the FLA/Qwen3.5 L2 normalization convention."""
@@ -671,21 +673,13 @@ class Qwen35GatedDeltaNet(nn.Module):
         )
         self.in_proj_qkv.weight.weight_loader = self._load_qkv
         self.in_proj_qkv.weight.safetensors_loader = self._load_qkv_slice
-        self.in_proj_z = nn.Linear(
-            self.hidden_size, self.local_value_dim, bias=False
+        # These official checkpoint projections share the same input. Pack
+        # them so decode launches one GEMM instead of three small GEMMs.
+        self.in_proj_zba = MergedColumnParallelLinear(
+            self.hidden_size,
+            [self.global_value_dim, self.total_v_heads, self.total_v_heads],
+            bias=False,
         )
-        self.in_proj_z.weight.weight_loader = self._load_column
-        self.in_proj_z.weight.safetensors_loader = self._load_column_slice
-        self.in_proj_b = nn.Linear(
-            self.hidden_size, self.num_v_heads, bias=False
-        )
-        self.in_proj_b.weight.weight_loader = self._load_column
-        self.in_proj_b.weight.safetensors_loader = self._load_column_slice
-        self.in_proj_a = nn.Linear(
-            self.hidden_size, self.num_v_heads, bias=False
-        )
-        self.in_proj_a.weight.weight_loader = self._load_column
-        self.in_proj_a.weight.safetensors_loader = self._load_column_slice
         self.conv1d = nn.Conv1d(
             self.local_conv_dim,
             self.local_conv_dim,
@@ -986,15 +980,16 @@ class Qwen35GatedDeltaNet(nn.Module):
             self.state_pool.reset(reset_slots)
 
         mixed_qkv = self.in_proj_qkv(hidden_states)
-        z = self.in_proj_z(hidden_states)
-        beta = self.in_proj_b(hidden_states)
+        z, beta, a = self.in_proj_zba(hidden_states).split(
+            (self.local_value_dim, self.num_v_heads, self.num_v_heads),
+            dim=-1,
+        )
         if beta.requires_grad:
             beta = torch.sigmoid(beta)
         else:
             # The projection is dead after sigmoid in inference. Reuse it to
             # avoid one token_count x local_value_heads allocation per layer.
             beta.sigmoid_()
-        a = self.in_proj_a(hidden_states)
         decay_rate = (
             self._decay_rate
             if not torch.is_grad_enabled() and self._decay_rate is not None

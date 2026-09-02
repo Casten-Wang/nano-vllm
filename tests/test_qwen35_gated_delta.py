@@ -668,7 +668,11 @@ def test_gated_delta_safetensors_loaders_only_read_local_tp_slices():
 
     layer._load_qkv_slice(layer.in_proj_qkv.weight, qkv)
     layer._load_conv_slice(layer.conv1d.weight, conv)
-    layer._load_column_slice(layer.in_proj_z.weight, column)
+    layer.in_proj_zba.packed_safetensors_loader(
+        layer.in_proj_zba.weight,
+        column,
+        0,
+    )
     layer._load_row_slice(layer.out_proj.weight, row)
 
     torch.testing.assert_close(
@@ -679,7 +683,7 @@ def test_gated_delta_safetensors_loaders_only_read_local_tp_slices():
         layer.conv1d.weight,
         torch.cat((conv.tensor[2:4], conv.tensor[6:8], conv.tensor[12:16])),
     )
-    torch.testing.assert_close(layer.in_proj_z.weight, column.tensor[4:8])
+    torch.testing.assert_close(layer.in_proj_zba.weight[:4], column.tensor[4:8])
     torch.testing.assert_close(layer.out_proj.weight, row.tensor[:, 4:8])
     assert len(qkv.requests) == 3
     assert len(conv.requests) == 3
@@ -826,7 +830,7 @@ def test_gated_delta_reuses_gate_projection_only_in_inference(
     context_module = types.ModuleType("nanovllm.utils.context")
     context_module.get_context = lambda: context
     storage = {}
-    z_hook = layer.in_proj_z.register_forward_hook(
+    z_hook = layer.in_proj_zba.register_forward_hook(
         lambda _module, _inputs, output: storage.update(z=output.data_ptr())
     )
     output_hook = layer.out_proj.register_forward_pre_hook(
@@ -865,6 +869,18 @@ def test_tensor_parallel_layers_sum_to_single_rank_reference():
 
     def load(layer):
         for name, source in sources.items():
+            packed_shard = {
+                "in_proj_z.weight": 0,
+                "in_proj_b.weight": 1,
+                "in_proj_a.weight": 2,
+            }.get(name)
+            if packed_shard is not None:
+                layer.in_proj_zba.weight.weight_loader(
+                    layer.in_proj_zba.weight,
+                    source,
+                    packed_shard,
+                )
+                continue
             parameter = layer.get_parameter(name)
             loader = getattr(parameter, "weight_loader", None)
             if loader is None:
@@ -924,6 +940,18 @@ def test_official_head_layout_matches_across_tp4_and_tp8():
 
     def load(layer):
         for name, source in sources.items():
+            packed_shard = {
+                "in_proj_z.weight": 0,
+                "in_proj_b.weight": 1,
+                "in_proj_a.weight": 2,
+            }.get(name)
+            if packed_shard is not None:
+                layer.in_proj_zba.weight.weight_loader(
+                    layer.in_proj_zba.weight,
+                    source,
+                    packed_shard,
+                )
+                continue
             parameter = layer.get_parameter(name)
             loader = getattr(parameter, "weight_loader", None)
             if loader is None:
@@ -1141,7 +1169,10 @@ def test_gated_delta_reuses_precomputed_reset_slots():
 def test_gated_delta_reuses_beta_projection_during_inference():
     layer = make_layer()
     layer.allocate_state_cache(1, "cpu")
-    projected_beta = torch.tensor([[0.0, 1.0, -1.0, 2.0]])
+    projected_zba = torch.tensor(
+        [[0.0] * 8 + [0.0, 1.0, -1.0, 2.0] + [0.0] * 4]
+    )
+    projected_beta = projected_zba[:, 8:12]
     context = SimpleNamespace(
         is_mixed=False,
         is_prefill=False,
@@ -1170,7 +1201,7 @@ def test_gated_delta_reuses_beta_projection_during_inference():
     with (
         torch.inference_mode(),
         patch.dict(sys.modules, {"nanovllm.utils.context": context_module}),
-        patch.object(layer.in_proj_b, "forward", return_value=projected_beta),
+        patch.object(layer.in_proj_zba, "forward", return_value=projected_zba),
         patch.object(qwen35_gated_delta.F, "softplus", side_effect=capture_softplus),
         patch.object(layer, "_decode_batch", side_effect=capture_beta),
     ):
