@@ -1,3 +1,4 @@
+import sys
 from argparse import Namespace
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
@@ -116,6 +117,7 @@ def test_commands_are_fail_fast_and_cover_complete_validation_suite():
     assert stages[-2][1][stages[-2][1].index("--prompt-lengths") + 1] == (
         "128,1024,3072,8192"
     )
+    assert stages[-2][1][stages[-2][1].index("--continuation-len") + 1] == "16"
     assert stages[-1][1][-1].endswith("summary.json")
 
 
@@ -155,6 +157,50 @@ def test_run_id_rejects_unsafe_paths(value):
 def test_tp_sizes_reject_unsupported_parallelism():
     with pytest.raises(MODULE.argparse.ArgumentTypeError):
         MODULE.parse_tp_sizes("3,4")
+
+
+@pytest.mark.parametrize(
+    ("option", "value", "message"),
+    [
+        (
+            "--max-model-len",
+            str(
+                MODULE.QUALITY_MAX_PROMPT_LENGTH
+                + MODULE.QUALITY_CONTINUATION_LENGTH
+                - 1
+            ),
+            "fixed long-context quality gate",
+        ),
+        (
+            "--max-num-seqs",
+            str(MODULE.MIXED_CONCURRENT_SEQUENCES - 1),
+            "mixed-workload gate",
+        ),
+    ],
+)
+def test_parse_args_rejects_settings_below_fixed_suite_requirements(
+    monkeypatch,
+    capsys,
+    option,
+    value,
+    message,
+):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_qwen35_rental_validation.py",
+            "--model",
+            "/models/qwen35",
+            option,
+            value,
+        ],
+    )
+
+    with pytest.raises(SystemExit, match="2"):
+        MODULE.parse_args()
+
+    assert message in capsys.readouterr().err
 
 
 def test_manifest_resumes_only_identical_run(tmp_path):

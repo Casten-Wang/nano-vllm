@@ -24,6 +24,9 @@ REMOTE_CHECKPOINT_AUDIT_SCRIPT = (
 )
 OFFICIAL_CHECKPOINT_REPO = "Qwen/Qwen3.5-35B-A3B"
 OFFICIAL_CHECKPOINT_REVISION = "59d61f3ce65a6d9863b86d2e96597125219dc754"
+QUALITY_MAX_PROMPT_LENGTH = 8_192
+QUALITY_CONTINUATION_LENGTH = 16
+MIXED_CONCURRENT_SEQUENCES = 16
 SOURCE_ROOTS = (ROOT / "nanovllm", ROOT / "scripts")
 SOURCE_FILES = (ROOT / "pyproject.toml",)
 
@@ -332,7 +335,9 @@ def commands(args: argparse.Namespace) -> list[tuple[str, list[str]]]:
                     str(root / "quality"),
                     "--no-checkpoint-audit",
                     "--prompt-lengths",
-                    "128,1024,3072,8192",
+                    f"128,1024,3072,{QUALITY_MAX_PROMPT_LENGTH}",
+                    "--continuation-len",
+                    str(QUALITY_CONTINUATION_LENGTH),
                     "--max-model-len",
                     str(args.max_model_len),
                     "--max-num-batched-tokens",
@@ -595,6 +600,17 @@ def parse_args() -> argparse.Namespace:
         parser.error("rental validation requires at least two repeats")
     if args.input_len + args.output_len > args.max_model_len:
         parser.error("input_len plus output_len cannot exceed max_model_len")
+    minimum_model_len = QUALITY_MAX_PROMPT_LENGTH + QUALITY_CONTINUATION_LENGTH
+    if args.max_model_len < minimum_model_len:
+        parser.error(
+            "max_model_len must be at least "
+            f"{minimum_model_len} for the fixed long-context quality gate"
+        )
+    if args.max_num_seqs < MIXED_CONCURRENT_SEQUENCES:
+        parser.error(
+            "max_num_seqs must be at least "
+            f"{MIXED_CONCURRENT_SEQUENCES} for the mixed-workload gate"
+        )
     return args
 
 
