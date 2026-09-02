@@ -157,6 +157,10 @@ def test_packed_mapping_matches_complete_module_segment_only():
         mapping,
     ) == ("model.layers.0.mlp.gate_up_proj.weight", 1)
     assert loader.resolve_packed_parameter(
+        "gate_proj.weight",
+        mapping,
+    ) == ("gate_up_proj.weight", 0)
+    assert loader.resolve_packed_parameter(
         "model.layers.0.mlp.experts.gate_up_proj",
         mapping,
     ) is None

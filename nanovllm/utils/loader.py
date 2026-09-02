@@ -15,15 +15,15 @@ def resolve_packed_parameter(
 ) -> tuple[str, object] | None:
     """Map an exact module path segment, never a substring of a packed name."""
 
+    path = weight_name.split(".")
     for source_module, (target_module, shard_id) in packed_modules_mapping.items():
-        marker = f".{source_module}."
-        if marker in weight_name:
-            target = weight_name.replace(
-                marker,
-                f".{target_module}.",
-                1,
-            )
-            return target, shard_id
+        try:
+            index = path.index(source_module)
+        except ValueError:
+            continue
+        mapped_path = path.copy()
+        mapped_path[index] = target_module
+        return ".".join(mapped_path), shard_id
     return None
 
 
