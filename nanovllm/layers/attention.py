@@ -199,7 +199,6 @@ class Attention(nn.Module):
         decode_n = context.decode_token_count
         prefill_n = context.prefill_token_count
         assert decode_n > 0 and prefill_n > 0
-        outputs: list[torch.Tensor] = []
 
         q_decode = q[:decode_n]
         q_prefill = q[decode_n:decode_n + prefill_n]
@@ -213,13 +212,11 @@ class Attention(nn.Module):
             # the same engine step.
             store_kvcache_int8_range(k, v, self.k_cache, self.v_cache, self.k_scale, self.v_scale, context.slot_mapping, 0, decode_n)
             if self.kv_dequant_backend == "fused":
-                outputs.append(
-                    self._int8_decode_attention(
-                        q_decode,
-                        context.decode_block_tables,
-                        context.decode_context_lens,
-                        context.decode_max_context_len,
-                    )
+                decode_output = self._int8_decode_attention(
+                    q_decode,
+                    context.decode_block_tables,
+                    context.decode_context_lens,
+                    context.decode_max_context_len,
                 )
             else:
                 decode_k_cache, decode_v_cache = self._dequant_kvcache(
@@ -227,14 +224,12 @@ class Attention(nn.Module):
                     context.decode_dequant_block_ids,
                     context.decode_dequant_block_tables,
                 )
-                outputs.append(
-                    self._flash_attn_with_kvcache(
-                        q_decode,
-                        decode_k_cache,
-                        decode_v_cache,
-                        context.decode_dequant_block_tables,
-                        context.decode_context_lens,
-                    )
+                decode_output = self._flash_attn_with_kvcache(
+                    q_decode,
+                    decode_k_cache,
+                    decode_v_cache,
+                    context.decode_dequant_block_tables,
+                    context.decode_context_lens,
                 )
             store_kvcache_int8_range(k, v, self.k_cache, self.v_cache, self.k_scale, self.v_scale, context.slot_mapping, decode_n, decode_n + prefill_n)
             if context.prefill_block_tables is not None:
@@ -249,33 +244,33 @@ class Attention(nn.Module):
                 prefill_block_tables = None
         else:
             store_kvcache_range(k, v, self.k_cache, self.v_cache, context.slot_mapping, 0, decode_n)
-            outputs.append(
-                self._flash_attn_with_kvcache(
-                    q_decode,
-                    self.k_cache,
-                    self.v_cache,
-                    context.decode_block_tables,
-                    context.decode_context_lens,
-                )
+            decode_output = self._flash_attn_with_kvcache(
+                q_decode,
+                self.k_cache,
+                self.v_cache,
+                context.decode_block_tables,
+                context.decode_context_lens,
             )
             store_kvcache_range(k, v, self.k_cache, self.v_cache, context.slot_mapping, decode_n, decode_n + prefill_n)
             if context.prefill_block_tables is not None:
                 k_prefill, v_prefill = self.k_cache, self.v_cache
             prefill_block_tables = context.prefill_block_tables
 
-        outputs.append(
-            self._flash_attn_varlen(
-                q_prefill,
-                k_prefill,
-                v_prefill,
-                context.prefill_max_seqlen_q,
-                context.prefill_cu_seqlens_q,
-                context.prefill_max_seqlen_k,
-                context.prefill_cu_seqlens_k,
-                prefill_block_tables,
-            )
+        prefill_output = self._flash_attn_varlen(
+            q_prefill,
+            k_prefill,
+            v_prefill,
+            context.prefill_max_seqlen_q,
+            context.prefill_cu_seqlens_q,
+            context.prefill_max_seqlen_k,
+            context.prefill_cu_seqlens_k,
+            prefill_block_tables,
         )
-        return torch.cat(outputs, dim=0)
+        if torch.is_grad_enabled():
+            return torch.cat((decode_output, prefill_output), dim=0)
+        q[:decode_n].copy_(decode_output)
+        q[decode_n : decode_n + prefill_n].copy_(prefill_output)
+        return q[: decode_n + prefill_n]
 
     def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor):
         context = get_context()
