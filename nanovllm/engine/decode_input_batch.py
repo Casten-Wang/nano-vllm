@@ -56,6 +56,24 @@ class DecodeInputBatch:
             device=device,
         )
         self._block_table_array = self.host_block_tables.numpy()
+        self.host_state_slots = torch.empty(
+            capacity,
+            dtype=torch.int64,
+            device="cpu",
+            pin_memory=pin_memory,
+        )
+        self.device_state_slots = torch.empty(
+            capacity,
+            dtype=torch.int64,
+            device=device,
+        )
+        self.host_reset_slots = torch.empty_like(
+            self.host_state_slots,
+            pin_memory=pin_memory,
+        )
+        self.device_reset_slots = torch.empty_like(self.device_state_slots)
+        self._state_slot_array = self.host_state_slots.numpy()
+        self._reset_slot_array = self.host_reset_slots.numpy()
 
     def update(
         self,
@@ -110,3 +128,27 @@ class DecodeInputBatch:
         device = self.device_block_tables[:size, :width]
         device.copy_(host, non_blocking=True)
         return device
+
+    def _update_slots(
+        self,
+        values: list[int],
+        *,
+        reset: bool,
+    ) -> torch.Tensor:
+        size = len(values)
+        if not 0 < size <= self.capacity:
+            raise ValueError(
+                f"decode slot count must be in [1, {self.capacity}]"
+            )
+        host = self.host_reset_slots if reset else self.host_state_slots
+        device = self.device_reset_slots if reset else self.device_state_slots
+        array = self._reset_slot_array if reset else self._state_slot_array
+        array[:size] = values
+        device[:size].copy_(host[:size], non_blocking=True)
+        return device[:size]
+
+    def update_state_slots(self, values: list[int]) -> torch.Tensor:
+        return self._update_slots(values, reset=False)
+
+    def update_reset_slots(self, values: list[int]) -> torch.Tensor:
+        return self._update_slots(values, reset=True)

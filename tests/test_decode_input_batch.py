@@ -62,6 +62,23 @@ def test_decode_block_tables_are_padded_and_reuse_storage():
     )
 
 
+def test_decode_state_slots_use_independent_reusable_storage():
+    batch = make_batch()
+
+    first_states = batch.update_state_slots([7, 2])
+    first_resets = batch.update_reset_slots([2])
+    state_storage = first_states.data_ptr()
+    reset_storage = first_resets.data_ptr()
+
+    second_states = batch.update_state_slots([3, 4, 5])
+    second_resets = batch.update_reset_slots([3, 5])
+
+    assert second_states.data_ptr() == state_storage
+    assert second_resets.data_ptr() == reset_storage
+    assert torch.equal(second_states, torch.tensor([3, 4, 5]))
+    assert torch.equal(second_resets, torch.tensor([3, 5]))
+
+
 @pytest.mark.parametrize(
     "values",
     [

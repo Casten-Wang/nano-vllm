@@ -543,11 +543,11 @@ class HybridStateContextTest(unittest.TestCase):
         decode_seqs = [object(), object()]
         prefill_seqs = [object()]
         state_metadata_calls = []
-        runner.prepare_state_slots = lambda seqs: (
+        runner.prepare_state_slots = lambda seqs, **kwargs: (
             state_metadata_calls.append(("slots", seqs))
             or FakeTensor([8, 9, 3])
         )
-        runner.prepare_state_reset_slots = lambda seqs: (
+        runner.prepare_state_reset_slots = lambda seqs, **kwargs: (
             state_metadata_calls.append(("reset", seqs))
             or FakeTensor([3])
         )

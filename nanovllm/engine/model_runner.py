@@ -749,7 +749,12 @@ class ModelRunner:
         packed_block_tables = torch.tensor(metadata.packed_block_tables, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
         return selected_block_ids, packed_block_tables
 
-    def prepare_state_slots(self, seqs: list[Sequence]):
+    def prepare_state_slots(
+        self,
+        seqs: list[Sequence],
+        *,
+        reuse_decode_buffer: bool = False,
+    ):
         model_spec = self.config.model_spec
         if model_spec is None or not model_spec.is_hybrid:
             return None
@@ -763,6 +768,8 @@ class ModelRunner:
                 state_slots.append(warmup_slot)
             else:
                 state_slots.append(seq.state_slot)
+        if reuse_decode_buffer:
+            return self.decode_inputs.update_state_slots(state_slots)
         return torch.tensor(
             state_slots,
             dtype=torch.int64,
@@ -785,7 +792,12 @@ class ModelRunner:
             return start, len(slots)
         return None
 
-    def prepare_state_reset_slots(self, seqs: list[Sequence]):
+    def prepare_state_reset_slots(
+        self,
+        seqs: list[Sequence],
+        *,
+        reuse_decode_buffer: bool = False,
+    ):
         model_spec = self.config.model_spec
         if model_spec is None or not model_spec.is_hybrid:
             return None
@@ -803,6 +815,8 @@ class ModelRunner:
                 reset_slots.append(seq.state_slot)
         if not reset_slots:
             return None
+        if reuse_decode_buffer:
+            return self.decode_inputs.update_reset_slots(reset_slots)
         return torch.tensor(
             reset_slots,
             dtype=torch.int64,
@@ -875,8 +889,14 @@ class ModelRunner:
             dequant_block_ids,
             dequant_block_tables,
             self.config.sliding_window_size,
-            state_slots=self.prepare_state_slots(seqs),
-            state_reset_slots=self.prepare_state_reset_slots(seqs),
+            state_slots=self.prepare_state_slots(
+                seqs,
+                reuse_decode_buffer=True,
+            ),
+            state_reset_slots=self.prepare_state_reset_slots(
+                seqs,
+                reuse_decode_buffer=True,
+            ),
             state_token_ranges=state_token_ranges,
         )
         return input_ids, positions
@@ -1048,8 +1068,14 @@ class ModelRunner:
             dequant_block_tables=dequant_block_tables,
             sliding_window_size=self.config.sliding_window_size,
             max_context_len=max_context_len,
-            state_slots=self.prepare_state_slots(seqs),
-            state_reset_slots=self.prepare_state_reset_slots(seqs),
+            state_slots=self.prepare_state_slots(
+                seqs,
+                reuse_decode_buffer=True,
+            ),
+            state_reset_slots=self.prepare_state_reset_slots(
+                seqs,
+                reuse_decode_buffer=True,
+            ),
             state_token_ranges=(),
             decode_state_span=self.contiguous_state_span(seqs),
         )
@@ -1095,8 +1121,14 @@ class ModelRunner:
             prefill_block_tables=prefill["block_tables"],
             prefill_dequant_block_ids=prefill["dequant_block_ids"],
             prefill_dequant_block_tables=prefill["dequant_block_tables"],
-            state_slots=self.prepare_state_slots(mixed_seqs),
-            state_reset_slots=self.prepare_state_reset_slots(mixed_seqs),
+            state_slots=self.prepare_state_slots(
+                mixed_seqs,
+                reuse_decode_buffer=True,
+            ),
+            state_reset_slots=self.prepare_state_reset_slots(
+                mixed_seqs,
+                reuse_decode_buffer=True,
+            ),
             state_token_ranges=tuple(
                 (
                     len(decode_seqs) + start,
