@@ -212,7 +212,16 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
                 }
                 for index in range(1, 15)
             ],
-            "results": {"tp4": {"valid": True}},
+            "results": {
+                "tp4": {
+                    "valid": True,
+                    "skipped_by_prefix": {
+                        "model.visual.": 333,
+                        "mtp.": 785,
+                    },
+                    "unclassified_skipped_weights": [],
+                }
+            },
         },
     )
     write(
