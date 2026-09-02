@@ -40,11 +40,13 @@ def test_commands_are_fail_fast_and_cover_complete_validation_suite():
         "kernels-tp4",
         "attention-short-tp4",
         "attention-long-tp4",
-        "cudagraph-tp4",
+        "cudagraph-short-tp4",
+        "cudagraph-long-tp4",
         "kernels-tp8",
         "attention-short-tp8",
         "attention-long-tp8",
-        "cudagraph-tp8",
+        "cudagraph-short-tp8",
+        "cudagraph-long-tp8",
         "performance-matrix",
         "quality-matrix",
         "final-summary",
@@ -58,10 +60,16 @@ def test_commands_are_fail_fast_and_cover_complete_validation_suite():
     assert stages[3][1][stages[3][1].index("--context-len") + 1] == "16384"
     assert "--include-partitioned" in stages[3][1]
     assert stages[3][1][stages[3][1].index("--partition-sizes") + 1] == "256,512"
-    assert stages[4][1][stages[4][1].index("--tensor-parallel-size") + 1] == "4"
-    assert stages[5][1][stages[5][1].index("--tp-size") + 1] == "8"
-    assert stages[6][1][stages[6][1].index("--num-heads") + 1] == "2"
-    assert stages[8][1][stages[8][1].index("--tensor-parallel-size") + 1] == "8"
+    commands = dict(stages)
+    short_graph = commands["cudagraph-short-tp4"]
+    long_graph = commands["cudagraph-long-tp4"]
+    assert short_graph[short_graph.index("--input-length-base") + 1] == "33"
+    assert long_graph[long_graph.index("--input-length-base") + 1] == "8192"
+    assert long_graph[long_graph.index("--batch-sizes") + 1] == "3"
+    tp8_kernels = commands["kernels-tp8"]
+    tp8_attention = commands["attention-short-tp8"]
+    assert tp8_kernels[tp8_kernels.index("--tp-size") + 1] == "8"
+    assert tp8_attention[tp8_attention.index("--num-heads") + 1] == "2"
     assert "--no-checkpoint-audit" in stages[-3][1]
     assert "--no-memory-preflight" in stages[-3][1]
     assert "--include-moe-candidate" in stages[-3][1]

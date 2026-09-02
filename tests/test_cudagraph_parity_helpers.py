@@ -45,6 +45,59 @@ class CudaGraphParityHelperTest(unittest.TestCase):
         self.assertIn(250, second)
         self.assertGreater(max(second), 256)
 
+    def test_scenario_lengths_support_long_context_base(self):
+        self.assertEqual(
+            module.scenario_lengths(3, 0, 8192),
+            [8192, 8224, 8256],
+        )
+
+    def test_comparison_requires_attention_path_on_both_modes(self):
+        import torch
+
+        hidden_step = {
+            "is_prefill": False,
+            "shape": [1, 1],
+            "hidden_states": torch.zeros(1, 1),
+        }
+        logits_step = {
+            "is_prefill": False,
+            "shape": [1, 1],
+            "logits": torch.zeros(1, 1),
+        }
+        eager = {
+            "output_tokens": [[1]],
+            "hidden_steps": [hidden_step],
+            "logits_steps": [logits_step],
+            "execution_stats": {
+                "model_path_counts": {"prefill_eager": 1, "decode_eager": 1},
+                "attention_path_counts": {"int8_partitioned_decode": 1},
+                "execution_signatures": [],
+            },
+        }
+        graph = {
+            **eager,
+            "execution_stats": {
+                "model_path_counts": {"prefill_eager": 1, "decode_cuda_graph": 1},
+                "attention_path_counts": {"int8_fused_decode": 1},
+                "execution_signatures": [
+                    {"model_path": "decode_cuda_graph", "graph_bucket": 1}
+                ],
+            },
+        }
+
+        result = module.compare_artifacts(
+            eager,
+            graph,
+            atol=0,
+            rtol=0,
+            expected_graph_bucket=1,
+            expected_attention_path="int8_partitioned_decode",
+        )
+
+        self.assertFalse(result["passed"])
+        self.assertTrue(result["expected_eager_attention_path"])
+        self.assertFalse(result["expected_graph_attention_path"])
+
 
 if __name__ == "__main__":
     unittest.main()

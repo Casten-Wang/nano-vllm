@@ -294,7 +294,7 @@ def summarize(run_dir: Path, run_id: str) -> dict:
     if not kernel_paths:
         raise ValueError("no kernel benchmark artifacts were found")
     cudagraph_paths = sorted(
-        (run_dir / "cudagraph").glob("tp*/run_*/summary.json")
+        (run_dir / "cudagraph").glob("tp*/*/run_*/summary.json")
     )
     if not cudagraph_paths:
         raise ValueError("no CUDA Graph parity artifacts were found")
@@ -420,14 +420,36 @@ def summarize(run_dir: Path, run_id: str) -> dict:
     cudagraph = {}
     for path in cudagraph_paths:
         result = load_json(path)
-        tp_name = path.parents[1].name
-        if tp_name in cudagraph:
-            raise ValueError(f"multiple CUDA Graph summaries found for {tp_name}")
-        cudagraph[tp_name] = {
+        tp_name = path.parents[2].name
+        context_name = path.parents[1].name
+        cases = cudagraph.setdefault(tp_name, {})
+        if context_name in cases:
+            raise ValueError(
+                f"multiple {context_name} CUDA Graph summaries found for {tp_name}"
+            )
+        expected_attention_path = (
+            "int8_partitioned_decode"
+            if context_name == "long"
+            else "int8_fused_decode"
+        )
+        cases[context_name] = {
             "passed": result["passed"],
             "hybrid_graph_captured": result.get(
                 "hybrid_graph_captured",
                 False,
+            ),
+            "kv_cache_dtype": result["kv_cache_dtype"],
+            "expected_attention_path": expected_attention_path,
+            "attention_path_observed": all(
+                scenario["comparison"].get("expected_attention_path")
+                == expected_attention_path
+                and scenario["comparison"].get(
+                    "expected_eager_attention_path", False
+                )
+                and scenario["comparison"].get(
+                    "expected_graph_attention_path", False
+                )
+                for scenario in result["scenarios"]
             ),
             "scenario_count": len(result["scenarios"]),
             "batch_sizes": [
@@ -456,6 +478,18 @@ def summarize(run_dir: Path, run_id: str) -> dict:
         clean_worktrees = clean_worktrees and not result["git_dirty"]
         checkpoint_digests.add(result["checkpoint_manifest"]["digest"])
 
+    cudagraph_valid = (
+        set(cudagraph) == set(kernels)
+        and all(set(cases) == {"short", "long"} for cases in cudagraph.values())
+        and all(
+            item["passed"]
+            and item["hybrid_graph_captured"]
+            and item["kv_cache_dtype"] == "int8"
+            and item["attention_path_observed"]
+            for cases in cudagraph.values()
+            for item in cases.values()
+        )
+    )
     evidence = {
         "checkpoint_mapping_valid": audit["valid"] and audit["complete"],
         "memory_preflight_valid": (
@@ -467,13 +501,7 @@ def summarize(run_dir: Path, run_id: str) -> dict:
         "moe_runtime_output_parity": all(
             item["output_digest_matches"] for item in moe_runtime.values()
         ),
-        "hybrid_cudagraph_parity": (
-            set(cudagraph) == set(kernels)
-            and all(
-                item["passed"] and item["hybrid_graph_captured"]
-                for item in cudagraph.values()
-            )
-        ),
+        "hybrid_cudagraph_parity": cudagraph_valid,
         "attention_kernel_evidence": (
             set(attention) == expected_tp_names and attention_valid
         ),
@@ -525,10 +553,7 @@ def summarize(run_dir: Path, run_id: str) -> dict:
             "runtime_by_tp": moe_runtime,
         },
         "hybrid_cudagraph": {
-            "all_tp_passed": all(
-                item["passed"] and item["hybrid_graph_captured"]
-                for item in cudagraph.values()
-            ),
+            "all_tp_passed": cudagraph_valid,
             "same_tp_coverage": set(cudagraph) == set(kernels),
             "by_tp": cudagraph,
         },

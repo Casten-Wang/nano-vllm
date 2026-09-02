@@ -119,27 +119,42 @@ def commands(args: argparse.Namespace) -> list[tuple[str, list[str]]]:
             result.append(
                 (f"attention-{context_name}-tp{tp_size}", command)
             )
-        result.append(
-            (
-                f"cudagraph-tp{tp_size}",
-                [
-                    sys.executable,
-                    str(CUDAGRAPH_PARITY_SCRIPT),
-                    "--model",
-                    args.model,
-                    "--tensor-parallel-size",
-                    str(tp_size),
-                    "--batch-sizes",
-                    f"3,9,{args.max_num_seqs}",
-                    "--max-num-seqs",
-                    str(args.max_num_seqs),
-                    "--qwen35-moe-decode-backend",
-                    "batched",
-                    "--result-dir",
-                    str(root / "cudagraph" / f"tp{tp_size}"),
-                ],
+        for context_name, base_length, batch_sizes in (
+            ("short", 33, f"3,9,{args.max_num_seqs}"),
+            ("long", 8192, "3"),
+        ):
+            result.append(
+                (
+                    f"cudagraph-{context_name}-tp{tp_size}",
+                    [
+                        sys.executable,
+                        str(CUDAGRAPH_PARITY_SCRIPT),
+                        "--model",
+                        args.model,
+                        "--tensor-parallel-size",
+                        str(tp_size),
+                        "--batch-sizes",
+                        batch_sizes,
+                        "--input-length-base",
+                        str(base_length),
+                        "--max-model-len",
+                        str(args.max_model_len),
+                        "--max-num-batched-tokens",
+                        str(args.max_model_len),
+                        "--max-num-seqs",
+                        str(args.max_num_seqs),
+                        "--qwen35-moe-decode-backend",
+                        "batched",
+                        "--result-dir",
+                        str(
+                            root
+                            / "cudagraph"
+                            / f"tp{tp_size}"
+                            / context_name
+                        ),
+                    ],
+                )
             )
-        )
     result.extend(
         (
             (
@@ -236,10 +251,9 @@ def collect_stage_artifacts(
         _, context_name, tp_name = stage_name.split("-")
         search_root = root / "attention" / tp_name
         required = [search_root / f"{context_name}.json"]
-    elif stage_name.startswith("cudagraph-tp"):
-        search_root = root / "cudagraph" / stage_name.removeprefix(
-            "cudagraph-"
-        )
+    elif stage_name.startswith("cudagraph-"):
+        _, context_name, tp_name = stage_name.split("-")
+        search_root = root / "cudagraph" / tp_name / context_name
         required = sorted(search_root.glob("run_*/summary.json"))
         if len(required) != 1:
             raise RuntimeError(
@@ -270,7 +284,7 @@ def collect_stage_artifacts(
         if stage_name in ("preflight", "final-summary")
         or stage_name.startswith("kernels-tp")
         or stage_name.startswith("attention-")
-        or stage_name.startswith("cudagraph-tp")
+        or stage_name.startswith("cudagraph-")
         else sorted(search_root.rglob("*.json"))
     )
     if not artifacts:

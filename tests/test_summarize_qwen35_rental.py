@@ -69,6 +69,31 @@ def write_attention_case(
     )
 
 
+def write_cudagraph_case(root, context_name, attention_path, batch_sizes):
+    write(
+        root / f"cudagraph/tp4/{context_name}/run_1/summary.json",
+        {
+            "commit": "abc",
+            "git_dirty": False,
+            "cuda_available": True,
+            "kv_cache_dtype": "int8",
+            "passed": True,
+            "hybrid_graph_captured": True,
+            "scenarios": [
+                {
+                    "batch_size": batch_size,
+                    "comparison": {
+                        "expected_attention_path": attention_path,
+                        "expected_eager_attention_path": True,
+                        "expected_graph_attention_path": True,
+                    },
+                }
+                for batch_size in batch_sizes
+            ],
+        },
+    )
+
+
 def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     run_id = "rental-a"
     write(tmp_path / "preflight/checkpoint_mapping_audit.json", {"valid": True, "complete": True})
@@ -197,20 +222,17 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
             }},
         },
     )
-    write(
-        tmp_path / "cudagraph/tp4/run_1/summary.json",
-        {
-            "commit": "abc",
-            "git_dirty": False,
-            "cuda_available": True,
-            "passed": True,
-            "hybrid_graph_captured": True,
-            "scenarios": [
-                {"batch_size": 3},
-                {"batch_size": 9},
-                {"batch_size": 64},
-            ],
-        },
+    write_cudagraph_case(
+        tmp_path,
+        "short",
+        "int8_fused_decode",
+        [3, 9, 64],
+    )
+    write_cudagraph_case(
+        tmp_path,
+        "long",
+        "int8_partitioned_decode",
+        [3],
     )
     write_attention_case(tmp_path, "short", 4096, partitioned=False)
     write_attention_case(tmp_path, "long", 16384, partitioned=True)

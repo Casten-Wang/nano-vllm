@@ -30,12 +30,16 @@ def parse_int_list(value: str) -> list[int]:
     return result
 
 
-def scenario_lengths(batch_size: int, scenario_index: int) -> list[int]:
+def scenario_lengths(
+    batch_size: int,
+    scenario_index: int,
+    base_input_length: int = 33,
+) -> list[int]:
     # Vary lengths within a batch so context_lens change independently and
     # requests use different block tables. The second scenario includes a
     # 250-token prompt; with eight generated tokens, its final decode replay
     # allocates and observes a new 256-token KV block.
-    base = 33 + scenario_index * 25
+    base = base_input_length + scenario_index * 25
     stride = 32
     return [base + stride * index for index in range(batch_size)]
 
@@ -213,6 +217,7 @@ def compare_artifacts(
     atol: float,
     rtol: float,
     expected_graph_bucket: int,
+    expected_attention_path: str,
 ) -> dict:
     import torch
 
@@ -319,6 +324,14 @@ def compare_artifacts(
         if item["model_path"] == "decode_cuda_graph"
     }
     expected_bucket_observed = expected_graph_bucket in graph_buckets
+    eager_attention_paths = eager["execution_stats"]["attention_path_counts"]
+    graph_attention_paths = graph["execution_stats"]["attention_path_counts"]
+    expected_eager_attention_path = (
+        eager_attention_paths.get(expected_attention_path, 0) > 0
+    )
+    expected_graph_attention_path = (
+        graph_attention_paths.get(expected_attention_path, 0) > 0
+    )
     passed = (
         token_match
         and hidden_match
@@ -326,6 +339,8 @@ def compare_artifacts(
         and expected_eager_paths
         and expected_graph_paths
         and expected_bucket_observed
+        and expected_eager_attention_path
+        and expected_graph_attention_path
     )
     return {
         "passed": passed,
@@ -341,6 +356,9 @@ def compare_artifacts(
             bucket for bucket in graph_buckets if bucket is not None
         ),
         "expected_bucket_observed": expected_bucket_observed,
+        "expected_attention_path": expected_attention_path,
+        "expected_eager_attention_path": expected_eager_attention_path,
+        "expected_graph_attention_path": expected_graph_attention_path,
         "hidden_step_results": hidden_step_results,
         "step_results": step_results,
     }
@@ -355,6 +373,7 @@ def main() -> None:
         default=os.path.expanduser("~/huggingface/Qwen3-0.6B/"),
     )
     parser.add_argument("--batch-sizes", default="3,9")
+    parser.add_argument("--input-length-base", type=int, default=33)
     parser.add_argument("--output-len", type=int, default=4)
     parser.add_argument("--max-model-len", type=int, default=1024)
     parser.add_argument("--max-num-batched-tokens", type=int, default=4096)
@@ -425,11 +444,13 @@ def main() -> None:
         parser.error("tensor_parallel_size must be positive")
     if args.qwen35_moe_decode_chunk_size <= 0:
         parser.error("qwen35_moe_decode_chunk_size must be positive")
-    if args.partition_threshold <= args.max_model_len:
-        parser.error(
-            "partition-threshold must exceed max-model-len so the parity run "
-            "stays on the short-context fused Graph path"
-        )
+    if min(
+        args.input_length_base,
+        args.max_model_len,
+        args.partition_threshold,
+        args.partition_size,
+    ) <= 0:
+        parser.error("context and partition sizes must be positive")
 
     import torch
 
@@ -447,7 +468,11 @@ def main() -> None:
 
     graph_buckets = cuda_graph_buckets(min(args.max_num_seqs, 512))
     for scenario_index, batch_size in enumerate(batch_sizes):
-        lengths = scenario_lengths(batch_size, scenario_index)
+        lengths = scenario_lengths(
+            batch_size,
+            scenario_index,
+            args.input_length_base,
+        )
         if max(lengths) + args.output_len > args.max_model_len:
             raise ValueError(
                 f"scenario input length {max(lengths)} plus output_len "
@@ -481,6 +506,15 @@ def main() -> None:
             atol=args.atol,
             rtol=args.rtol,
             expected_graph_bucket=expected_bucket,
+            expected_attention_path=(
+                "float_flash_decode"
+                if args.kv_cache_dtype == "auto"
+                else (
+                    "int8_partitioned_decode"
+                    if max(lengths) >= args.partition_threshold
+                    else "int8_fused_decode"
+                )
+            ),
         )
         all_passed = all_passed and comparison["passed"]
         scenario_results.append(
