@@ -82,6 +82,26 @@ def test_greedy_sampler_benchmark_tracks_avoided_fp32_logits():
     assert result["errors"][0]["max_abs_error"] == 0
 
 
+def test_decode_convolution_benchmark_tracks_reused_state():
+    args = SimpleNamespace(
+        decode_batch=4,
+        conv_kernel_size=4,
+        warmup=0,
+        iterations=1,
+        repeats=1,
+    )
+
+    result = MODULE.benchmark_decode_convolution(
+        args,
+        torch.device("cpu"),
+        torch.bfloat16,
+        local_conv_channels=6,
+    )
+
+    assert result["reused_convolution_state_mib"] == 4 * 6 * 4 * 2 / 1024 / 1024
+    assert all(item["max_abs_error"] == 0 for item in result["errors"])
+
+
 def test_router_benchmark_reuses_selected_logits_for_probabilities():
     args = SimpleNamespace(
         router_tokens=8,

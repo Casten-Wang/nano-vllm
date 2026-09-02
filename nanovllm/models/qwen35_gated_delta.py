@@ -19,6 +19,8 @@ def causal_conv1d_step(
     state: torch.Tensor,
     weight: torch.Tensor,
     bias: torch.Tensor | None = None,
+    *,
+    inplace_state: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Apply one depthwise causal-convolution step without in-place mutation.
 
@@ -32,7 +34,12 @@ def causal_conv1d_step(
         raise ValueError("invalid causal convolution tensor rank")
     if state.shape[0] != x.shape[0] or state.shape[1:] != weight.shape:
         raise ValueError("causal convolution shapes are inconsistent")
-    next_state = torch.cat((state[..., 1:], x.unsqueeze(-1)), dim=-1)
+    if inplace_state and not torch.is_grad_enabled():
+        state[..., :-1].copy_(state[..., 1:])
+        state[..., -1].copy_(x)
+        next_state = state
+    else:
+        next_state = torch.cat((state[..., 1:], x.unsqueeze(-1)), dim=-1)
     output = (next_state.to(weight.dtype) * weight.unsqueeze(0)).sum(dim=-1)
     if bias is not None:
         output = output + bias
@@ -844,6 +851,7 @@ class Qwen35GatedDeltaNet(nn.Module):
             mixed_qkv,
             conv_state,
             self.conv1d.weight.squeeze(1),
+            inplace_state=True,
         )
         convolved = convolved.unsqueeze(1)
         query, key, value = convolved.split(

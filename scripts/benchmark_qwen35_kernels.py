@@ -1118,6 +1118,53 @@ def benchmark_convolution(args, device, dtype, local_conv_channels) -> dict:
     )
 
 
+def benchmark_decode_convolution(args, device, dtype, local_conv_channels) -> dict:
+    x = torch.randn(
+        args.decode_batch,
+        local_conv_channels,
+        device=device,
+        dtype=dtype,
+    )
+    state = torch.randn(
+        args.decode_batch,
+        local_conv_channels,
+        args.conv_kernel_size,
+        device=device,
+        dtype=dtype,
+    )
+    weight = torch.randn(
+        local_conv_channels,
+        args.conv_kernel_size,
+        device=device,
+        dtype=dtype,
+    )
+    candidate_state = state.clone()
+
+    def reference():
+        return GDN.causal_conv1d_step(x, state, weight)
+
+    def candidate():
+        return GDN.causal_conv1d_step(
+            x,
+            candidate_state,
+            weight,
+            inplace_state=True,
+        )
+
+    result = compare(
+        reference,
+        candidate,
+        device=device,
+        warmup=args.warmup,
+        iterations=args.iterations,
+        repeats=args.repeats,
+    )
+    result["reused_convolution_state_mib"] = (
+        state.numel() * state.element_size() / 1024 / 1024
+    )
+    return result
+
+
 def benchmark_delta_decode(
     args,
     device,
@@ -1659,6 +1706,12 @@ def main() -> None:
     if args.prefill_only:
         benchmark_results = {
             "vectorized_prefill_convolution": benchmark_convolution(
+                args,
+                device,
+                dtype,
+                local_conv_channels,
+            ),
+            "decode_convolution_state_reuse": benchmark_decode_convolution(
                 args,
                 device,
                 dtype,

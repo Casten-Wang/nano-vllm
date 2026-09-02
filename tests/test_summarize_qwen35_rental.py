@@ -366,6 +366,16 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
                     "errors": [{"max_abs_error": 0.0}],
                     "avoided_fp32_logits_mib": 64.0,
                 },
+                "decode_convolution_state_reuse": {
+                    "reference": {"peak_extra_mib": 16.0},
+                    "candidate": {"peak_extra_mib": 8.0},
+                    "speedup": 1.5,
+                    "errors": [
+                        {"max_abs_error": 0.0},
+                        {"max_abs_error": 0.0},
+                    ],
+                    "reused_convolution_state_mib": 8.0,
+                },
                 "router_topk_first": {
                     "reference": {"peak_extra_mib": 2.0},
                     "candidate": {"peak_extra_mib": 1.0},

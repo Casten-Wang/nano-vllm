@@ -758,6 +758,10 @@ def summarize(run_dir: Path, run_id: str) -> dict:
                 result["results"]["greedy_sampler_precision_fast_path"],
                 ("avoided_fp32_logits_mib",),
             ),
+            "decode_convolution_state": summarize_buffer_reuse_candidate(
+                result["results"]["decode_convolution_state_reuse"],
+                ("reused_convolution_state_mib",),
+            ),
             "router_softmax": summarize_buffer_reuse_candidate(
                 result["results"]["router_topk_first"],
                 ("reused_selected_logits_mib",),

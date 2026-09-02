@@ -122,6 +122,53 @@ def test_vectorized_causal_convolution_handles_empty_prefill():
     assert next_state is state
 
 
+@pytest.mark.parametrize("kernel_size", [1, 2, 4])
+def test_decode_convolution_can_reuse_state_storage(kernel_size):
+    torch.manual_seed(43)
+    x = torch.randn(3, 7)
+    state = torch.randn(3, 7, kernel_size)
+    weight = torch.randn(7, kernel_size)
+    bias = torch.randn(7)
+    expected_output, expected_state = qwen35_gated_delta.causal_conv1d_step(
+        x,
+        state,
+        weight,
+        bias,
+    )
+    reusable_state = state.clone()
+    storage = reusable_state.data_ptr()
+
+    with torch.inference_mode():
+        actual_output, actual_state = qwen35_gated_delta.causal_conv1d_step(
+            x,
+            reusable_state,
+            weight,
+            bias,
+            inplace_state=True,
+        )
+
+    assert actual_state.data_ptr() == storage
+    torch.testing.assert_close(actual_output, expected_output)
+    torch.testing.assert_close(actual_state, expected_state)
+
+
+def test_decode_convolution_preserves_state_when_autograd_is_enabled():
+    x = torch.randn(2, 5, requires_grad=True)
+    state = torch.randn(2, 5, 4)
+    original = state.clone()
+    weight = torch.randn(5, 4, requires_grad=True)
+
+    _, next_state = qwen35_gated_delta.causal_conv1d_step(
+        x,
+        state,
+        weight,
+        inplace_state=True,
+    )
+
+    assert next_state.data_ptr() != state.data_ptr()
+    torch.testing.assert_close(state, original)
+
+
 def test_recurrent_rule_chunked_prefill_matches_one_shot():
     q, k, v, decay, beta = inputs()
     expected, expected_state = recurrent_gated_delta_rule(q, k, v, decay, beta)
