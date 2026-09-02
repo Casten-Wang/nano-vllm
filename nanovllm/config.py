@@ -103,6 +103,7 @@ class Config:
             raise ValueError("shared_memory_name must not be empty")
         self.hf_config = AutoConfig.from_pretrained(self.model)
         self.model_spec = resolve_model_spec(self.hf_config)
+        self.model_spec.quantization.require_runtime_support()
         self.model_config = self.model_spec.text_config
         self.model_config.qwen35_moe_decode_backend = (
             self.qwen35_moe_decode_backend

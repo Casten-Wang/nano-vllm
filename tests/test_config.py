@@ -4,6 +4,10 @@ import json
 import pytest
 
 from nanovllm import config as config_module
+from nanovllm.models.quantization_spec import (
+    BF16_QUANTIZATION_SPEC,
+    QuantizationSpec,
+)
 
 
 def make_config(monkeypatch, tmp_path, **kwargs):
@@ -16,7 +20,10 @@ def make_config(monkeypatch, tmp_path, **kwargs):
     monkeypatch.setattr(
         config_module,
         "resolve_model_spec",
-        lambda _config: SimpleNamespace(text_config=text_config),
+        lambda _config: SimpleNamespace(
+            text_config=text_config,
+            quantization=BF16_QUANTIZATION_SPEC,
+        ),
     )
     return config_module.Config(str(tmp_path), **kwargs), text_config
 
@@ -69,6 +76,26 @@ def test_invalid_qwen35_moe_decode_chunk_size_is_rejected(monkeypatch, tmp_path)
             tmp_path,
             qwen35_moe_decode_chunk_size=0,
         )
+
+
+def test_quantized_checkpoint_is_rejected_before_runtime_setup(monkeypatch, tmp_path):
+    text_config = SimpleNamespace(max_position_embeddings=32768)
+    monkeypatch.setattr(
+        config_module.AutoConfig,
+        "from_pretrained",
+        lambda _model: SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        config_module,
+        "resolve_model_spec",
+        lambda _config: SimpleNamespace(
+            text_config=text_config,
+            quantization=QuantizationSpec(format="gptq_int4", weight_bits=4),
+        ),
+    )
+
+    with pytest.raises(NotImplementedError, match="recognized but not executable"):
+        config_module.Config(str(tmp_path))
 
 
 def test_generation_config_resolves_all_eos_tokens(tmp_path):

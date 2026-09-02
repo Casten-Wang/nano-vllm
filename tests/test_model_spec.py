@@ -30,6 +30,26 @@ def test_dense_qwen_uses_every_layer_for_kv_cache():
     assert spec.linear_attention_layers == ()
     assert spec.num_kv_cache_layers == 4
     assert not spec.is_hybrid
+    assert spec.quantization.format == "bf16"
+
+
+def test_model_spec_retains_checkpoint_quantization_metadata():
+    config = SimpleNamespace(
+        architectures=["Qwen3ForCausalLM"],
+        num_hidden_layers=2,
+        quantization_config={
+            "quant_method": "fp8",
+            "activation_scheme": "dynamic",
+            "weight_per_tensor": False,
+            "act_per_tensor": False,
+            "weight_block_size": [128, 128],
+        },
+    )
+
+    spec = resolve_model_spec(config)
+
+    assert spec.quantization.format == "fp8_block"
+    assert spec.quantization.weight_block_size == (128, 128)
 
 
 def test_qwen35_conditional_generation_uses_nested_text_config():

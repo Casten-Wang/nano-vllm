@@ -5,6 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from nanovllm.models.quantization_spec import (
+    QuantizationSpec,
+    resolve_quantization_spec,
+)
+
 
 QWEN3_ARCHITECTURE = "Qwen3ForCausalLM"
 QWEN35_MOE_ARCHITECTURES = frozenset(
@@ -23,6 +28,7 @@ class ModelSpec:
     text_config: Any
     full_attention_layers: tuple[int, ...]
     linear_attention_layers: tuple[int, ...]
+    quantization: QuantizationSpec
 
     @property
     def num_hidden_layers(self) -> int:
@@ -65,6 +71,7 @@ def resolve_model_spec(hf_config: Any) -> ModelSpec:
     """Resolve dense and hybrid Qwen configs to a common text-only view."""
 
     architecture = _architecture(hf_config)
+    quantization = resolve_quantization_spec(hf_config)
     if architecture == QWEN3_ARCHITECTURE:
         num_layers = int(hf_config.num_hidden_layers)
         return ModelSpec(
@@ -72,6 +79,7 @@ def resolve_model_spec(hf_config: Any) -> ModelSpec:
             text_config=hf_config,
             full_attention_layers=tuple(range(num_layers)),
             linear_attention_layers=(),
+            quantization=quantization,
         )
 
     if architecture in QWEN35_MOE_ARCHITECTURES:
@@ -107,6 +115,7 @@ def resolve_model_spec(hf_config: Any) -> ModelSpec:
             text_config=text_config,
             full_attention_layers=full_attention_layers,
             linear_attention_layers=linear_attention_layers,
+            quantization=quantization,
         )
 
     raise ValueError(f"unsupported model architecture: {architecture}")
