@@ -775,6 +775,19 @@ class Qwen35GatedDeltaNet(nn.Module):
             raise ValueError("invalid tensor-parallel row weight shape")
         param.data.copy_(weight[:, start:end])
 
+    @staticmethod
+    def _copy_packed_rows(
+        param: nn.Parameter,
+        parts,
+    ) -> None:
+        destination_offset = 0
+        for part in parts:
+            rows = part.shape[0]
+            param.data.narrow(0, destination_offset, rows).copy_(part)
+            destination_offset += rows
+        if destination_offset != param.shape[0]:
+            raise ValueError("packed Qwen3.5 weight rows do not match parameter")
+
     def _load_qkv(self, param: nn.Parameter, weight: torch.Tensor) -> None:
         expected = 2 * self.global_key_dim + self.global_value_dim
         if tuple(weight.shape) != (expected, self.hidden_size):
@@ -783,11 +796,9 @@ class Qwen35GatedDeltaNet(nn.Module):
             (self.global_key_dim, self.global_key_dim, self.global_value_dim),
             dim=0,
         )
-        param.data.copy_(
-            torch.cat(
-                tuple(self._column_shard(part) for part in (query, key, value)),
-                dim=0,
-            )
+        self._copy_packed_rows(
+            param,
+            (self._column_shard(part) for part in (query, key, value)),
         )
 
     def _load_qkv_slice(self, param: nn.Parameter, weight) -> None:
@@ -795,17 +806,18 @@ class Qwen35GatedDeltaNet(nn.Module):
         shape = self._slice_shape(weight)
         if shape != (expected, self.hidden_size):
             raise ValueError("invalid Qwen3.5 in_proj_qkv weight shape")
-        parts = []
-        offset = 0
-        for width in (
-            self.global_key_dim,
-            self.global_key_dim,
-            self.global_value_dim,
-        ):
-            start, end = self._column_bounds(width)
-            parts.append(weight[offset + start : offset + end, :])
-            offset += width
-        param.data.copy_(torch.cat(parts, dim=0))
+        def local_parts():
+            offset = 0
+            for width in (
+                self.global_key_dim,
+                self.global_key_dim,
+                self.global_value_dim,
+            ):
+                start, end = self._column_bounds(width)
+                yield weight[offset + start : offset + end, :]
+                offset += width
+
+        self._copy_packed_rows(param, local_parts())
 
     def _load_conv(self, param: nn.Parameter, weight: torch.Tensor) -> None:
         if weight.ndim != 3 or weight.shape[1] != 1:
@@ -818,28 +830,31 @@ class Qwen35GatedDeltaNet(nn.Module):
             (self.global_key_dim, self.global_key_dim, self.global_value_dim),
             dim=0,
         )
-        local = torch.cat(
-            tuple(self._column_shard(part) for part in (query, key, value)),
-            dim=0,
+        self._copy_packed_rows(
+            param,
+            (
+                self._column_shard(part).unsqueeze(1)
+                for part in (query, key, value)
+            ),
         )
-        param.data.copy_(local.unsqueeze(1))
 
     def _load_conv_slice(self, param: nn.Parameter, weight) -> None:
         expected = 2 * self.global_key_dim + self.global_value_dim
         shape = self._slice_shape(weight)
         if shape != (expected, 1, self.conv_kernel_size):
             raise ValueError("invalid Qwen3.5 depthwise convolution weight shape")
-        parts = []
-        offset = 0
-        for width in (
-            self.global_key_dim,
-            self.global_key_dim,
-            self.global_value_dim,
-        ):
-            start, end = self._column_bounds(width)
-            parts.append(weight[offset + start : offset + end, :, :])
-            offset += width
-        param.data.copy_(torch.cat(parts, dim=0))
+        def local_parts():
+            offset = 0
+            for width in (
+                self.global_key_dim,
+                self.global_key_dim,
+                self.global_value_dim,
+            ):
+                start, end = self._column_bounds(width)
+                yield weight[offset + start : offset + end, :, :]
+                offset += width
+
+        self._copy_packed_rows(param, local_parts())
 
     def allocate_state_cache(
         self,

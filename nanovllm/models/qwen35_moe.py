@@ -166,14 +166,16 @@ class Qwen35Experts(nn.Module):
             )
         start = self.tp_rank * self.local_intermediate_size
         end = start + self.local_intermediate_size
-        gate = loaded_weight[:, start:end, :]
-        up = loaded_weight[
-            :,
-            self.intermediate_size + start : self.intermediate_size + end,
-            :,
-        ]
-        param.data[:, : self.local_intermediate_size].copy_(gate)
-        param.data[:, self.local_intermediate_size :].copy_(up)
+        param.data[:, : self.local_intermediate_size].copy_(
+            loaded_weight[:, start:end, :]
+        )
+        param.data[:, self.local_intermediate_size :].copy_(
+            loaded_weight[
+                :,
+                self.intermediate_size + start : self.intermediate_size + end,
+                :,
+            ]
+        )
 
     def _load_down(
         self,

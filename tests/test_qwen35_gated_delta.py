@@ -687,6 +687,34 @@ def test_gated_delta_safetensors_loaders_only_read_local_tp_slices():
     assert len(row.requests) == 1
 
 
+def test_gated_delta_packed_loaders_do_not_materialize_local_copy():
+    layer = make_layer(rank=1, world_size=2)
+    rows = 2 * layer.global_key_dim + layer.global_value_dim
+    qkv_tensor = torch.arange(rows * 4).reshape(rows, 4).float()
+    conv_tensor = torch.arange(rows * 2).reshape(rows, 1, 2).float()
+
+    with patch.object(
+        qwen35_gated_delta.torch,
+        "cat",
+        side_effect=AssertionError("loader must copy each shard directly"),
+    ):
+        layer._load_qkv(layer.in_proj_qkv.weight, qkv_tensor)
+        layer._load_conv(layer.conv1d.weight, conv_tensor)
+        qkv = TrackingSlice(qkv_tensor)
+        conv = TrackingSlice(conv_tensor)
+        layer._load_qkv_slice(layer.in_proj_qkv.weight, qkv)
+        layer._load_conv_slice(layer.conv1d.weight, conv)
+
+    torch.testing.assert_close(layer.in_proj_qkv.weight[:2], qkv_tensor[2:4])
+    torch.testing.assert_close(layer.in_proj_qkv.weight[2:4], qkv_tensor[6:8])
+    torch.testing.assert_close(layer.in_proj_qkv.weight[4:], qkv_tensor[12:16])
+    torch.testing.assert_close(layer.conv1d.weight[:2], conv_tensor[2:4])
+    torch.testing.assert_close(layer.conv1d.weight[2:4], conv_tensor[6:8])
+    torch.testing.assert_close(layer.conv1d.weight[4:], conv_tensor[12:16])
+    assert len(qkv.requests) == 3
+    assert len(conv.requests) == 3
+
+
 def test_decay_and_gated_norm_parameters_remain_fp32_under_bf16_default():
     original_dtype = torch.get_default_dtype()
     try:
