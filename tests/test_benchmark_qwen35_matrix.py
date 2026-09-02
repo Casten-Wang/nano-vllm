@@ -191,6 +191,15 @@ def test_memory_preflight_covers_each_tp_rank():
         "auto": 1024,
         "int8": 520,
     }
+    assert result["results"]["tp4"][
+        "pd_transfer_bytes_per_sequence_by_dtype"
+    ] == {
+        "auto": {"float32": 3 * 256 * 1024 + 8, "model": 3 * 256 * 1024 + 4},
+        "int8": {"float32": 3 * 256 * 520 + 8, "model": 3 * 256 * 520 + 4},
+    }
+    assert result["results"]["tp4"][
+        "pd_transfer_bytes_all_tp_ranks_by_dtype"
+    ]["int8"]["model"] == 4 * (3 * 256 * 520 + 4)
     rotary_bytes = 4096 * 256
     available_kv_bytes = 2 * gib - 8 * 65 - rotary_bytes
     auto_blocks = available_kv_bytes // (256 * 1024)

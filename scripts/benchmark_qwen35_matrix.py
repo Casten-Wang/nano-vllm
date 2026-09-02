@@ -324,6 +324,27 @@ def validate_memory_capacity(
             * KVCACHE_BLOCK_SIZE
             * kv_bytes_per_token
         )
+        pd_transfer_bytes_per_sequence_by_dtype = {
+            kv_dtype: {
+                state_dtype: (
+                    blocks_per_sequence
+                    * KVCACHE_BLOCK_SIZE
+                    * bytes_per_token
+                    + state_sizes[state_dtype]
+                )
+                for state_dtype in ("float32", "model")
+            }
+            for kv_dtype, bytes_per_token in kv_sizes.items()
+        }
+        pd_transfer_bytes_all_tp_ranks_by_dtype = {
+            kv_dtype: {
+                state_dtype: bytes_per_rank * tp_size
+                for state_dtype, bytes_per_rank in by_state_dtype.items()
+            }
+            for kv_dtype, by_state_dtype in (
+                pd_transfer_bytes_per_sequence_by_dtype.items()
+            )
+        }
         required_bytes = parameter_bytes + state_bytes + rotary_bytes + kv_bytes + headroom_bytes
         memory = memory_by_device[:tp_size]
         available_budgets = [
@@ -394,6 +415,12 @@ def validate_memory_capacity(
             "rotary_cache_bytes_per_rank": rotary_bytes,
             "minimum_workload_kv_bytes_per_rank": kv_bytes,
             "kv_bytes_per_token_by_dtype": kv_sizes,
+            "pd_transfer_bytes_per_sequence_by_dtype": (
+                pd_transfer_bytes_per_sequence_by_dtype
+            ),
+            "pd_transfer_bytes_all_tp_ranks_by_dtype": (
+                pd_transfer_bytes_all_tp_ranks_by_dtype
+            ),
             "kv_capacity_by_dtype": kv_capacity_by_dtype,
             "capacity_concurrent_sequences": concurrent_sequences,
             "model_max_position_embeddings": model_max_position_embeddings,

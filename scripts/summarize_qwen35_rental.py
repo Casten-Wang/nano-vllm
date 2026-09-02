@@ -858,6 +858,31 @@ def summarize_memory_preflight(report: dict) -> dict[str, dict]:
             raise ValueError(
                 f"memory preflight has invalid capacity concurrency for {tp_name}"
             )
+        transfer_per_rank = item.get(
+            "pd_transfer_bytes_per_sequence_by_dtype",
+            {},
+        )
+        transfer_all_ranks = item.get(
+            "pd_transfer_bytes_all_tp_ranks_by_dtype",
+            {},
+        )
+        state_dtypes = {"float32", "model"}
+        if (
+            set(transfer_per_rank) != set(kv_sizes)
+            or set(transfer_all_ranks) != set(kv_sizes)
+            or any(
+                set(by_state_dtype) != state_dtypes
+                or not all(
+                    isinstance(value, int) and value > 0
+                    for value in by_state_dtype.values()
+                )
+                for transfer in (transfer_per_rank, transfer_all_ranks)
+                for by_state_dtype in transfer.values()
+            )
+        ):
+            raise ValueError(
+                f"memory preflight has invalid PD transfer sizes for {tp_name}"
+            )
         budgets = item.get("available_budget_bytes_by_rank", [])
         if not budgets:
             raise ValueError(f"memory preflight has no rank budgets for {tp_name}")
@@ -876,6 +901,8 @@ def summarize_memory_preflight(report: dict) -> dict[str, dict]:
                 "minimum_workload_kv_bytes_per_rank"
             ],
             "kv_bytes_per_token_by_dtype": kv_sizes,
+            "pd_transfer_bytes_per_sequence_by_dtype": transfer_per_rank,
+            "pd_transfer_bytes_all_tp_ranks_by_dtype": transfer_all_ranks,
             "int8_kv_reduction_ratio": 1.0 - int8_bytes / auto_bytes,
             "kv_capacity_by_dtype": capacities,
             "capacity_concurrent_sequences": concurrent_sequences,

@@ -347,6 +347,14 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
                         "auto": 10_240,
                         "int8": 5_160,
                     },
+                    "pd_transfer_bytes_per_sequence_by_dtype": {
+                        "auto": {"float32": 10_000, "model": 9_000},
+                        "int8": {"float32": 6_000, "model": 5_000},
+                    },
+                    "pd_transfer_bytes_all_tp_ranks_by_dtype": {
+                        "auto": {"float32": 40_000, "model": 36_000},
+                        "int8": {"float32": 24_000, "model": 20_000},
+                    },
                     "kv_capacity_by_dtype": {
                         "auto": {
                             "memory_limited_total_token_slots": 100_000,
