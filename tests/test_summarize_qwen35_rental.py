@@ -1,4 +1,5 @@
 from importlib.util import module_from_spec, spec_from_file_location
+from copy import deepcopy
 import json
 from pathlib import Path
 
@@ -175,6 +176,11 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
             },
         },
     ]
+    int8_baseline = deepcopy(rows[0])
+    int8_baseline.update(label="sorted-int8", kv_cache_dtype="int8")
+    int8_candidate = deepcopy(rows[1])
+    int8_candidate.update(label="batched-int8", kv_cache_dtype="int8")
+    rows.extend((int8_baseline, int8_candidate))
     write(
         tmp_path / f"performance/{run_id}_matrix_summary.json",
         {
@@ -249,12 +255,15 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     assert report["graph_safe_moe"]["by_tp"]["tp4"]["promotion"][
         "selected_decode_batches"
     ] == [1, 64]
-    runtime = report["graph_safe_moe"]["runtime_by_tp"]["tp4"]
+    runtime = report["graph_safe_moe"]["runtime_by_tp"]["tp4"]["auto"]
     assert runtime["output_digest_matches"]
     assert runtime["throughput_speedup"] == 2.0
     assert runtime["tpot_speedup"] == 2.0
     assert runtime["peak_memory_delta_mib"] == 4
     assert runtime["promotion"]["promote_to_default"]
+    assert report["graph_safe_moe"]["runtime_by_tp"]["tp4"]["int8"][
+        "promotion"
+    ]["promote_to_default"]
     attention = report["int8_attention"]["by_tp"]["tp4"]
     assert attention["short"]["best_fused"]["speedup_vs_flash_reference"] == 2.0
     assert attention["long"]["best_partitioned"]["backend"] == (

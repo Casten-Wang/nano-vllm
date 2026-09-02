@@ -77,6 +77,21 @@ def summarize_moe_runtime(rows: list[dict]) -> dict[str, dict]:
     ]
     if not candidates:
         raise ValueError("performance matrix contains no batched MoE candidate")
+    expected_candidate_keys = {
+        key for key in baselines if key[1] == "model"
+    }
+    candidate_keys = {
+        (
+            row["tensor_parallel_size"],
+            row["recurrent_state_dtype"],
+            row["kv_cache_dtype"],
+        )
+        for row in candidates
+    }
+    if candidate_keys != expected_candidate_keys:
+        raise ValueError(
+            "batched MoE candidates do not cover every model-state KV mode"
+        )
     for candidate in candidates:
         key = (
             candidate["tensor_parallel_size"],
@@ -120,7 +135,12 @@ def summarize_moe_runtime(rows: list[dict]) -> dict[str, dict]:
             candidate_median["peak_torch_allocated_mib"]
             - baseline_median["peak_torch_allocated_mib"]
         )
-        comparisons[tp_name] = {
+        by_kv = comparisons.setdefault(tp_name, {})
+        if key[2] in by_kv:
+            raise ValueError(
+                f"duplicate batched MoE candidate for TP={key[0]}, KV={key[2]}"
+            )
+        by_kv[key[2]] = {
             "configuration": {
                 "recurrent_state_dtype": key[1],
                 "kv_cache_dtype": key[2],
@@ -499,7 +519,9 @@ def summarize(run_dir: Path, run_id: str) -> dict:
         "performance_generation_valid": performance["all_generation_valid"],
         "performance_output_parity": performance["all_output_digests_match"],
         "moe_runtime_output_parity": all(
-            item["output_digest_matches"] for item in moe_runtime.values()
+            item["output_digest_matches"]
+            for by_kv in moe_runtime.values()
+            for item in by_kv.values()
         ),
         "hybrid_cudagraph_parity": cudagraph_valid,
         "attention_kernel_evidence": (
@@ -521,7 +543,8 @@ def summarize(run_dir: Path, run_id: str) -> dict:
     )
     runtime_promoted = all(
         item["promotion"]["promote_to_default"]
-        for item in moe_runtime.values()
+        for by_kv in moe_runtime.values()
+        for item in by_kv.values()
     )
     same_tp_coverage = set(kernels) == set(moe_runtime)
     return {

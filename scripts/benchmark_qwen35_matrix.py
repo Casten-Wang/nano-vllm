@@ -63,10 +63,13 @@ def build_cases(
             BenchmarkCase(
                 tp,
                 "model",
-                "auto",
+                kv_dtype,
                 moe_decode_backend="batched",
             )
-            for tp in tp_sizes
+            for tp, kv_dtype in itertools.product(
+                tp_sizes,
+                ("auto", "int8"),
+            )
         )
     return cases
 

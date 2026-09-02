@@ -50,10 +50,10 @@ def test_default_matrix_covers_tp_state_and_kv_variants():
     assert len({case.name for case in cases}) == len(cases)
 
 
-def test_moe_candidate_adds_one_targeted_case_per_tp_size():
+def test_moe_candidate_covers_float_and_int8_kv_per_tp_size():
     cases = MODULE.build_cases((4, 8), include_moe_candidate=True)
 
-    assert len(cases) == 10
+    assert len(cases) == 12
     candidates = [
         case for case in cases if case.moe_decode_backend == "batched"
     ]
@@ -64,7 +64,12 @@ def test_moe_candidate_adds_one_targeted_case_per_tp_size():
             case.kv_cache_dtype,
         )
         for case in candidates
-    } == {(4, "model", "auto"), (8, "model", "auto")}
+    } == {
+        (4, "model", "auto"),
+        (4, "model", "int8"),
+        (8, "model", "auto"),
+        (8, "model", "int8"),
+    }
 
 
 def test_moe_candidate_runs_cuda_graph_and_requires_observed_path():
