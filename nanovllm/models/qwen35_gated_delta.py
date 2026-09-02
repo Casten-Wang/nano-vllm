@@ -564,9 +564,22 @@ class Qwen35GatedRMSNorm(nn.Module):
     def forward(self, hidden_states: torch.Tensor, gate: torch.Tensor) -> torch.Tensor:
         input_dtype = hidden_states.dtype
         hidden_float = hidden_states.float()
-        normalized = hidden_float * torch.rsqrt(
+        inverse_rms = torch.rsqrt(
             hidden_float.pow(2).mean(dim=-1, keepdim=True) + self.eps
         )
+        if (
+            not torch.is_grad_enabled()
+            and hidden_float is not hidden_states
+            and gate.dtype != torch.float32
+        ):
+            hidden_float.mul_(inverse_rms)
+            normalized = hidden_float.to(input_dtype)
+            gate_float = gate.float()
+            F.silu(gate_float, inplace=True)
+            torch.mul(normalized, self.weight, out=hidden_float)
+            hidden_float.mul_(gate_float)
+            return hidden_float.to(input_dtype)
+        normalized = hidden_float * inverse_rms
         return (
             normalized.to(input_dtype)
             * self.weight

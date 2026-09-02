@@ -517,6 +517,47 @@ def test_decay_and_gated_norm_parameters_remain_fp32_under_bf16_default():
     assert layer.dt_bias.dtype == torch.bfloat16
 
 
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_gated_rmsnorm_inference_matches_reference_without_mutation(dtype):
+    torch.manual_seed(39)
+    norm = qwen35_gated_delta.Qwen35GatedRMSNorm(6)
+    norm.weight.data.normal_(mean=1.0, std=0.2)
+    hidden = torch.randn(4, 6, dtype=dtype)
+    gate = torch.randn(4, 6, dtype=dtype)
+    original_hidden = hidden.clone()
+    original_gate = gate.clone()
+    hidden_float = hidden.float()
+    expected = (
+        (
+            hidden_float
+            * torch.rsqrt(
+                hidden_float.square().mean(dim=-1, keepdim=True) + norm.eps
+            )
+        ).to(dtype)
+        * norm.weight
+        * F.silu(gate.float())
+    ).to(dtype)
+
+    with torch.inference_mode():
+        actual = norm(hidden, gate)
+
+    assert torch.equal(hidden, original_hidden)
+    assert torch.equal(gate, original_gate)
+    torch.testing.assert_close(actual, expected)
+
+
+def test_gated_rmsnorm_autograd_preserves_backward_inputs():
+    norm = qwen35_gated_delta.Qwen35GatedRMSNorm(6)
+    hidden = torch.randn(4, 6, dtype=torch.bfloat16, requires_grad=True)
+    gate = torch.randn(4, 6, dtype=torch.bfloat16, requires_grad=True)
+
+    norm(hidden, gate).float().square().mean().backward()
+
+    assert hidden.grad is not None
+    assert gate.grad is not None
+    assert norm.weight.grad is not None
+
+
 def test_gated_delta_layer_chunked_prefill_matches_one_shot():
     torch.manual_seed(4)
     layer = make_layer()
