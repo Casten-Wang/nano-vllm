@@ -36,8 +36,19 @@ def args(**overrides):
     return Namespace(**values)
 
 
-def summary(ppl_bf16, ppl_int8):
+def summary(ppl_bf16, ppl_int8, *, top1=7, logprob=-2.0):
     return {
+        "case_token_digest": "cases",
+        "batches": [
+            {
+                "decode_trajectories": {
+                    "bf16_top1_token_ids": [[top1]],
+                    "int8_top1_token_ids": [[top1]],
+                    "bf16_target_logprobs": [[logprob]],
+                    "int8_target_logprobs": [[logprob - 0.01]],
+                }
+            }
+        ],
         "summary": {
             "decode_ppl": {
                 "bf16": ppl_bf16,
@@ -83,6 +94,29 @@ def test_matrix_summary_separates_state_and_kv_quality_effects():
     assert comparison["model_state_bf16_kv_relative_change"] == pytest.approx(0.02)
     assert comparison["float32_state_int8_kv_relative_change"] == pytest.approx(0.05)
     assert comparison["model_state_int8_kv_relative_change"] == pytest.approx(0.08)
+
+
+def test_matrix_summary_requires_cross_tp_logit_parity():
+    cases = {
+        MODULE.QualityCase(4, "float32"): summary(10.0, 10.5),
+        MODULE.QualityCase(4, "model"): summary(10.2, 10.8),
+        MODULE.QualityCase(8, "float32"): summary(10.0, 10.5),
+        MODULE.QualityCase(8, "model"): summary(
+            10.2,
+            10.8,
+            logprob=-2.06,
+        ),
+    }
+
+    result = MODULE.summarize_results(cases)
+
+    assert not result["cross_tp"]["all_passed"]
+    model_comparison = result["cross_tp"]["comparisons"][1]
+    assert model_comparison["recurrent_state_dtype"] == "model"
+    assert not model_comparison["modes"]["bf16"]["passed"]
+    assert model_comparison["modes"]["bf16"][
+        "max_target_logprob_diff"
+    ] == pytest.approx(0.06)
 
 
 def test_cases_file_is_forwarded():

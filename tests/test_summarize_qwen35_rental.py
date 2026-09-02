@@ -196,6 +196,7 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
             "quality_scope": "decode",
             "cases": [{"kv_sensitive_token_rows": 2}],
             "comparisons_by_tp": {"tp4": {"baseline_decode_ppl": 3.0}},
+            "cross_tp": {"all_passed": True, "comparisons": []},
         },
     )
     quality_dir = tmp_path / f"quality/{run_id}_qwen35_tp4"

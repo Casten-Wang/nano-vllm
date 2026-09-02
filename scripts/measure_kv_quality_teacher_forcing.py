@@ -23,6 +23,7 @@ two model copies on the GPU at the same time.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -629,23 +630,46 @@ def compare_workers(auto: dict[str, Any], int8: dict[str, Any]) -> dict[str, Any
         raise RuntimeError("BF16 and INT8 worker produced different step counts")
     target_matrix = torch.tensor(auto["target_matrix"], dtype=torch.long)
     rows = []
+    decode_trajectories = {
+        "bf16_top1_token_ids": [],
+        "int8_top1_token_ids": [],
+        "bf16_target_logprobs": [],
+        "int8_target_logprobs": [],
+    }
     for step, (left_step, right_step) in enumerate(zip(left, right)):
         if left_step.shape != right_step.shape:
             raise RuntimeError(
                 f"logit shape mismatch at step {step}: "
                 f"{left_step.shape} vs {right_step.shape}"
             )
+        stage = auto["stage_records"][step]["stage"]
+        targets = target_matrix[:, step]
         rows.append(
             {
                 "step": step,
-                "stage": auto["stage_records"][step]["stage"],
+                "stage": stage,
                 **_row_metrics(
                     left_step,
                     right_step,
-                    target_matrix[:, step],
+                    targets,
                 ),
             }
         )
+        if stage == "decode":
+            left_logp = torch.log_softmax(left_step.float(), dim=-1)
+            right_logp = torch.log_softmax(right_step.float(), dim=-1)
+            decode_trajectories["bf16_top1_token_ids"].append(
+                left_step.argmax(-1).tolist()
+            )
+            decode_trajectories["int8_top1_token_ids"].append(
+                right_step.argmax(-1).tolist()
+            )
+            decode_trajectories["bf16_target_logprobs"].append(
+                left_logp.gather(-1, targets.unsqueeze(-1)).squeeze(-1).tolist()
+            )
+            decode_trajectories["int8_target_logprobs"].append(
+                right_logp.gather(-1, targets.unsqueeze(-1)).squeeze(-1).tolist()
+            )
     decode_rows = [row for row in rows if row["stage"] == "decode"]
     if not decode_rows:
         raise RuntimeError("quality comparison produced no KV-sensitive decode rows")
@@ -674,6 +698,7 @@ def compare_workers(auto: dict[str, Any], int8: dict[str, Any]) -> dict[str, Any
             "auto": auto["shape_trace"],
             "int8": int8["shape_trace"],
         },
+        "decode_trajectories": decode_trajectories,
     }
     return result
 
@@ -855,6 +880,18 @@ def main() -> None:
             "natural_language_corpus": True,
         },
         "batches": [],
+        "case_token_digest": hashlib.sha256(
+            json.dumps(
+                [
+                    {
+                        "prompt_ids": case["prompt_ids"],
+                        "target_ids": case["target_ids"],
+                    }
+                    for case in all_cases
+                ],
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest(),
     }
     for index in range(0, len(all_cases), args.cases_per_length):
         cases = all_cases[index : index + args.cases_per_length]

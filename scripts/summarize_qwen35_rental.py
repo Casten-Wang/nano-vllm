@@ -508,6 +508,7 @@ def summarize(run_dir: Path, run_id: str) -> dict:
         "quality_reads_stored_kv": all(
             row["kv_sensitive_token_rows"] > 0 for row in quality["cases"]
         ),
+        "quality_cross_tp_parity": quality["cross_tp"]["all_passed"],
         "cuda_measurements": cuda_measurements,
         "clean_worktrees": clean_worktrees,
         "single_commit": len(commits) == 1,
@@ -539,6 +540,7 @@ def summarize(run_dir: Path, run_id: str) -> dict:
         "quality": {
             "scope": quality["quality_scope"],
             "comparisons_by_tp": quality["comparisons_by_tp"],
+            "cross_tp": quality["cross_tp"],
         },
         "graph_safe_moe": {
             "all_tp_promoted": (

@@ -15,6 +15,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 QUALITY_SCRIPT = ROOT / "scripts" / "measure_kv_quality_teacher_forcing.py"
 AUDIT_SCRIPT = ROOT / "scripts" / "audit_checkpoint_mapping.py"
+CROSS_TP_MAX_TARGET_LOGPROB_DIFF = 0.05
 
 
 @dataclass(frozen=True)
@@ -138,7 +139,8 @@ def summarize_results(
             }
         )
 
-    for tp_size in sorted({case.tensor_parallel_size for case in results}):
+    tp_sizes = sorted({case.tensor_parallel_size for case in results})
+    for tp_size in tp_sizes:
         fp32 = results[QualityCase(tp_size, "float32")]["summary"]["decode_ppl"]
         model = results[QualityCase(tp_size, "model")]["summary"]["decode_ppl"]
         baseline = fp32["bf16"]
@@ -149,10 +151,85 @@ def summarize_results(
             "float32_state_int8_kv_relative_change": fp32["int8"] / baseline - 1.0,
             "model_state_int8_kv_relative_change": model["int8"] / baseline - 1.0,
         }
+    case_digests = {result["case_token_digest"] for result in results.values()}
+    if len(case_digests) != 1:
+        raise ValueError("quality matrix cases differ across TP configurations")
+
+    def trajectory(result: dict, name: str) -> list:
+        return [
+            value
+            for batch in result["batches"]
+            for step in batch["decode_trajectories"][name]
+            for value in step
+        ]
+
+    cross_tp_comparisons = []
+    baseline_tp = tp_sizes[0]
+    for state_dtype in ("float32", "model"):
+        baseline = results[QualityCase(baseline_tp, state_dtype)]
+        for tp_size in tp_sizes[1:]:
+            candidate = results[QualityCase(tp_size, state_dtype)]
+            mode_results = {}
+            for mode in ("bf16", "int8"):
+                top1_name = f"{mode}_top1_token_ids"
+                logprob_name = f"{mode}_target_logprobs"
+                baseline_top1 = trajectory(baseline, top1_name)
+                candidate_top1 = trajectory(candidate, top1_name)
+                baseline_logprobs = trajectory(baseline, logprob_name)
+                candidate_logprobs = trajectory(candidate, logprob_name)
+                shapes_match = (
+                    bool(baseline_top1)
+                    and bool(baseline_logprobs)
+                    and len(baseline_top1) == len(candidate_top1)
+                    and len(baseline_logprobs) == len(candidate_logprobs)
+                )
+                max_logprob_diff = (
+                    max(
+                        (
+                            abs(left - right)
+                            for left, right in zip(
+                                baseline_logprobs,
+                                candidate_logprobs,
+                            )
+                        ),
+                        default=0.0,
+                    )
+                    if shapes_match
+                    else None
+                )
+                top1_match = shapes_match and baseline_top1 == candidate_top1
+                mode_results[mode] = {
+                    "top1_match": top1_match,
+                    "max_target_logprob_diff": max_logprob_diff,
+                    "passed": (
+                        top1_match
+                        and max_logprob_diff
+                        <= CROSS_TP_MAX_TARGET_LOGPROB_DIFF
+                    ),
+                }
+            cross_tp_comparisons.append(
+                {
+                    "baseline_tp": baseline_tp,
+                    "candidate_tp": tp_size,
+                    "recurrent_state_dtype": state_dtype,
+                    "modes": mode_results,
+                    "passed": all(
+                        item["passed"] for item in mode_results.values()
+                    ),
+                }
+            )
     return {
         "quality_scope": "teacher-forced decode tokens that read stored KV cache",
         "cases": rows,
         "comparisons_by_tp": by_tp,
+        "case_token_digest": next(iter(case_digests)),
+        "cross_tp": {
+            "max_target_logprob_diff": CROSS_TP_MAX_TARGET_LOGPROB_DIFF,
+            "all_passed": all(
+                item["passed"] for item in cross_tp_comparisons
+            ),
+            "comparisons": cross_tp_comparisons,
+        },
     }
 
 
