@@ -711,3 +711,40 @@ def test_buffer_reuse_summary_preserves_failed_accuracy_evidence():
     assert not summary["valid"]
     assert summary["max_abs_error"] == 0.051
     assert summary["peak_extra_mib_delta"] == -1.0
+
+
+def test_buffer_reuse_summary_rejects_peak_memory_regression():
+    result = {
+        "reference": {"peak_extra_mib": 1.0},
+        "candidate": {"peak_extra_mib": 1.5},
+        "speedup": 1.2,
+        "errors": [{"max_abs_error": 0.0}],
+        "reused_workspace_mib": 1.0,
+    }
+
+    summary = MODULE.summarize_buffer_reuse_candidate(
+        result,
+        ("reused_workspace_mib",),
+    )
+
+    assert summary["measurement_valid"]
+    assert not summary["memory_non_regression"]
+    assert not summary["valid"]
+
+
+def test_normalization_summary_rejects_invalid_measurements():
+    result = {
+        "reference": {"peak_extra_mib": 1.0},
+        "candidate": {"peak_extra_mib": float("nan")},
+        "speedup": float("nan"),
+        "errors": [{"max_abs_error": 0.0}],
+        "reuses_workspace": True,
+    }
+
+    summary = MODULE.summarize_normalization_candidate(
+        result,
+        "reuses_workspace",
+    )
+
+    assert not summary["measurement_valid"]
+    assert not summary["valid"]

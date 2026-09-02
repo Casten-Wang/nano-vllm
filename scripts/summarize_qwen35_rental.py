@@ -53,18 +53,31 @@ def summarize_normalization_candidate(
     max_abs_error = max(item["max_abs_error"] for item in result["errors"])
     reference = result["reference"]
     candidate = result["candidate"]
+    speedup = result["speedup"]
+    reference_peak = reference["peak_extra_mib"]
+    candidate_peak = candidate["peak_extra_mib"]
+    measurement_valid = (
+        math.isfinite(speedup)
+        and speedup > 0
+        and math.isfinite(reference_peak)
+        and reference_peak >= 0
+        and math.isfinite(candidate_peak)
+        and candidate_peak >= 0
+    )
+    memory_non_regression = measurement_valid and candidate_peak <= reference_peak
     return {
         "valid": (
             result[reuse_key]
             and all(result.get(flag) is True for flag in required_flags)
             and max_abs_error <= NORMALIZATION_MAX_ABS_ERROR
+            and memory_non_regression
         ),
-        "speedup": result["speedup"],
-        "reference_peak_extra_mib": reference["peak_extra_mib"],
-        "candidate_peak_extra_mib": candidate["peak_extra_mib"],
-        "peak_extra_mib_delta": (
-            candidate["peak_extra_mib"] - reference["peak_extra_mib"]
-        ),
+        "speedup": speedup,
+        "measurement_valid": measurement_valid,
+        "memory_non_regression": memory_non_regression,
+        "reference_peak_extra_mib": reference_peak,
+        "candidate_peak_extra_mib": candidate_peak,
+        "peak_extra_mib_delta": candidate_peak - reference_peak,
         "max_abs_error": max_abs_error,
         "max_allowed_abs_error": NORMALIZATION_MAX_ABS_ERROR,
         "workspace": {
@@ -103,18 +116,31 @@ def summarize_buffer_reuse_candidate(
         for key, expected in (required_metadata or {}).items()
     )
     workspace = {key: result[key] for key in workspace_keys}
+    speedup = result["speedup"]
+    reference_peak = reference["peak_extra_mib"]
+    candidate_peak = candidate["peak_extra_mib"]
+    measurement_valid = (
+        math.isfinite(speedup)
+        and speedup > 0
+        and math.isfinite(reference_peak)
+        and reference_peak >= 0
+        and math.isfinite(candidate_peak)
+        and candidate_peak >= 0
+    )
+    memory_non_regression = measurement_valid and candidate_peak <= reference_peak
     return {
         "valid": (
             all(value > 0 for value in workspace.values())
             and metadata_valid
             and max_abs_error <= BUFFER_REUSE_MAX_ABS_ERROR
+            and memory_non_regression
         ),
-        "speedup": result["speedup"],
-        "reference_peak_extra_mib": reference["peak_extra_mib"],
-        "candidate_peak_extra_mib": candidate["peak_extra_mib"],
-        "peak_extra_mib_delta": (
-            candidate["peak_extra_mib"] - reference["peak_extra_mib"]
-        ),
+        "speedup": speedup,
+        "measurement_valid": measurement_valid,
+        "memory_non_regression": memory_non_regression,
+        "reference_peak_extra_mib": reference_peak,
+        "candidate_peak_extra_mib": candidate_peak,
+        "peak_extra_mib_delta": candidate_peak - reference_peak,
         "max_abs_error": max_abs_error,
         "max_allowed_abs_error": BUFFER_REUSE_MAX_ABS_ERROR,
         "workspace": workspace,
