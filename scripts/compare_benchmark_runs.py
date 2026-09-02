@@ -49,6 +49,7 @@ OPTIMIZATION_FIELDS = (
 
 STORAGE_FIELDS = (
     "kv_cache_storage",
+    "kv_cache_storage_by_rank",
     "num_kvcache_blocks",
     "recurrent_state_storage",
     "recurrent_state_storage_by_rank",

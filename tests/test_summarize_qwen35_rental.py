@@ -277,6 +277,10 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
             "storage": {
                 "num_kvcache_blocks": 1,
                 "kv_cache_storage": {"total_bytes": 256 * 10_240},
+                "kv_cache_storage_by_rank": [
+                    {"rank": rank, "total_bytes": 256 * 10_240}
+                    for rank in range(4)
+                ],
                 "recurrent_state_storage": {
                     "total_bytes_local_rank": 500,
                     "rotary_cache_bytes_local_rank": 4096,
@@ -314,6 +318,10 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
             "storage": {
                 "num_kvcache_blocks": 1,
                 "kv_cache_storage": {"total_bytes": 256 * 10_240},
+                "kv_cache_storage_by_rank": [
+                    {"rank": rank, "total_bytes": 256 * 10_240}
+                    for rank in range(4)
+                ],
                 "recurrent_state_storage": {
                     "total_bytes_local_rank": 500,
                     "rotary_cache_bytes_local_rank": 4096,
@@ -341,9 +349,13 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     int8_baseline = deepcopy(rows[0])
     int8_baseline.update(label="sorted-int8", kv_cache_dtype="int8")
     int8_baseline["storage"]["kv_cache_storage"]["total_bytes"] = 256 * 5_160
+    for item in int8_baseline["storage"]["kv_cache_storage_by_rank"]:
+        item["total_bytes"] = 256 * 5_160
     int8_candidate = deepcopy(rows[1])
     int8_candidate.update(label="batched-int8", kv_cache_dtype="int8")
     int8_candidate["storage"]["kv_cache_storage"]["total_bytes"] = 256 * 5_160
+    for item in int8_candidate["storage"]["kv_cache_storage_by_rank"]:
+        item["total_bytes"] = 256 * 5_160
     rows.extend((int8_baseline, int8_candidate))
     write(
         tmp_path / f"performance/{run_id}_matrix_summary.json",
@@ -626,14 +638,14 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     performance_result["runs"][0]["storage"]["recurrent_state_storage_by_rank"][2][
         "total_bytes_local_rank"
     ] = 500
-    performance_result["runs"][0]["storage"]["kv_cache_storage"][
+    performance_result["runs"][0]["storage"]["kv_cache_storage_by_rank"][3][
         "total_bytes"
     ] += 1
     write(performance_path, performance_result)
     mismatched_kv_report = MODULE.summarize(tmp_path, run_id)
     assert not mismatched_kv_report["evidence"]["kv_storage_matches_preflight"]
     assert not mismatched_kv_report["valid"]
-    performance_result["runs"][0]["storage"]["kv_cache_storage"][
+    performance_result["runs"][0]["storage"]["kv_cache_storage_by_rank"][3][
         "total_bytes"
     ] -= 1
     write(performance_path, performance_result)

@@ -239,6 +239,7 @@ def main() -> None:
     recurrent_state_by_rank = llm.model_runner.call(
         "get_recurrent_state_stats_by_rank"
     )
+    kv_cache_by_rank = llm.model_runner.call("get_kv_cache_stats_by_rank")
     peak_allocated_bytes = max(
         item["peak_allocated_bytes"] for item in cuda_memory_by_rank
     )
@@ -294,6 +295,7 @@ def main() -> None:
         "cuda_memory_by_rank": cuda_memory_by_rank,
         "num_kvcache_blocks": llm.model_runner.config.num_kvcache_blocks,
         "kv_cache_storage": kv_cache_storage_metadata(llm.model_runner),
+        "kv_cache_storage_by_rank": kv_cache_by_rank,
         "recurrent_state_storage": recurrent_state_by_rank[0],
         "recurrent_state_storage_by_rank": recurrent_state_by_rank,
         "recurrent_state_total_all_ranks_bytes": sum(

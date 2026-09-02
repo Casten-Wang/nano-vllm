@@ -483,6 +483,20 @@ class HybridStateContextTest(unittest.TestCase):
         self.assertEqual(stats["rotary_cache_bytes_local_rank"], 20)
         self.assertEqual(stats["total_model_state_bytes_local_rank"], 40)
 
+    def test_single_rank_kv_cache_stats_report_data_and_scales(self):
+        runner = object.__new__(ModelRunner)
+        runner.rank = 0
+        runner.world_size = 1
+        runner.kv_cache = FakeTensor(range(10))
+        runner.kv_scale = FakeTensor(range(4))
+
+        stats = runner.get_kv_cache_stats_by_rank()
+
+        self.assertEqual(
+            stats,
+            [{"rank": 0, "data_bytes": 20, "scale_bytes": 8, "total_bytes": 28}],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

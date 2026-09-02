@@ -712,12 +712,22 @@ def summarize(run_dir: Path, run_id: str) -> dict:
         for row in performance["runs"]
     )
     kv_storage_matches_preflight = all(
-        row.get("storage", {}).get("kv_cache_storage", {}).get("total_bytes")
-        == row.get("storage", {}).get("num_kvcache_blocks", 0)
-        * KVCACHE_BLOCK_SIZE
-        * memory_by_tp.get(f"tp{row['tensor_parallel_size']}", {})
-        .get("kv_bytes_per_token_by_dtype", {})
-        .get(row["kv_cache_dtype"], 0)
+        len(row.get("storage", {}).get("kv_cache_storage_by_rank", []))
+        == row["tensor_parallel_size"]
+        and {
+            item.get("rank")
+            for item in row["storage"]["kv_cache_storage_by_rank"]
+        }
+        == set(range(row["tensor_parallel_size"]))
+        and all(
+            item.get("total_bytes")
+            == row["storage"].get("num_kvcache_blocks", 0)
+            * KVCACHE_BLOCK_SIZE
+            * memory_by_tp.get(f"tp{row['tensor_parallel_size']}", {})
+            .get("kv_bytes_per_token_by_dtype", {})
+            .get(row["kv_cache_dtype"], 0)
+            for item in row["storage"]["kv_cache_storage_by_rank"]
+        )
         for row in performance["runs"]
     )
     attention = {}

@@ -268,6 +268,22 @@ class ModelRunner:
         dist.all_gather_object(gathered, local)
         return gathered
 
+    def get_kv_cache_stats_by_rank(self):
+        scale = getattr(self, "kv_scale", None)
+        data_bytes = self.kv_cache.numel() * self.kv_cache.element_size()
+        scale_bytes = scale.numel() * scale.element_size() if scale is not None else 0
+        local = {
+            "rank": self.rank,
+            "data_bytes": data_bytes,
+            "scale_bytes": scale_bytes,
+            "total_bytes": data_bytes + scale_bytes,
+        }
+        if self.world_size == 1:
+            return [local]
+        gathered = [None] * self.world_size
+        dist.all_gather_object(gathered, local)
+        return gathered
+
     def _record_execution(
         self,
         *,

@@ -224,6 +224,7 @@ def main() -> None:
     recurrent_state_by_rank = llm.model_runner.call(
         "get_recurrent_state_stats_by_rank"
     )
+    kv_cache_by_rank = llm.model_runner.call("get_kv_cache_stats_by_rank")
     peak_allocated_bytes = max(
         item["peak_allocated_bytes"] for item in cuda_memory_by_rank
     )
@@ -292,6 +293,7 @@ def main() -> None:
         "peak_torch_reserved_mib": peak_reserved_bytes / 1024 / 1024,
         "cuda_memory_by_rank": cuda_memory_by_rank,
         "recurrent_state_storage_by_rank": recurrent_state_by_rank,
+        "kv_cache_storage_by_rank": kv_cache_by_rank,
         "recurrent_state_total_all_ranks_bytes": sum(
             item["total_bytes_local_rank"] for item in recurrent_state_by_rank
         ),

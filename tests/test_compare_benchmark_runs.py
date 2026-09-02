@@ -77,6 +77,9 @@ def result(
             "avg_request_latency_s": 3.0,
         },
         "kv_cache_storage": {"total_bytes": 1024},
+        "kv_cache_storage_by_rank": [
+            {"rank": rank, "total_bytes": 1024} for rank in range(4)
+        ],
         "num_kvcache_blocks": 1,
         "recurrent_state_storage": {
             "total_bytes_local_rank": 2048,
