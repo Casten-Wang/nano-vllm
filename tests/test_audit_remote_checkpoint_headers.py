@@ -114,6 +114,34 @@ def test_header_only_audit_rejects_unclassified_skip():
     assert result["unclassified_skipped_weights"] == ["audio.weight"]
 
 
+def test_header_audit_uses_model_defined_stacked_checkpoint_mapping():
+    class StackedModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.stacked = torch.nn.Parameter(
+                torch.empty(2, 2, device="meta"),
+                requires_grad=False,
+            )
+            self.stacked.required_checkpoint_shards = frozenset({0, 1})
+            self.stacked.packed_safetensors_loader = (
+                lambda parameter, source, shard: parameter[shard].copy_(source[:])
+            )
+
+        @staticmethod
+        def resolve_checkpoint_parameter(name):
+            return "stacked", int(name.rsplit(".", 1)[-1])
+
+    headers = {
+        "expert.0": {"dtype": "F16", "shape": [2]},
+        "expert.1": {"dtype": "F16", "shape": [2]},
+    }
+
+    result = MODULE.audit_model_headers(StackedModel(), headers)
+
+    assert result["valid"]
+    assert result["incomplete_checkpoint_shards"] == []
+
+
 def test_fetch_header_rejects_oversized_metadata(monkeypatch):
     monkeypatch.setattr(
         MODULE,

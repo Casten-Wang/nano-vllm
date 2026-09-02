@@ -311,10 +311,16 @@ def cache_storage_metadata(model_spec, tp_size: int, model_dtype_bytes: int) -> 
     }
 
 
-def instantiate_meta_model(model_path: str, tp_size: int) -> torch.nn.Module:
+def instantiate_meta_model(
+    model_path: str,
+    tp_size: int,
+    quantization=None,
+) -> torch.nn.Module:
     config = AutoConfig.from_pretrained(model_path)
     model_spec = resolve_model_spec(config)
     model_config = model_spec.text_config
+    if quantization is not None and quantization.is_quantized:
+        model_config.nanovllm_quantization_spec = quantization
     if not hasattr(model_config, "dtype"):
         torch_dtype = getattr(model_config, "torch_dtype", None)
         model_config.dtype = (

@@ -374,8 +374,14 @@ def audit_model_headers(model, headers: dict[str, dict]) -> dict:
     }
     packed_mapping = getattr(model, "packed_modules_mapping", {})
     map_name = getattr(model, "map_weight_name", lambda name: name)
+    resolve_checkpoint_parameter = getattr(
+        model,
+        "resolve_checkpoint_parameter",
+        None,
+    )
     checkpoint = HeaderCheckpoint(headers)
     loaded = set()
+    loaded_checkpoint_shards = {}
     skipped = []
     skipped_by_prefix = {
         prefix: 0 for prefix in ALLOWED_TEXT_ONLY_SKIP_PREFIXES
@@ -398,7 +404,13 @@ def audit_model_headers(model, headers: dict[str, dict]) -> dict:
             else:
                 unclassified_skipped.append(source_name)
             continue
-        packed = resolve_packed_parameter(mapped, packed_mapping)
+        packed = (
+            resolve_checkpoint_parameter(mapped)
+            if resolve_checkpoint_parameter is not None
+            else None
+        )
+        if packed is None:
+            packed = resolve_packed_parameter(mapped, packed_mapping)
         target = packed[0] if packed is not None else mapped
         if target not in expected:
             unexpected.append({"source": source_name, "mapped": target})
@@ -423,7 +435,24 @@ def audit_model_headers(model, headers: dict[str, dict]) -> dict:
         else:
             full_tensor_count += 1
         loaded.add(target)
+        if packed is not None:
+            loaded_checkpoint_shards.setdefault(target, set()).add(packed[1])
     missing = sorted(expected - loaded)
+    incomplete_checkpoint_shards = []
+    for target, loaded_shards in loaded_checkpoint_shards.items():
+        required = getattr(
+            model.get_parameter(target),
+            "required_checkpoint_shards",
+            None,
+        )
+        if required is not None and loaded_shards != set(required):
+            incomplete_checkpoint_shards.append(
+                {
+                    "parameter": target,
+                    "loaded": sorted(map(str, loaded_shards)),
+                    "expected": sorted(map(str, required)),
+                }
+            )
     return {
         "expected_parameter_count": len(expected),
         "mapped_parameter_count": len(loaded),
@@ -433,6 +462,7 @@ def audit_model_headers(model, headers: dict[str, dict]) -> dict:
         "missing_parameters": missing,
         "unexpected_weights": unexpected,
         "shape_errors": shape_errors,
+        "incomplete_checkpoint_shards": incomplete_checkpoint_shards,
         "local_parameter_bytes": parameter_storage_bytes(model),
         "checkpoint_loading": {
             "mapped_checkpoint_bytes": mapped_checkpoint_bytes,
@@ -453,6 +483,7 @@ def audit_model_headers(model, headers: dict[str, dict]) -> dict:
             and not unexpected
             and not shape_errors
             and not unclassified_skipped
+            and not incomplete_checkpoint_shards
         ),
     }
 
@@ -561,14 +592,28 @@ def main() -> None:
         (model_dir / "config.json").write_bytes(config_bytes)
         results = {}
         for tp_size in args.tp_sizes:
-            model = instantiate_meta_model(str(model_dir), tp_size)
-            result = audit_model_headers(model, logical_headers)
+            executable_layout = quantization.format == "gptq_int4"
+            model = instantiate_meta_model(
+                str(model_dir),
+                tp_size,
+                quantization if executable_layout else None,
+            )
+            result = audit_model_headers(
+                model,
+                headers if executable_layout else logical_headers,
+            )
             if quantization.is_quantized:
-                result["scope"] = (
-                    "logical parameter names and shapes reconstructed from "
-                    "quantized headers; payload loading is not validated"
-                )
-                result["checkpoint_loading"] = None
+                if executable_layout:
+                    result["scope"] = (
+                        "quantized parameter names, shapes, and TP loader slices "
+                        "validated from headers; tensor values are not read"
+                    )
+                else:
+                    result["scope"] = (
+                        "logical parameter names and shapes reconstructed from "
+                        "quantized headers; payload loading is not validated"
+                    )
+                    result["checkpoint_loading"] = None
                 result["quantized_tp_layout"] = audit_quantized_tp_layout(
                     unstacked_logical_headers,
                     quantization,
