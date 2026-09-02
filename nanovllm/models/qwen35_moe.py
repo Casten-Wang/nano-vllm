@@ -22,9 +22,14 @@ class Qwen35RMSNorm(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x_float = x.float()
-        normalized = x_float * torch.rsqrt(
+        inverse_rms = torch.rsqrt(
             x_float.pow(2).mean(dim=-1, keepdim=True) + self.eps
         )
+        if not torch.is_grad_enabled() and x_float is not x:
+            x_float.mul_(inverse_rms)
+            x_float.mul_(1.0 + self.weight.float())
+            return x_float.to(x.dtype)
+        normalized = x_float * inverse_rms
         return (normalized * (1.0 + self.weight.float())).to(x.dtype)
 
 
