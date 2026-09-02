@@ -67,6 +67,49 @@ else:
 
 @unittest.skipIf(torch is None or IMPORT_ERROR is not None, "torch/triton unavailable")
 class PartitionedWorkspaceTest(unittest.TestCase):
+    def test_buffer_pool_reuses_storage_across_shapes(self):
+        pool = int8_fused_attention.PartitionedDecodeBufferPool()
+        large_q = torch.empty(4, 3, 8, dtype=torch.float16)
+        large_workspace, large_output = pool.acquire(large_q, 5, 8)
+        workspace_storage = large_workspace[0].untyped_storage().data_ptr()
+        output_storage = large_output.untyped_storage().data_ptr()
+
+        small_q = torch.empty(2, 3, 8, dtype=torch.float16)
+        small_workspace, small_output = pool.acquire(small_q, 2, 8)
+
+        self.assertEqual(
+            small_workspace[0].untyped_storage().data_ptr(),
+            workspace_storage,
+        )
+        self.assertEqual(small_output.untyped_storage().data_ptr(), output_storage)
+        self.assertEqual(small_output.shape, small_q.shape)
+        int8_fused_attention.validate_partitioned_workspace(
+            small_workspace,
+            small_q,
+            2,
+            8,
+        )
+        int8_fused_attention.validate_partitioned_output(
+            small_output,
+            small_q,
+            small_workspace,
+        )
+
+    def test_buffer_pool_grows_each_storage_independently(self):
+        pool = int8_fused_attention.PartitionedDecodeBufferPool()
+        q = torch.empty(1, 2, 4, dtype=torch.float16)
+        first_workspace, first_output = pool.acquire(q, 1, 4)
+        first_workspace_size = first_workspace[0].untyped_storage().nbytes()
+        first_output_ptr = first_output.untyped_storage().data_ptr()
+
+        larger_workspace, same_output = pool.acquire(q, 7, 8)
+
+        self.assertGreater(
+            larger_workspace[0].untyped_storage().nbytes(),
+            first_workspace_size,
+        )
+        self.assertEqual(same_output.untyped_storage().data_ptr(), first_output_ptr)
+
     def test_partial_workspace_views_share_one_allocation(self):
         q = torch.empty(2, 3, 4)
         num_partitions = 5

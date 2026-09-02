@@ -99,6 +99,45 @@ def make_mixed_attention():
     return layer
 
 
+def test_partitioned_decode_uses_shared_workspace_and_output():
+    layer = ATTENTION.Attention(2, 3, 3**-0.5, 1)
+    layer.k_cache = torch.empty(1)
+    layer.v_cache = torch.empty(1)
+    layer.k_scale = torch.empty(1)
+    layer.v_scale = torch.empty(1)
+    layer.int8_partitioned_decode_partition_size = 512
+    CURRENT_CONTEXT["value"] = types.SimpleNamespace(sliding_window_size=None)
+    q = torch.empty(2, 2, 3)
+    output = torch.empty_like(q)
+
+    class Pool:
+        pass
+
+    pool = Pool()
+    layer.int8_partitioned_decode_pool = pool
+    with (
+        patch.object(
+            ATTENTION,
+            "select_int8_decode_attention_path",
+            return_value="int8_partitioned_decode",
+        ),
+        patch.object(
+            ATTENTION,
+            "partitioned_fused_int8_decode_attention",
+            return_value=output,
+        ) as kernel,
+    ):
+        actual = layer._int8_decode_attention(
+            q,
+            torch.empty(2, 3, dtype=torch.int32),
+            torch.tensor([1025, 900], dtype=torch.int32),
+            1025,
+        )
+
+    assert actual is output
+    assert kernel.call_args.kwargs["buffer_pool"] is pool
+
+
 @pytest.mark.parametrize("grad_enabled", [False, True])
 def test_mixed_attention_reuses_query_only_in_inference(grad_enabled):
     layer = make_mixed_attention()

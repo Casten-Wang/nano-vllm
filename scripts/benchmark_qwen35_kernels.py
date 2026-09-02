@@ -62,6 +62,10 @@ ROTARY = load_source_module(
     "qwen35_rotary_benchmark",
     "nanovllm/layers/rotary_embedding.py",
 )
+INT8_ATTENTION = load_source_module(
+    "qwen35_int8_attention_benchmark",
+    "nanovllm/layers/int8_fused_attention.py",
+)
 
 
 def synchronize(device: torch.device) -> None:
@@ -136,6 +140,91 @@ def error(actual: torch.Tensor, expected: torch.Tensor) -> dict[str, float]:
         "max_abs_error": difference.abs().max().item(),
         "max_relative_error": (difference.abs() / denominator).max().item(),
         "rmse": difference.square().mean().sqrt().item(),
+    }
+
+
+def benchmark_partitioned_decode_buffer_reuse(
+    args,
+    device: torch.device,
+    dtype: torch.dtype,
+    local_query_heads: int,
+) -> dict:
+    """Compare per-layer allocations with one model-level decode buffer pool."""
+
+    q = torch.empty(
+        args.decode_batch,
+        local_query_heads,
+        args.attention_head_dim,
+        dtype=dtype,
+        device=device,
+    )
+    num_partitions = math.ceil(
+        args.int8_context_len / args.int8_partition_size
+    )
+    block_head_dim = 1 << (args.attention_head_dim - 1).bit_length()
+    pool = INT8_ATTENTION.PartitionedDecodeBufferPool()
+    candidate_workspace, candidate_output = pool.acquire(
+        q,
+        num_partitions,
+        block_head_dim,
+    )
+    INT8_ATTENTION.validate_partitioned_workspace(
+        candidate_workspace,
+        q,
+        num_partitions,
+        block_head_dim,
+    )
+    INT8_ATTENTION.validate_partitioned_output(
+        candidate_output,
+        q,
+        candidate_workspace,
+    )
+
+    def reference():
+        return (
+            INT8_ATTENTION.allocate_partitioned_workspace(
+                q,
+                num_partitions,
+                block_head_dim,
+            ),
+            torch.empty_like(q),
+        )
+
+    def candidate():
+        return pool.acquire(q, num_partitions, block_head_dim)
+
+    workspace_bytes = sum(
+        tensor.numel() * tensor.element_size()
+        for tensor in candidate_workspace
+    )
+    output_bytes = candidate_output.numel() * candidate_output.element_size()
+    return {
+        "reference": measure(
+            reference,
+            device=device,
+            warmup=args.warmup,
+            iterations=args.iterations,
+            repeats=args.repeats,
+        ),
+        "candidate": measure(
+            candidate,
+            device=device,
+            warmup=args.warmup,
+            iterations=args.iterations,
+            repeats=args.repeats,
+        ),
+        "configuration": {
+            "decode_batch": args.decode_batch,
+            "local_query_heads": local_query_heads,
+            "head_dim": args.attention_head_dim,
+            "context_len": args.int8_context_len,
+            "partition_size": args.int8_partition_size,
+            "num_partitions": num_partitions,
+        },
+        "persistent_workspace_mib": workspace_bytes / 1024 / 1024,
+        "persistent_output_mib": output_bytes / 1024 / 1024,
+        "eliminated_tensor_allocations_per_attention_layer": 2,
+        "candidate_reuses_workspace_and_output": True,
     }
 
 
@@ -2939,6 +3028,8 @@ def parse_args() -> argparse.Namespace:
         default=(32, 64, 128),
     )
     parser.add_argument("--decode-batch", type=int, default=32)
+    parser.add_argument("--int8-context-len", type=int, default=32768)
+    parser.add_argument("--int8-partition-size", type=int, default=512)
     parser.add_argument("--total-key-heads", type=int, default=16)
     parser.add_argument("--total-value-heads", type=int, default=32)
     parser.add_argument("--key-head-dim", type=int, default=128)
@@ -3008,6 +3099,8 @@ def main() -> None:
         "prefill_batch": args.prefill_batch,
         "prefill_tokens": args.prefill_tokens,
         "decode_batch": args.decode_batch,
+        "int8_context_len": args.int8_context_len,
+        "int8_partition_size": args.int8_partition_size,
         "drift_steps": args.drift_steps,
         "warmup": args.warmup,
         "moe_decode_chunk_size": args.moe_decode_chunk_size,
@@ -3126,6 +3219,14 @@ def main() -> None:
     else:
         expert_dispatch = benchmark_expert_dispatch_sweep(args, device, dtype)
         benchmark_results = {
+            "int8_partitioned_decode_buffer_reuse": (
+                benchmark_partitioned_decode_buffer_reuse(
+                    args,
+                    device,
+                    dtype,
+                    local_query_heads,
+                )
+            ),
             "router_topk_first": benchmark_router(args, device, dtype),
             "sampling_filter_fast_paths": benchmark_sampling_filter(
                 args,

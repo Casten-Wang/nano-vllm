@@ -697,6 +697,10 @@ class ModelRunner:
             )
 
     def allocate_int8_kv_cache(self):
+        from nanovllm.layers.int8_fused_attention import (
+            PartitionedDecodeBufferPool,
+        )
+
         config = self.config
         hf_config = config.model_config
         model_spec = config.model_spec
@@ -738,6 +742,7 @@ class ModelRunner:
             num_kv_heads,
             dtype=torch.float16,
         )
+        partitioned_decode_pool = PartitionedDecodeBufferPool()
         layer_id = 0
         for module in self.model.modules():
             if hasattr(module, "k_cache") and hasattr(module, "v_cache"):
@@ -750,6 +755,7 @@ class ModelRunner:
                 module.kv_dequant_backend = config.kv_dequant_backend
                 module.int8_partitioned_decode_threshold = config.int8_partitioned_decode_threshold
                 module.int8_partitioned_decode_partition_size = config.int8_partitioned_decode_partition_size
+                module.int8_partitioned_decode_pool = partitioned_decode_pool
                 layer_id += 1
         if layer_id != num_layers:
             raise RuntimeError(

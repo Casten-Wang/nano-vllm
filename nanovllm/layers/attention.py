@@ -11,8 +11,10 @@ from nanovllm.layers.kv_cache_quant import (
     store_kvcache_int8_range,
     store_kvcache_range,
 )
-from nanovllm.layers.int8_fused_attention import fused_int8_decode_attention
-from nanovllm.layers.int8_fused_attention import partitioned_fused_int8_decode_attention
+from nanovllm.layers.int8_fused_attention import (
+    fused_int8_decode_attention,
+    partitioned_fused_int8_decode_attention,
+)
 from nanovllm.utils.context import get_context
 from nanovllm.shape_trace import active_trace
 
@@ -37,6 +39,7 @@ class Attention(nn.Module):
         self.kv_dequant_backend = "fused"
         self.int8_partitioned_decode_threshold = 8192
         self.int8_partitioned_decode_partition_size = 512
+        self.int8_partitioned_decode_pool = None
 
     def _window_size(self):
         context = get_context()
@@ -184,6 +187,7 @@ class Attention(nn.Module):
                 block_tokens=256,
                 partition_size=self.int8_partitioned_decode_partition_size,
                 max_context_len=max_context_len,
+                buffer_pool=self.int8_partitioned_decode_pool,
             )
         return fused_int8_decode_attention(
             q,

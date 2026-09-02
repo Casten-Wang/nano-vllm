@@ -757,6 +757,87 @@ def allocate_partitioned_workspace(
     return partial_acc, partial_m, partial_l
 
 
+class PartitionedDecodeBufferPool:
+    """Reusable single-stream buffers for partitioned INT8 decode.
+
+    One pool can be shared by every attention layer in a model runner because
+    layers enqueue their attention and output projection serially on the same
+    CUDA stream.  The pool is intentionally not re-entrant; callers using
+    concurrent streams must own one pool per stream.
+    """
+
+    def __init__(self) -> None:
+        self.workspace_storage: torch.Tensor | None = None
+        self.output_storage: torch.Tensor | None = None
+
+    @staticmethod
+    def _needs_storage(
+        storage: torch.Tensor | None,
+        *,
+        size: int,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> bool:
+        return (
+            storage is None
+            or storage.numel() < size
+            or storage.dtype != dtype
+            or storage.device != device
+        )
+
+    def acquire(
+        self,
+        q: torch.Tensor,
+        num_partitions: int,
+        block_head_dim: int,
+    ) -> tuple[
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+        torch.Tensor,
+    ]:
+        if num_partitions <= 0 or block_head_dim <= 0:
+            raise ValueError("partitioned workspace dimensions must be positive")
+        partial_shape = (q.size(0), q.size(1), num_partitions)
+        partial_items = q.size(0) * q.size(1) * num_partitions
+        workspace_items = partial_items * (block_head_dim + 2)
+        if self._needs_storage(
+            self.workspace_storage,
+            size=workspace_items,
+            dtype=torch.float32,
+            device=q.device,
+        ):
+            self.workspace_storage = torch.empty(
+                workspace_items,
+                dtype=torch.float32,
+                device=q.device,
+            )
+        if self._needs_storage(
+            self.output_storage,
+            size=q.numel(),
+            dtype=q.dtype,
+            device=q.device,
+        ):
+            self.output_storage = torch.empty(
+                q.numel(),
+                dtype=q.dtype,
+                device=q.device,
+            )
+        assert self.workspace_storage is not None
+        assert self.output_storage is not None
+        storage = self.workspace_storage[:workspace_items]
+        partial_acc = storage[: partial_items * block_head_dim].view(
+            *partial_shape,
+            block_head_dim,
+        )
+        partial_m = storage[
+            partial_items * block_head_dim : partial_items * (block_head_dim + 1)
+        ].view(partial_shape)
+        partial_l = storage[
+            partial_items * (block_head_dim + 1) :
+        ].view(partial_shape)
+        output = self.output_storage[: q.numel()].view_as(q)
+        return (partial_acc, partial_m, partial_l), output
+
+
 def validate_partitioned_workspace(
     workspace: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
     q: torch.Tensor,
@@ -839,6 +920,7 @@ def partitioned_fused_int8_decode_attention(
     max_context_len: int,
     workspace: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     output: torch.Tensor | None = None,
+    buffer_pool: PartitionedDecodeBufferPool | None = None,
 ):
     """Partitioned INT8 decode attention for long-context eager decode.
 
@@ -882,6 +964,17 @@ def partitioned_fused_int8_decode_attention(
         partition_size=partition_size,
         sliding_window_size=sliding_window_size,
     )
+
+    if buffer_pool is not None:
+        if workspace is not None or output is not None:
+            raise ValueError(
+                "buffer_pool cannot be combined with explicit workspace or output"
+            )
+        workspace, output = buffer_pool.acquire(
+            q,
+            num_partitions,
+            block_head_dim,
+        )
 
     flat_k_cache = k_cache.view(-1, num_kv_heads, head_dim)
     flat_v_cache = v_cache.view(-1, num_kv_heads, head_dim)

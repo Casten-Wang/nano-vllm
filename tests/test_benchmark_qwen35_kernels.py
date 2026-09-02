@@ -43,6 +43,31 @@ def test_measure_runs_the_inference_path():
     assert grad_modes == [False, False, False]
 
 
+def test_partitioned_decode_benchmark_measures_shared_buffer_reuse():
+    args = SimpleNamespace(
+        decode_batch=2,
+        attention_head_dim=8,
+        int8_context_len=17,
+        int8_partition_size=8,
+        warmup=0,
+        iterations=1,
+        repeats=1,
+    )
+
+    result = MODULE.benchmark_partitioned_decode_buffer_reuse(
+        args,
+        torch.device("cpu"),
+        torch.float32,
+        local_query_heads=3,
+    )
+
+    assert result["configuration"]["num_partitions"] == 3
+    assert result["persistent_workspace_mib"] > 0
+    assert result["persistent_output_mib"] > 0
+    assert result["eliminated_tensor_allocations_per_attention_layer"] == 2
+    assert result["candidate_reuses_workspace_and_output"]
+
+
 def test_packed_block_metadata_benchmark_measures_buffer_reuse():
     args = SimpleNamespace(
         sampling_batch=2,
