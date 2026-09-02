@@ -15,7 +15,7 @@ from nanovllm.engine.llm_engine import LLMEngine
 
 @pytest.mark.parametrize("max_tokens", [0, -1, 1.5, True])
 def test_sampling_params_reject_invalid_max_tokens(max_tokens):
-    with pytest.raises(AssertionError, match="positive integer"):
+    with pytest.raises(ValueError, match="positive integer"):
         SamplingParams(max_tokens=max_tokens)
 
 

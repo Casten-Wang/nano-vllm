@@ -9,11 +9,12 @@ class SamplingParams:
 
     def __post_init__(self):
         assert self.temperature > 1e-10, "greedy sampling is not permitted"
-        assert (
+        if not (
             isinstance(self.max_tokens, int)
             and not isinstance(self.max_tokens, bool)
             and self.max_tokens > 0
-        ), "max_tokens must be a positive integer"
+        ):
+            raise ValueError("max_tokens must be a positive integer")
 
     def validate_request_length(self, prompt_length: int, max_model_len: int):
         requested_tokens = prompt_length + self.max_tokens
