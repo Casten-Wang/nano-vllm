@@ -224,10 +224,16 @@ class ModelRunner:
     def get_recurrent_state_stats(self):
         recurrent_bytes = 0
         convolution_bytes = 0
+        rotary_cache_bytes = 0
         recurrent_dtypes = set()
         convolution_dtypes = set()
         layer_count = 0
         for module in self.model.modules():
+            rotary_cache = getattr(module, "cos_sin_cache", None)
+            if rotary_cache is not None:
+                rotary_cache_bytes += (
+                    rotary_cache.numel() * rotary_cache.element_size()
+                )
             pool = getattr(module, "state_pool", None)
             if pool is None:
                 continue
@@ -243,6 +249,10 @@ class ModelRunner:
             "recurrent_bytes_local_rank": recurrent_bytes,
             "convolution_bytes_local_rank": convolution_bytes,
             "total_bytes_local_rank": recurrent_bytes + convolution_bytes,
+            "rotary_cache_bytes_local_rank": rotary_cache_bytes,
+            "total_model_state_bytes_local_rank": (
+                recurrent_bytes + convolution_bytes + rotary_cache_bytes
+            ),
             "recurrent_dtypes": sorted(recurrent_dtypes),
             "convolution_dtypes": sorted(convolution_dtypes),
             "graph_padding_slots": int(

@@ -468,7 +468,11 @@ class HybridStateContextTest(unittest.TestCase):
             )
         )
         second = SimpleNamespace(state_pool=None)
-        runner.model = SimpleNamespace(modules=lambda: [first, second])
+        rotary = SimpleNamespace(
+            state_pool=None,
+            cos_sin_cache=FakeTensor(range(10)),
+        )
+        runner.model = SimpleNamespace(modules=lambda: [first, second, rotary])
 
         stats = runner.get_recurrent_state_stats()
 
@@ -476,6 +480,8 @@ class HybridStateContextTest(unittest.TestCase):
         self.assertEqual(stats["recurrent_bytes_local_rank"], 12)
         self.assertEqual(stats["convolution_bytes_local_rank"], 8)
         self.assertEqual(stats["total_bytes_local_rank"], 20)
+        self.assertEqual(stats["rotary_cache_bytes_local_rank"], 20)
+        self.assertEqual(stats["total_model_state_bytes_local_rank"], 40)
 
 
 if __name__ == "__main__":
