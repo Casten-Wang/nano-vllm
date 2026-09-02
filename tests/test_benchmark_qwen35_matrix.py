@@ -140,12 +140,14 @@ def test_memory_preflight_covers_each_tp_rank():
         "results": {
             "tp4": {
                 "local_parameter_bytes": 16 * gib,
+                "model_max_position_embeddings": 262_144,
                 "kv_bytes_per_token": 1024,
                 "kv_bytes_per_token_by_dtype": {"auto": 1024, "int8": 520},
                 "state_bytes_per_sequence": {"float32": 8, "model": 4},
             },
             "tp8": {
                 "local_parameter_bytes": 8 * gib,
+                "model_max_position_embeddings": 262_144,
                 "kv_bytes_per_token": 512,
                 "state_bytes_per_sequence": {"float32": 4, "model": 2},
             },
@@ -162,6 +164,7 @@ def test_memory_preflight_covers_each_tp_rank():
         640,
         1.0,
         1,
+        4096,
     )
 
     assert result["valid"]
@@ -182,10 +185,12 @@ def test_memory_preflight_covers_each_tp_rank():
         "auto": {
             "memory_limited_total_token_slots": auto_blocks * 256,
             "memory_limited_context_tokens_per_sequence": auto_blocks // 64 * 256,
+            "effective_context_tokens_per_sequence": 4096,
         },
         "int8": {
             "memory_limited_total_token_slots": int8_blocks * 256,
             "memory_limited_context_tokens_per_sequence": int8_blocks // 64 * 256,
+            "effective_context_tokens_per_sequence": 4096,
         },
     }
     assert result["results"]["tp4"]["capacity_concurrent_sequences"] == 64
@@ -201,6 +206,7 @@ def test_memory_preflight_rejects_insufficient_rank():
         "results": {
             "tp4": {
                 "local_parameter_bytes": 16 * gib,
+                "model_max_position_embeddings": 262_144,
                 "kv_bytes_per_token": 1024,
                 "state_bytes_per_sequence": {"float32": gib // 64, "model": 0},
             }
@@ -231,6 +237,7 @@ def test_memory_preflight_rejects_empty_kv_dtype_sizes():
         "results": {
             "tp1": {
                 "local_parameter_bytes": 1,
+                "model_max_position_embeddings": 262_144,
                 "kv_bytes_per_token_by_dtype": {},
                 "state_bytes_per_sequence": {"float32": 0, "model": 0},
             }
@@ -256,6 +263,7 @@ def test_memory_preflight_respects_runtime_utilization_limit():
         "results": {
             "tp1": {
                 "local_parameter_bytes": 17 * gib,
+                "model_max_position_embeddings": 262_144,
                 "kv_bytes_per_token": 1,
                 "state_bytes_per_sequence": {"float32": 0, "model": 0},
             }

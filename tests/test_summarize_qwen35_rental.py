@@ -73,6 +73,8 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
             "results": {
                 "tp4": {
                     "local_parameter_bytes": 16_000,
+                    "model_max_position_embeddings": 262_144,
+                    "configured_max_model_len": 16_384,
                     "max_state_bytes_per_rank": 1_000,
                     "minimum_workload_kv_bytes_per_rank": 2_000,
                     "kv_bytes_per_token_by_dtype": {
@@ -83,10 +85,12 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
                         "auto": {
                             "memory_limited_total_token_slots": 100_000,
                             "memory_limited_context_tokens_per_sequence": 1_280,
+                            "effective_context_tokens_per_sequence": 1_280,
                         },
                         "int8": {
                             "memory_limited_total_token_slots": 200_000,
                             "memory_limited_context_tokens_per_sequence": 3_072,
+                            "effective_context_tokens_per_sequence": 3_072,
                         },
                     },
                     "capacity_concurrent_sequences": 64,

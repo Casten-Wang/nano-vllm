@@ -22,6 +22,7 @@ def args():
         num_seqs=64,
         input_len=512,
         output_len=128,
+        max_model_len=16_384,
         max_num_seqs=64,
         repeats=3,
         run_id="rental-a",
@@ -49,6 +50,7 @@ def test_commands_are_fail_fast_and_cover_complete_validation_suite():
         "final-summary",
     ]
     assert "--preflight-only" in stages[0][1]
+    assert stages[0][1][stages[0][1].index("--max-model-len") + 1] == "16384"
     assert stages[1][1][stages[1][1].index("--tp-size") + 1] == "4"
     assert stages[2][1][stages[2][1].index("--context-len") + 1] == "4096"
     assert stages[2][1][stages[2][1].index("--num-heads") + 1] == "4"

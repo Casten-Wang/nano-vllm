@@ -40,6 +40,7 @@ def test_cache_storage_metadata_uses_tp_and_model_dtype():
         linear_key_head_dim=4,
         linear_value_head_dim=4,
         linear_conv_kernel_dim=2,
+        max_position_embeddings=262_144,
     )
     model_spec = MODULE.resolve_model_spec(
         SimpleNamespace(
@@ -54,6 +55,7 @@ def test_cache_storage_metadata_uses_tp_and_model_dtype():
     result = MODULE.cache_storage_metadata(model_spec, 2, 2)
 
     assert result == {
+        "model_max_position_embeddings": 262_144,
         "kv_bytes_per_token": 32,
         "kv_bytes_per_token_by_dtype": {
             "auto": 32,

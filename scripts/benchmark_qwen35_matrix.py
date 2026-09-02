@@ -237,6 +237,7 @@ def validate_memory_capacity(
     sequence_length: int,
     gpu_memory_utilization: float,
     recurrent_padding_slots: int = 0,
+    configured_max_model_len: int | None = None,
 ) -> dict:
     if headroom_bytes < 0:
         raise ValueError("memory headroom must be non-negative")
@@ -248,6 +249,8 @@ def validate_memory_capacity(
         raise ValueError("workload dimensions must be positive")
     if not 0 < gpu_memory_utilization <= 1:
         raise ValueError("gpu_memory_utilization must be in (0, 1]")
+    if configured_max_model_len is not None and configured_max_model_len <= 0:
+        raise ValueError("configured_max_model_len must be positive")
     results = {}
     for tp_size in tp_sizes:
         if len(memory_by_device) < tp_size:
@@ -269,6 +272,16 @@ def validate_memory_capacity(
         )
         state_slot_count = max_num_seqs + recurrent_padding_slots
         state_bytes = state_bytes_per_sequence * state_slot_count
+        model_max_position_embeddings = audit.get(
+            "model_max_position_embeddings"
+        )
+        if (
+            not isinstance(model_max_position_embeddings, int)
+            or model_max_position_embeddings <= 0
+        ):
+            raise ValueError(
+                f"checkpoint audit has no TP={tp_size} model context limit"
+            )
         kv_sizes = audit.get("kv_bytes_per_token_by_dtype")
         if kv_sizes is None:
             kv_sizes = {"auto": audit.get("kv_bytes_per_token")}
@@ -316,6 +329,19 @@ def validate_memory_capacity(
                     capacity_blocks // concurrent_sequences
                 ) * KVCACHE_BLOCK_SIZE,
             }
+            memory_limit = kv_capacity_by_dtype[dtype][
+                "memory_limited_context_tokens_per_sequence"
+            ]
+            runtime_limit = (
+                configured_max_model_len
+                if configured_max_model_len is not None
+                else model_max_position_embeddings
+            )
+            kv_capacity_by_dtype[dtype]["effective_context_tokens_per_sequence"] = min(
+                memory_limit,
+                model_max_position_embeddings,
+                runtime_limit,
+            )
         insufficient = [
             rank for rank, available in enumerate(available_budgets)
             if available < required_bytes
@@ -327,6 +353,8 @@ def validate_memory_capacity(
             "kv_bytes_per_token_by_dtype": kv_sizes,
             "kv_capacity_by_dtype": kv_capacity_by_dtype,
             "capacity_concurrent_sequences": concurrent_sequences,
+            "model_max_position_embeddings": model_max_position_embeddings,
+            "configured_max_model_len": configured_max_model_len,
             "max_num_seqs": max_num_seqs,
             "recurrent_padding_slots": recurrent_padding_slots,
             "allocated_state_slot_count": state_slot_count,
@@ -465,6 +493,7 @@ def main() -> None:
                     args.input_len + args.output_len,
                     args.gpu_memory_utilization,
                     int(args.include_moe_candidate),
+                    args.max_model_len,
                 )
                 memory_path = Path(args.result_dir) / "memory_preflight.json"
                 memory_path.write_text(json.dumps(memory_report, indent=2) + "\n")

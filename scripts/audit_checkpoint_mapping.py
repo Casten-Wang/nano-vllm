@@ -272,6 +272,9 @@ def cache_storage_metadata(model_spec, tp_size: int, model_dtype_bytes: int) -> 
         convolution_dtype_bytes=model_dtype_bytes,
     )
     return {
+        "model_max_position_embeddings": int(
+            model_spec.text_config.max_position_embeddings
+        ),
         "kv_bytes_per_token": fp32_state.kv_bytes_per_token,
         "kv_bytes_per_token_by_dtype": {
             "auto": fp32_state.kv_bytes_per_token,

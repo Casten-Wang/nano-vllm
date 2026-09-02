@@ -217,6 +217,7 @@ def summarize_memory_preflight(report: dict) -> dict[str, dict]:
         capacity_fields = (
             "memory_limited_total_token_slots",
             "memory_limited_context_tokens_per_sequence",
+            "effective_context_tokens_per_sequence",
         )
         if set(capacities) != set(kv_sizes) or not all(
             isinstance(capacity.get(field), int) and capacity[field] >= 0
@@ -249,6 +250,10 @@ def summarize_memory_preflight(report: dict) -> dict[str, dict]:
             "int8_kv_reduction_ratio": 1.0 - int8_bytes / auto_bytes,
             "kv_capacity_by_dtype": capacities,
             "capacity_concurrent_sequences": concurrent_sequences,
+            "model_max_position_embeddings": item[
+                "model_max_position_embeddings"
+            ],
+            "configured_max_model_len": item["configured_max_model_len"],
             "required_free_bytes_per_rank": required,
             "minimum_available_budget_bytes_per_rank": minimum_budget,
             "minimum_budget_margin_bytes": minimum_budget - required,

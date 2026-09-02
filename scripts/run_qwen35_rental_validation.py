@@ -53,6 +53,8 @@ def commands(args: argparse.Namespace) -> list[tuple[str, list[str]]]:
         str(args.input_len),
         "--output-len",
         str(args.output_len),
+        "--max-model-len",
+        str(args.max_model_len),
         "--max-num-seqs",
         str(args.max_num_seqs),
         "--repeats",
@@ -362,6 +364,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-seqs", type=int, default=64)
     parser.add_argument("--input-len", type=int, default=512)
     parser.add_argument("--output-len", type=int, default=128)
+    parser.add_argument("--max-model-len", type=int, default=16_384)
     parser.add_argument("--max-num-seqs", type=int, default=64)
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument(
@@ -387,12 +390,15 @@ def parse_args() -> argparse.Namespace:
         args.num_seqs,
         args.input_len,
         args.output_len,
+        args.max_model_len,
         args.max_num_seqs,
         args.repeats,
     ) <= 0:
         parser.error("workload sizes and repeats must be positive")
     if args.repeats < 2:
         parser.error("rental validation requires at least two repeats")
+    if args.input_len + args.output_len > args.max_model_len:
+        parser.error("input_len plus output_len cannot exceed max_model_len")
     return args
 
 
