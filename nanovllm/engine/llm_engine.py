@@ -12,6 +12,7 @@ from nanovllm.config import Config, resolve_eos_token_ids
 from nanovllm.sampling_params import SamplingParams
 from nanovllm.engine.sequence import Sequence
 from nanovllm.engine.scheduler import ScheduleResult, Scheduler
+from nanovllm.engine.cache_transfer import CacheTransferSession
 from nanovllm.engine.model_runner import CONTROL_STATUS_SIZE, ModelRunner
 from nanovllm.engine.metrics import EngineMetrics
 
@@ -104,7 +105,11 @@ class LLMEngine:
         if shutdown_error is not None:
             raise shutdown_error
 
-    def add_request(self, prompt: str | list[int], sampling_params: SamplingParams):
+    def _create_sequence(
+        self,
+        prompt: str | list[int],
+        sampling_params: SamplingParams,
+    ) -> Sequence:
         if isinstance(prompt, str):
             prompt = self.tokenizer.encode(prompt)
         if not isinstance(prompt, (list, tuple)):
@@ -127,7 +132,110 @@ class LLMEngine:
             )
         seq = Sequence(prompt, sampling_params)
         seq.arrival_time = perf_counter()
+        return seq
+
+    def add_request(self, prompt: str | list[int], sampling_params: SamplingParams):
+        seq = self._create_sequence(prompt, sampling_params)
         self.scheduler.add(seq)
+
+    def add_remote_prefill_request(
+        self,
+        prompt: str | list[int],
+        sampling_params: SamplingParams,
+        *,
+        transfer_id: str,
+        timeout_s: float = 30.0,
+    ) -> int:
+        """Reserve decode-side cache/state for a remote prefill request."""
+
+        seq = self._create_sequence(prompt, sampling_params)
+        session = CacheTransferSession(
+            transfer_id,
+            self.config.tensor_parallel_size,
+            started_at=perf_counter(),
+            timeout_s=timeout_s,
+        )
+        self.scheduler.add(seq)
+        try:
+            self.scheduler.reserve_remote_prefill(seq, session)
+        except BaseException:
+            if seq in self.scheduler.waiting:
+                self.scheduler.waiting.remove(seq)
+            raise
+        return seq.seq_id
+
+    def receive_remote_prefill(
+        self,
+        transfer_id: str,
+        first_token_id: int,
+        bind_endpoints: list[tuple[str, int]],
+        *,
+        timeout_s: float = 30.0,
+        max_payload_bytes: int = 16 * 1024**3,
+    ) -> int:
+        """Receive every TP rank, then atomically admit the request to decode."""
+
+        if not isinstance(first_token_id, int) or isinstance(first_token_id, bool):
+            raise TypeError("first_token_id must be an integer")
+        seq, session = self.scheduler.remote_prefills[transfer_id]
+        try:
+            self.model_runner.call(
+                "receive_sequence_cache_from_endpoint",
+                seq,
+                transfer_id,
+                bind_endpoints,
+                timeout_s,
+                max_payload_bytes,
+            )
+        except BaseException as exc:
+            self.scheduler.abort_remote_prefill(
+                transfer_id,
+                f"rank-local cache receive failed: {exc}",
+                now=perf_counter(),
+            )
+            raise
+        now = perf_counter()
+        for rank in range(self.config.tensor_parallel_size):
+            session.acknowledge(rank, now=now)
+        self.scheduler.commit_remote_prefill(
+            transfer_id,
+            first_token_id,
+            now=now,
+        )
+        return seq.seq_id
+
+    def send_remote_prefill(
+        self,
+        seq_id: int,
+        transfer_id: str,
+        endpoints: list[tuple[str, int]],
+        *,
+        timeout_s: float = 30.0,
+    ) -> int:
+        """Send every TP rank and release producer state after all ACKs."""
+
+        seq = next(
+            (candidate for candidate in self.scheduler.running if candidate.seq_id == seq_id),
+            None,
+        )
+        if seq is None:
+            raise ValueError("remote prefill source sequence is not running")
+        if (
+            seq.num_cached_tokens != seq.num_prompt_tokens
+            or seq.num_completion_tokens != 1
+            or seq.num_scheduled_tokens != 0
+        ):
+            raise ValueError("remote prefill source is not ready for handoff")
+        self.model_runner.call(
+            "send_sequence_cache_to_endpoint",
+            seq,
+            transfer_id,
+            endpoints,
+            timeout_s,
+        )
+        first_token_id = seq.completion_token_ids[0]
+        self.scheduler.complete_remote_prefill_source(seq)
+        return first_token_id
 
     def step(self):
         self.scheduler.poll_remote_prefills(now=perf_counter())

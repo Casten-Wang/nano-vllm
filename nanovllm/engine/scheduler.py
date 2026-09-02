@@ -157,6 +157,21 @@ class Scheduler:
         session.fail(rank, reason, now=now)
         return self._rollback_remote_prefill(transfer_id)
 
+    def abort_remote_prefill(
+        self,
+        transfer_id: str,
+        reason: str,
+        *,
+        now: float,
+    ) -> Sequence:
+        """Abort a coordinator operation, preserving an expired session reason."""
+
+        _, session = self.remote_prefills[transfer_id]
+        session.poll(now=now)
+        if not session.fallback_required:
+            session.fail(0, reason, now=now)
+        return self._rollback_remote_prefill(transfer_id)
+
     def poll_remote_prefills(self, *, now: float) -> list[Sequence]:
         fallback = []
         for transfer_id, (_, session) in tuple(self.remote_prefills.items()):
@@ -193,6 +208,24 @@ class Scheduler:
             seq.status = SequenceStatus.RUNNING
             self.running.append(seq)
         return seq
+
+    def complete_remote_prefill_source(self, seq: Sequence) -> None:
+        """Release producer resources only after the decode side ACKs."""
+
+        if seq not in self.running:
+            raise ValueError("remote prefill source sequence must be running")
+        if (
+            seq.num_cached_tokens != seq.num_prompt_tokens
+            or seq.num_completion_tokens != 1
+            or seq.num_scheduled_tokens != 0
+        ):
+            raise ValueError("remote prefill source is not ready for handoff")
+        self.running.remove(seq)
+        self.block_manager.deallocate(seq)
+        if self.state_manager is not None:
+            self.state_manager.release(seq.seq_id)
+            seq.state_slot = None
+        seq.status = SequenceStatus.TRANSFERRED
 
     def schedule(self) -> tuple[list[Sequence], bool] | ScheduleResult:
         waiting_before = len(self.waiting)

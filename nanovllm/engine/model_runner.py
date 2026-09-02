@@ -873,6 +873,79 @@ class ModelRunner:
             convolution_states=convolution,
         )
 
+    def _rank_cache_endpoint(
+        self,
+        endpoints: list[tuple[str, int]],
+    ) -> tuple[str, int]:
+        if len(endpoints) != self.world_size:
+            raise ValueError(
+                "cache transfer requires one endpoint per tensor-parallel rank"
+            )
+        endpoint = endpoints[self.rank]
+        if (
+            not isinstance(endpoint, (list, tuple))
+            or len(endpoint) != 2
+            or not isinstance(endpoint[0], str)
+            or not endpoint[0]
+            or not isinstance(endpoint[1], int)
+            or isinstance(endpoint[1], bool)
+            or not 1 <= endpoint[1] <= 65535
+        ):
+            raise ValueError("cache transfer endpoint is invalid")
+        return endpoint[0], endpoint[1]
+
+    def send_sequence_cache_to_endpoint(
+        self,
+        seq: Sequence,
+        transfer_id: str,
+        endpoints: list[tuple[str, int]],
+        timeout_s: float = 30.0,
+    ) -> dict:
+        """Send this TP rank directly to its matching decode rank."""
+
+        from nanovllm.engine.cache_transfer_wire import (
+            send_rank_cache_to_endpoint,
+        )
+
+        host, port = self._rank_cache_endpoint(endpoints)
+        payload = self.export_sequence_cache(seq, transfer_id=transfer_id)
+        sent_bytes = send_rank_cache_to_endpoint(
+            host,
+            port,
+            payload,
+            timeout_s=timeout_s,
+        )
+        return {"rank": self.rank, "sent_bytes": sent_bytes}
+
+    def receive_sequence_cache_from_endpoint(
+        self,
+        seq: Sequence,
+        transfer_id: str,
+        bind_endpoints: list[tuple[str, int]],
+        timeout_s: float = 30.0,
+        max_payload_bytes: int = 16 * 1024**3,
+    ) -> dict:
+        """Receive, verify, and install this TP rank's remote prefill state."""
+
+        from nanovllm.engine.cache_transfer_wire import RankCacheReceiver
+
+        host, port = self._rank_cache_endpoint(bind_endpoints)
+        with RankCacheReceiver(
+            host,
+            port,
+            timeout_s=timeout_s,
+            max_payload_bytes=max_payload_bytes,
+        ) as receiver:
+            payload = receiver.receive(
+                timeout_s=timeout_s,
+                on_verified=lambda received: self.import_sequence_cache(
+                    seq,
+                    received,
+                    transfer_id=transfer_id,
+                ),
+            )
+        return {"rank": self.rank, "cached_tokens": payload.cached_tokens}
+
     def prepare_state_slots(
         self,
         seqs: list[Sequence],

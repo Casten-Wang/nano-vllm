@@ -5,11 +5,14 @@ import pytest
 import torch
 
 from nanovllm.engine.cache_transfer import RankCacheTransfer
+from nanovllm.engine.model_runner import ModelRunner
 from nanovllm.engine.cache_transfer_wire import (
+    RankCacheReceiver,
     WIRE_HEADER,
     WIRE_MAGIC,
     WIRE_VERSION,
     receive_rank_cache_transfer,
+    send_rank_cache_to_endpoint,
     send_rank_cache_transfer,
 )
 
@@ -116,3 +119,101 @@ def test_socket_wire_rejects_corrupted_tensor_bytes():
 
     with pytest.raises(ValueError, match="checksum mismatch"):
         receive_rank_cache_transfer(BufferSocket(sink.data))
+
+
+def test_tcp_endpoint_acknowledges_only_after_payload_validation():
+    payload = make_payload(int8=True)
+    received = []
+    failure = []
+    with RankCacheReceiver("127.0.0.1", 0) as receiver:
+        def receive():
+            try:
+                received.append(receiver.receive())
+            except BaseException as exc:
+                failure.append(exc)
+
+        thread = Thread(target=receive)
+        thread.start()
+        sent_bytes = send_rank_cache_to_endpoint(*receiver.address, payload)
+        thread.join()
+
+    assert sent_bytes > payload.kv_blocks.numel()
+    assert not failure
+    assert len(received) == 1
+    assert received[0].transfer_id == payload.transfer_id
+    torch.testing.assert_close(received[0].kv_blocks, payload.kv_blocks)
+
+
+def test_tcp_endpoint_rejects_when_install_callback_fails():
+    payload = make_payload()
+    sender_failure = []
+    with RankCacheReceiver("127.0.0.1", 0) as receiver:
+        def send():
+            try:
+                send_rank_cache_to_endpoint(*receiver.address, payload)
+            except BaseException as exc:
+                sender_failure.append(exc)
+
+        thread = Thread(target=send)
+        thread.start()
+        with pytest.raises(ValueError, match="destination rejected"):
+            receiver.receive(
+                on_verified=lambda _payload: (_ for _ in ()).throw(
+                    ValueError("destination rejected")
+                )
+            )
+        thread.join()
+
+    assert len(sender_failure) == 1
+    assert "rejected" in str(sender_failure[0])
+
+
+def test_model_runner_rank_endpoint_exports_receives_and_installs():
+    probe = socket.socket()
+    probe.bind(("127.0.0.1", 0))
+    port = probe.getsockname()[1]
+    probe.close()
+    endpoints = [("127.0.0.1", port)]
+    payload = make_payload()
+
+    source = object.__new__(ModelRunner)
+    source.rank = 0
+    source.world_size = 1
+    source.export_sequence_cache = lambda seq, transfer_id: payload
+    destination = object.__new__(ModelRunner)
+    destination.rank = 0
+    destination.world_size = 1
+    installed = []
+    destination.import_sequence_cache = (
+        lambda seq, received, transfer_id: installed.append(
+            (seq, received, transfer_id)
+        )
+    )
+    receive_result = []
+    receiver_thread = Thread(
+        target=lambda: receive_result.append(
+            destination.receive_sequence_cache_from_endpoint(
+                "destination-seq",
+                payload.transfer_id,
+                endpoints,
+                timeout_s=2.0,
+            )
+        )
+    )
+    receiver_thread.start()
+
+    send_result = source.send_sequence_cache_to_endpoint(
+        "source-seq",
+        payload.transfer_id,
+        endpoints,
+        timeout_s=2.0,
+    )
+    receiver_thread.join()
+
+    assert send_result["rank"] == 0
+    assert receive_result == [{"rank": 0, "cached_tokens": 5}]
+    assert len(installed) == 1
+    assert installed[0][0] == "destination-seq"
+    assert installed[0][1].transfer_id == payload.transfer_id
+    assert installed[0][2] == payload.transfer_id
+    torch.testing.assert_close(installed[0][1].kv_blocks, payload.kv_blocks)

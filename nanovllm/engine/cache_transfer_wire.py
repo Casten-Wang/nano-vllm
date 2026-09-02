@@ -5,8 +5,10 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import socket
 import struct
-from collections.abc import Iterable
+from time import monotonic, sleep
+from collections.abc import Callable, Iterable
 
 import torch
 
@@ -20,6 +22,8 @@ WIRE_DIGEST_BYTES = hashlib.sha256().digest_size
 MAX_HEADER_BYTES = 64 * 1024
 DEFAULT_MAX_PAYLOAD_BYTES = 16 * 1024**3
 _CHUNK_BYTES = 1024 * 1024
+_TRANSFER_ACK = b"\x01"
+_TRANSFER_NACK = b"\x00"
 
 _DTYPE_TO_NAME = {
     torch.float16: "float16",
@@ -222,3 +226,112 @@ def receive_rank_cache_transfer(
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError("cache transfer wire metadata is invalid") from exc
+
+
+class RankCacheReceiver:
+    """One-shot TCP listener that ACKs only a fully verified rank payload."""
+
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        *,
+        timeout_s: float = 30.0,
+        max_payload_bytes: int = DEFAULT_MAX_PAYLOAD_BYTES,
+    ) -> None:
+        if not isinstance(host, str) or not host:
+            raise ValueError("cache transfer receiver host must not be empty")
+        if not isinstance(port, int) or isinstance(port, bool) or not 0 <= port <= 65535:
+            raise ValueError("cache transfer receiver port must be in [0, 65535]")
+        if timeout_s <= 0:
+            raise ValueError("cache transfer receiver timeout must be positive")
+        if max_payload_bytes <= 0:
+            raise ValueError("max_payload_bytes must be positive")
+        self.max_payload_bytes = max_payload_bytes
+        self._listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._listener.settimeout(timeout_s)
+        try:
+            self._listener.bind((host, port))
+            self._listener.listen(1)
+        except BaseException:
+            self._listener.close()
+            raise
+
+    @property
+    def address(self) -> tuple[str, int]:
+        host, port = self._listener.getsockname()[:2]
+        return str(host), int(port)
+
+    def receive(
+        self,
+        *,
+        timeout_s: float = 30.0,
+        on_verified: Callable[[RankCacheTransfer], None] | None = None,
+    ) -> RankCacheTransfer:
+        if timeout_s <= 0:
+            raise ValueError("cache transfer connection timeout must be positive")
+        connection, _peer = self._listener.accept()
+        with connection:
+            connection.settimeout(timeout_s)
+            try:
+                payload = receive_rank_cache_transfer(
+                    connection,
+                    max_payload_bytes=self.max_payload_bytes,
+                )
+                if on_verified is not None:
+                    on_verified(payload)
+            except BaseException:
+                try:
+                    connection.sendall(_TRANSFER_NACK)
+                except OSError:
+                    pass
+                raise
+            connection.sendall(_TRANSFER_ACK)
+            return payload
+
+    def close(self) -> None:
+        self._listener.close()
+
+    def __enter__(self) -> "RankCacheReceiver":
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> None:
+        self.close()
+
+
+def send_rank_cache_to_endpoint(
+    host: str,
+    port: int,
+    payload: RankCacheTransfer,
+    *,
+    timeout_s: float = 30.0,
+) -> int:
+    """Connect, stream a payload, and wait for receiver validation."""
+
+    if not isinstance(host, str) or not host:
+        raise ValueError("cache transfer endpoint host must not be empty")
+    if not isinstance(port, int) or isinstance(port, bool) or not 1 <= port <= 65535:
+        raise ValueError("cache transfer endpoint port must be in [1, 65535]")
+    if timeout_s <= 0:
+        raise ValueError("cache transfer endpoint timeout must be positive")
+    deadline = monotonic() + timeout_s
+    while True:
+        try:
+            connection = socket.create_connection(
+                (host, port),
+                timeout=max(deadline - monotonic(), 0.001),
+            )
+            break
+        except (ConnectionRefusedError, TimeoutError, socket.timeout):
+            remaining = deadline - monotonic()
+            if remaining <= 0:
+                raise TimeoutError("cache transfer endpoint connection timed out")
+            sleep(min(0.01, remaining))
+    with connection:
+        connection.settimeout(timeout_s)
+        sent_bytes = send_rank_cache_transfer(connection, payload)
+        acknowledgement = _recv_bytes(connection, 1)
+    if acknowledgement != _TRANSFER_ACK:
+        raise RuntimeError("cache transfer receiver rejected the payload")
+    return sent_bytes
