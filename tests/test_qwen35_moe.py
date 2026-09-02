@@ -253,6 +253,28 @@ def test_sorted_expert_dispatch_only_groups_active_experts():
     assert torch.isfinite(output).all()
 
 
+def test_sorted_expert_dispatch_reuses_sort_permutation_for_token_indices():
+    experts = make_experts()
+    hidden = torch.randn(3, 2)
+    topk_ids = torch.tensor([[1, 0], [0, 1], [1, 0]])
+    topk_weights = torch.full((3, 2), 0.5)
+    division_storage = []
+    original_divide = torch.Tensor.div_
+
+    def record_divide(tensor, *args, **kwargs):
+        division_storage.append(tensor.data_ptr())
+        return original_divide(tensor, *args, **kwargs)
+
+    with (
+        torch.inference_mode(),
+        patch.object(torch.Tensor, "div_", record_divide),
+    ):
+        output = experts(hidden, topk_ids, topk_weights)
+
+    assert output.shape == hidden.shape
+    assert len(division_storage) == 1
+
+
 def test_single_token_decode_skips_general_expert_grouping():
     torch.manual_seed(43)
     experts = make_experts(num_experts=4)

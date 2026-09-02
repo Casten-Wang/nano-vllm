@@ -309,15 +309,20 @@ class Qwen35Experts(nn.Module):
         routing_weights = topk_weights.reshape(-1)
         order = torch.argsort(assignments, stable=True)
         sorted_experts = assignments[order]
-        # Flattened routes are token-major, so the original token index is
-        # encoded directly in the sort permutation. Avoid materializing and
-        # repeating a separate arange tensor in every MoE layer.
-        sorted_tokens = torch.div(
-            order,
-            topk_ids.shape[1],
-            rounding_mode="floor",
-        )
         sorted_weights = routing_weights[order]
+        # Flattened routes are token-major, so the original token index is
+        # encoded directly in the sort permutation. The expert ids and route
+        # weights have already consumed ``order``, so reuse its int64 storage
+        # instead of allocating another route-sized token-index tensor.
+        if torch.is_grad_enabled():
+            sorted_tokens = torch.div(
+                order,
+                topk_ids.shape[1],
+                rounding_mode="floor",
+            )
+        else:
+            order.div_(topk_ids.shape[1], rounding_mode="floor")
+            sorted_tokens = order
         active_experts, counts = torch.unique_consecutive(
             sorted_experts,
             return_counts=True,
