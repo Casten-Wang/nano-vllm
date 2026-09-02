@@ -52,6 +52,8 @@ OFFICIAL_SKIPPED_WEIGHT_PREFIXES = {"model.visual.": 333, "mtp.": 785}
 OFFICIAL_CHECKPOINT_REVISION = "59d61f3ce65a6d9863b86d2e96597125219dc754"
 OFFICIAL_GPTQ_CHECKPOINT_REPO = "Qwen/Qwen3.5-35B-A3B-GPTQ-Int4"
 OFFICIAL_GPTQ_CHECKPOINT_REVISION = "3af5ca2972faf6de1fd6f4efc4d8d319ca751e8b"
+OFFICIAL_FP8_CHECKPOINT_REPO = "Qwen/Qwen3.5-35B-A3B-FP8"
+OFFICIAL_FP8_CHECKPOINT_REVISION = "9d1823d2dee688a6b25e77009dc727688c44936e"
 OFFICIAL_CONFIG_SHA256 = (
     "5e4d7f74fec2f360eb9cfbfcd6ec0c4c76e684d3a11caaed259d9fd9bfbc7944"
 )
@@ -233,6 +235,57 @@ def summarize_optional_gptq(run_dir: Path, run_id: str) -> dict:
         "quality_gates": quality.get("quality_gates"),
         "cross_tp": quality.get("cross_tp"),
         "bf16_vs_gptq": checkpoint_quality,
+    }
+
+
+def summarize_optional_fp8_audit(run_dir: Path) -> dict:
+    """Summarize FP8 layout evidence without claiming executable support."""
+
+    path = run_dir / "fp8" / "official_checkpoint_header_audit.json"
+    if not path.is_file():
+        return {"enabled": False, "valid": True, "executable": False}
+    audit = load_json(path)
+    results = audit.get("results", {})
+    layouts = {
+        name: result.get("quantized_tp_layout", {})
+        for name, result in results.items()
+    }
+    audit_valid = (
+        audit.get("valid") is True
+        and audit.get("repo") == OFFICIAL_FP8_CHECKPOINT_REPO
+        and audit.get("resolved_revision") == OFFICIAL_FP8_CHECKPOINT_REVISION
+        and audit.get("quantization", {}).get("format") == "fp8_block"
+        and bool(results)
+        and all(result.get("valid") is True for result in results.values())
+    )
+    return {
+        "enabled": True,
+        "valid": audit_valid,
+        "executable": False,
+        "scope": (
+            "remote checkpoint headers and TP quantization-block alignment only; "
+            "FP8 payload loading, kernels, correctness, quality, and performance "
+            "are not validated"
+        ),
+        "official_checkpoint": {
+            "repo": audit.get("repo"),
+            "resolved_revision": audit.get("resolved_revision"),
+        },
+        "tensor_parallel": {
+            name: {
+                "valid": results[name].get("valid") is True,
+                "local_parameter_bytes": results[name].get(
+                    "local_parameter_bytes"
+                ),
+                "requires_partial_unit_loader": layouts[name].get(
+                    "requires_partial_unit_loader"
+                ),
+                "partial_quantization_unit_count": layouts[name].get(
+                    "partial_quantization_unit_count"
+                ),
+            }
+            for name in sorted(results)
+        },
     }
 
 
@@ -1617,6 +1670,7 @@ def summarize(run_dir: Path, run_id: str) -> dict:
     )
     quality = load_json(run_dir / "quality" / f"{run_id}_summary.json")
     gptq = summarize_optional_gptq(run_dir, run_id)
+    fp8 = summarize_optional_fp8_audit(run_dir)
     kernel_paths = sorted((run_dir / "kernels").glob("tp*.json"))
     if not kernel_paths:
         raise ValueError("no kernel benchmark artifacts were found")
@@ -2594,6 +2648,7 @@ def summarize(run_dir: Path, run_id: str) -> dict:
             "gates": quality["quality_gates"],
         },
         "gptq": gptq,
+        "fp8": fp8,
         "graph_safe_moe": {
             "all_tp_promoted": (
                 same_tp_coverage

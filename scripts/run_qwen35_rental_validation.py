@@ -32,6 +32,8 @@ OFFICIAL_CHECKPOINT_REPO = "Qwen/Qwen3.5-35B-A3B"
 OFFICIAL_CHECKPOINT_REVISION = "59d61f3ce65a6d9863b86d2e96597125219dc754"
 OFFICIAL_GPTQ_CHECKPOINT_REPO = "Qwen/Qwen3.5-35B-A3B-GPTQ-Int4"
 OFFICIAL_GPTQ_CHECKPOINT_REVISION = "3af5ca2972faf6de1fd6f4efc4d8d319ca751e8b"
+OFFICIAL_FP8_CHECKPOINT_REPO = "Qwen/Qwen3.5-35B-A3B-FP8"
+OFFICIAL_FP8_CHECKPOINT_REVISION = "9d1823d2dee688a6b25e77009dc727688c44936e"
 QUALITY_MAX_PROMPT_LENGTH = 8_192
 QUALITY_CONTINUATION_LENGTH = 16
 MIXED_CONCURRENT_SEQUENCES = 16
@@ -722,6 +724,24 @@ def commands(args: argparse.Namespace) -> list[tuple[str, list[str]]]:
                 ),
             )
         )
+    if args.fp8_audit_model is not None:
+        result.append(
+            (
+                "official-fp8-checkpoint-audit",
+                [
+                    sys.executable,
+                    str(REMOTE_CHECKPOINT_AUDIT_SCRIPT),
+                    "--repo",
+                    args.fp8_audit_model,
+                    "--revision",
+                    args.fp8_revision,
+                    "--tp-sizes",
+                    tp_sizes,
+                    "--output",
+                    str(root / "fp8" / "official_checkpoint_header_audit.json"),
+                ],
+            )
+        )
     result.append(
         (
                 "final-summary",
@@ -753,6 +773,8 @@ def manifest_plan(
             else None
         ),
         "gptq_revision": args.gptq_revision if args.gptq_model else None,
+        "fp8_audit_model": args.fp8_audit_model,
+        "fp8_revision": args.fp8_revision if args.fp8_audit_model else None,
         "source_tree_sha256": source_tree_sha256(),
         "stages": [
             {"name": name, "command": command}
@@ -809,6 +831,9 @@ def collect_stage_artifacts(
     elif stage_name == "official-gptq-checkpoint-audit":
         required = [root / "gptq" / "official_checkpoint_header_audit.json"]
         search_root = root / "gptq"
+    elif stage_name == "official-fp8-checkpoint-audit":
+        required = [root / "fp8" / "official_checkpoint_header_audit.json"]
+        search_root = root / "fp8"
     elif stage_name == "gptq-preflight":
         search_root = root / "gptq" / "preflight"
         required = [
@@ -902,6 +927,7 @@ def collect_stage_artifacts(
         if stage_name in (
             "official-checkpoint-audit",
             "official-gptq-checkpoint-audit",
+            "official-fp8-checkpoint-audit",
             "gptq-preflight",
             "gptq-vs-bf16-quality",
             "preflight",
@@ -974,6 +1000,8 @@ def prepare_manifest(
             "model": manifest.get("model"),
             "gptq_model": manifest.get("gptq_model"),
             "gptq_revision": manifest.get("gptq_revision"),
+            "fp8_audit_model": manifest.get("fp8_audit_model"),
+            "fp8_revision": manifest.get("fp8_revision"),
             "source_tree_sha256": manifest.get("source_tree_sha256"),
             "stages": manifest.get("stages"),
         } != plan:
@@ -1023,6 +1051,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--gptq-revision",
         default=OFFICIAL_GPTQ_CHECKPOINT_REVISION,
+    )
+    parser.add_argument(
+        "--fp8-audit-model",
+        default=None,
+        help=(
+            "Optional official FP8 checkpoint whose remote headers are audited; "
+            "this does not enable FP8 execution."
+        ),
+    )
+    parser.add_argument(
+        "--fp8-revision",
+        default=OFFICIAL_FP8_CHECKPOINT_REVISION,
     )
     parser.add_argument("--tp-sizes", type=parse_tp_sizes, default=(4, 8))
     parser.add_argument("--num-seqs", type=int, default=64)

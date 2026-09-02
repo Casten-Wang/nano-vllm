@@ -28,6 +28,8 @@ def args():
         model="/models/qwen35",
         gptq_model=None,
         gptq_revision=MODULE.OFFICIAL_GPTQ_CHECKPOINT_REVISION,
+        fp8_audit_model=None,
+        fp8_revision=MODULE.OFFICIAL_FP8_CHECKPOINT_REVISION,
         tp_sizes=(4, 8),
         num_seqs=64,
         input_len=512,
@@ -229,6 +231,55 @@ def test_gptq_identity_is_part_of_resume_manifest():
 
     assert plan["gptq_model"] == arguments.gptq_model
     assert plan["gptq_revision"] == MODULE.OFFICIAL_GPTQ_CHECKPOINT_REVISION
+
+
+def test_optional_fp8_checkpoint_adds_header_audit_only():
+    arguments = args()
+    arguments.fp8_audit_model = MODULE.OFFICIAL_FP8_CHECKPOINT_REPO
+
+    stages = MODULE.commands(arguments)
+    names = [name for name, _ in stages]
+
+    assert names[-2:] == ["official-fp8-checkpoint-audit", "final-summary"]
+    command = dict(stages)["official-fp8-checkpoint-audit"]
+    assert (
+        command[command.index("--repo") + 1]
+        == MODULE.OFFICIAL_FP8_CHECKPOINT_REPO
+    )
+    assert (
+        command[command.index("--revision") + 1]
+        == MODULE.OFFICIAL_FP8_CHECKPOINT_REVISION
+    )
+    assert command[command.index("--tp-sizes") + 1] == "4,8"
+    assert command[-1].endswith("fp8/official_checkpoint_header_audit.json")
+    assert not any(name.startswith("fp8-performance") for name in names)
+    assert not any(name.startswith("fp8-quality") for name in names)
+
+
+def test_fp8_audit_identity_is_part_of_resume_manifest():
+    arguments = args()
+    arguments.fp8_audit_model = MODULE.OFFICIAL_FP8_CHECKPOINT_REPO
+
+    plan = MODULE.manifest_plan(arguments, MODULE.commands(arguments))
+
+    assert plan["fp8_audit_model"] == MODULE.OFFICIAL_FP8_CHECKPOINT_REPO
+    assert plan["fp8_revision"] == MODULE.OFFICIAL_FP8_CHECKPOINT_REVISION
+
+
+def test_fp8_audit_artifact_collection_is_isolated(tmp_path):
+    arguments = args()
+    arguments.result_dir = str(tmp_path)
+    fp8_dir = tmp_path / arguments.run_id / "fp8"
+    fp8_dir.mkdir(parents=True)
+    expected = fp8_dir / "official_checkpoint_header_audit.json"
+    expected.write_text('{"valid": true}\n')
+    (tmp_path / arguments.run_id / "unrelated.json").write_text("{}\n")
+
+    artifacts = MODULE.collect_stage_artifacts(
+        arguments, "official-fp8-checkpoint-audit"
+    )
+
+    assert artifacts == [expected]
 
 
 def test_gptq_artifact_collection_is_isolated(tmp_path):

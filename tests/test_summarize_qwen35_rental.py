@@ -128,6 +128,59 @@ def test_optional_gptq_summary_is_disabled_when_directory_is_absent(tmp_path):
     }
 
 
+def test_optional_fp8_audit_is_disabled_without_changing_run_validity(tmp_path):
+    assert MODULE.summarize_optional_fp8_audit(tmp_path) == {
+        "enabled": False,
+        "valid": True,
+        "executable": False,
+    }
+
+
+def test_optional_fp8_audit_reports_tp_alignment_without_execution_claim(
+    tmp_path,
+):
+    write(
+        tmp_path / "fp8/official_checkpoint_header_audit.json",
+        {
+            "valid": True,
+            "repo": MODULE.OFFICIAL_FP8_CHECKPOINT_REPO,
+            "resolved_revision": MODULE.OFFICIAL_FP8_CHECKPOINT_REVISION,
+            "quantization": {"format": "fp8_block", "valid": True},
+            "results": {
+                "tp4": {
+                    "valid": True,
+                    "local_parameter_bytes": 17_372_983_712,
+                    "quantized_tp_layout": {
+                        "valid": True,
+                        "requires_partial_unit_loader": False,
+                        "partial_quantization_unit_count": 0,
+                    },
+                },
+                "tp8": {
+                    "valid": True,
+                    "local_parameter_bytes": 8_718_380_752,
+                    "quantized_tp_layout": {
+                        "valid": True,
+                        "requires_partial_unit_loader": True,
+                        "partial_quantization_unit_count": 30_860,
+                    },
+                },
+            },
+        },
+    )
+
+    report = MODULE.summarize_optional_fp8_audit(tmp_path)
+
+    assert report["valid"]
+    assert not report["executable"]
+    assert not report["tensor_parallel"]["tp4"]["requires_partial_unit_loader"]
+    assert report["tensor_parallel"]["tp8"]["requires_partial_unit_loader"]
+    assert (
+        report["tensor_parallel"]["tp8"]["partial_quantization_unit_count"]
+        == 30_860
+    )
+
+
 def test_optional_gptq_summary_requires_actual_triton_execution(tmp_path):
     write_gptq_summary_inputs(tmp_path, "run")
 
