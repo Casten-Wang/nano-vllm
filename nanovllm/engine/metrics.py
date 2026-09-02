@@ -28,6 +28,8 @@ class EngineMetrics:
     max_running_queue_len: int = 0
     peak_used_kvcache_blocks: int = 0
     peak_kv_block_usage: float = 0.0
+    prefill_starved_steps: int = 0
+    max_prefill_starvation_steps: int = 0
     request_ttfts: list[float] | None = None
     request_tpots: list[float] | None = None
     request_latencies: list[float] | None = None
@@ -54,6 +56,8 @@ class EngineMetrics:
         self.max_running_queue_len = 0
         self.peak_used_kvcache_blocks = 0
         self.peak_kv_block_usage = 0.0
+        self.prefill_starved_steps = 0
+        self.max_prefill_starvation_steps = 0
         self.request_ttfts.clear()
         self.request_tpots.clear()
         self.request_latencies.clear()
@@ -107,6 +111,8 @@ class EngineMetrics:
         running_queue_len: int,
         used_kvcache_blocks: int,
         total_kvcache_blocks: int,
+        prefill_starved_steps: int = 0,
+        max_prefill_starvation_steps: int = 0,
     ):
         """Record queue and KV block high-water marks.
 
@@ -123,6 +129,8 @@ class EngineMetrics:
                 self.peak_kv_block_usage,
                 used_kvcache_blocks / total_kvcache_blocks,
             )
+        self.prefill_starved_steps = prefill_starved_steps
+        self.max_prefill_starvation_steps = max_prefill_starvation_steps
 
     def record_finished_sequences(self, seqs):
         """Record request-level latency metrics for finished sequences.
@@ -201,6 +209,8 @@ class EngineMetrics:
             "max_running_queue_len": self.max_running_queue_len,
             "peak_used_kvcache_blocks": self.peak_used_kvcache_blocks,
             "peak_kv_block_usage": self.peak_kv_block_usage,
+            "prefill_starved_steps": self.prefill_starved_steps,
+            "max_prefill_starvation_steps": self.max_prefill_starvation_steps,
             "num_finished_requests": len(self.request_latencies),
             "avg_ttft_s": self._avg(self.request_ttfts),
             "max_ttft_s": self._max(self.request_ttfts),

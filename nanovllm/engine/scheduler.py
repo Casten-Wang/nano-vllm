@@ -60,6 +60,10 @@ class Scheduler:
         self.prefix_cache_enabled = self.state_manager is None
         self.waiting: deque[Sequence] = deque()
         self.running: deque[Sequence] = deque()
+        self.schedule_steps = 0
+        self.prefill_starved_steps = 0
+        self.current_prefill_starvation_steps = 0
+        self.max_prefill_starvation_steps = 0
 
     def is_finished(self):
         return not self.waiting and not self.running
@@ -76,10 +80,28 @@ class Scheduler:
         self.waiting.append(seq)
 
     def schedule(self) -> tuple[list[Sequence], bool] | ScheduleResult:
+        waiting_before = len(self.waiting)
         if self.enable_dynamic_chunked_prefill:
             result = self.schedule_dynamic_chunked_prefill()
         else:
             result = self.schedule_legacy()
+        if isinstance(result, ScheduleResult):
+            prefill_progress = bool(result.prefill_seqs)
+        else:
+            prefill_progress = result[1] and bool(result[0])
+        # A complete prefix-cache hit can leave the waiting queue without a
+        # prefill kernel, so queue shrinkage also counts as admission progress.
+        prefill_progress = prefill_progress or len(self.waiting) < waiting_before
+        if waiting_before and not prefill_progress:
+            self.prefill_starved_steps += 1
+            self.current_prefill_starvation_steps += 1
+            self.max_prefill_starvation_steps = max(
+                self.max_prefill_starvation_steps,
+                self.current_prefill_starvation_steps,
+            )
+        else:
+            self.current_prefill_starvation_steps = 0
+        self.schedule_steps += 1
         seqs = result.seqs if isinstance(result, ScheduleResult) else result[0]
         if self.state_manager is not None:
             slots = self.state_manager.acquire_many(seq.seq_id for seq in seqs)

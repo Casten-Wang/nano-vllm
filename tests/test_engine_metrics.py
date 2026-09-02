@@ -76,6 +76,27 @@ class EngineMetricsTest(unittest.TestCase):
         ):
             self.assertEqual(result[name], 0.0)
 
+    def test_scheduler_state_records_deterministic_prefill_starvation(self):
+        metrics = EngineMetrics()
+
+        metrics.record_scheduler_state(
+            waiting_queue_len=3,
+            running_queue_len=8,
+            used_kvcache_blocks=10,
+            total_kvcache_blocks=20,
+            prefill_starved_steps=7,
+            max_prefill_starvation_steps=4,
+        )
+        result = metrics.to_dict()
+
+        self.assertEqual(result["prefill_starved_steps"], 7)
+        self.assertEqual(result["max_prefill_starvation_steps"], 4)
+
+        metrics.reset()
+        result = metrics.to_dict()
+        self.assertEqual(result["prefill_starved_steps"], 0)
+        self.assertEqual(result["max_prefill_starvation_steps"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

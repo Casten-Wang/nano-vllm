@@ -147,6 +147,8 @@ class LLMEngine:
             self.scheduler.num_running,
             self.scheduler.block_manager.num_used_blocks,
             self.scheduler.block_manager.num_total_blocks,
+            self.scheduler.prefill_starved_steps,
+            self.scheduler.max_prefill_starvation_steps,
         )
         if isinstance(schedule_result, ScheduleResult) and schedule_result.is_mixed:
             token_ids = self.model_runner.call("run_mixed", schedule_result.prefill_seqs, schedule_result.decode_seqs)

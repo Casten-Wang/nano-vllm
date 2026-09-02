@@ -151,6 +151,9 @@ def test_dynamic_schedule_prefill_waits_when_decode_fills_token_budget():
     assert result.prefill_seqs == []
     assert len(scheduler.waiting) == 1
     assert waiting.block_table == []
+    assert scheduler.prefill_starved_steps == 1
+    assert scheduler.current_prefill_starvation_steps == 1
+    assert scheduler.max_prefill_starvation_steps == 1
 
 
 def test_dynamic_prefill_continues_partially_cached_sequence():
@@ -254,6 +257,35 @@ def test_dynamic_schedule_counts_unscheduled_running_requests_in_slot_budget():
     assert waiting.block_table == []
 
 
+def test_dynamic_scheduler_tracks_and_resets_consecutive_prefill_starvation():
+    scheduler = make_scheduler(max_tokens=1, max_seqs=3, block_size=4)
+    running = Sequence([1, 2, 3, 4])
+    scheduler.block_manager.allocate(running, 0)
+    running.status = SequenceStatus.RUNNING
+    running.is_prefill = False
+    running.num_cached_tokens = len(running)
+    scheduler.running.append(running)
+    waiting = Sequence([10] * 4)
+    scheduler.waiting.append(waiting)
+
+    for token_id in (101, 102):
+        result = scheduler.schedule()
+        assert result.prefill_seqs == []
+        scheduler.postprocess_mixed(result, [token_id])
+
+    assert scheduler.prefill_starved_steps == 2
+    assert scheduler.current_prefill_starvation_steps == 2
+    assert scheduler.max_prefill_starvation_steps == 2
+
+    scheduler.max_num_batched_tokens = 2
+    result = scheduler.schedule()
+
+    assert result.prefill_seqs == [waiting]
+    assert scheduler.prefill_starved_steps == 2
+    assert scheduler.current_prefill_starvation_steps == 0
+    assert scheduler.max_prefill_starvation_steps == 2
+
+
 def test_dynamic_prefill_only_result_uses_prefill_mode():
     scheduler = make_scheduler(max_tokens=8, max_seqs=8, block_size=4)
     waiting = Sequence([10] * 6)
@@ -267,6 +299,8 @@ def test_dynamic_prefill_only_result_uses_prefill_mode():
     assert result.seqs == [waiting]
     assert waiting.is_prefill
     assert waiting.num_scheduled_tokens == 6
+    assert scheduler.prefill_starved_steps == 0
+    assert scheduler.current_prefill_starvation_steps == 0
 
 
 def test_dynamic_decode_only_result_uses_decode_mode():
