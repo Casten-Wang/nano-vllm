@@ -12,17 +12,19 @@
 
 ## Development Workflow
 
-1. Update local `main` from `origin/main`.
-2. Create a focused branch named `feature/<topic>`, `fix/<topic>`,
-   `perf/<topic>`, or `test/<topic>`.
+1. Use `feature/qwen35-text-foundation` as the long-lived product-development
+   branch. Push completed, verified development commits only to this branch.
+2. Keep `main` at the latest stable, fully verified milestone. Do not update
+   `main` for every small commit and do not wait for all long-term optimization
+   work to finish; fast-forward it only when a coherent milestone is ready.
 3. Inspect relevant source, tests, configuration, and upstream changes before
    editing.
 4. Keep each change focused. Separate unrelated refactors and generated data.
 5. Run the repository policy check, syntax check, and relevant tests.
 6. Commit with a Conventional Commit prefix: `feat:`, `fix:`, `perf:`,
    `test:`, `refactor:`, `build:`, or `chore:`.
-7. Push the development branch to `origin` and merge it into this fork's
-   `main` through a pull request. Never push feature work to `upstream`.
+7. Push normal work only to `origin/feature/qwen35-text-foundation`. Promote a
+   tested milestone to `origin/main` separately. Never push to `upstream`.
 8. Create a semantic version tag only for a tested release.
 
 ## Verification
@@ -53,6 +55,12 @@
 - Start an upstream contribution from `upstream/main` on an
   `upstream-fix/<topic>` branch. Reproduce the problem on unmodified upstream
   first.
+- Keep at most one upstream pull request open. Keep later candidate branches
+  local; push a candidate to `origin` only after the current upstream pull
+  request closes and the candidate is ready for review.
+- Delete the remote upstream-contribution branch after its pull request is
+  merged or closed, while retaining any still-useful local branch until its
+  work has been incorporated or intentionally discarded.
 - Prefer one behavioral problem, one to three files, and the smallest complete
   patch. Do not bundle fork-only CI, repository policy, benchmarks, broad
   refactors, quantization experiments, or generated artifacts.

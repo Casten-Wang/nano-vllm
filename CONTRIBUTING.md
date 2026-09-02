@@ -7,15 +7,17 @@ This fork uses two remotes:
 - `origin`: `https://github.com/Casten-Wang/nano-vllm.git`
 - `upstream`: `https://github.com/GeeeekExplorer/nano-vllm.git`
 
-Keep `main` releasable. Start work from an updated `main` on a focused branch:
+`main` is the latest stable milestone. Ongoing product work lives on the
+long-lived `feature/qwen35-text-foundation` branch:
 
 ```bash
-git switch main
-git pull --ff-only origin main
-git switch -c feature/short-topic
+git switch feature/qwen35-text-foundation
+git pull --ff-only origin feature/qwen35-text-foundation
 ```
 
-Use `fix/`, `perf/`, or `test/` when those names describe the change better.
+Push each completed and verified development commit to that branch. Promote a
+coherent, fully verified milestone to `main`; do not update `main` for every
+small commit, and do not wait for the open-ended optimization roadmap to end.
 
 ## Before committing
 
@@ -44,10 +46,10 @@ perf: fuse expert routing and token permutation
 test: cover mixed linear and full attention layers
 ```
 
-Push the branch to this fork and open a pull request into its `main`:
+Push normal development to the product-development branch:
 
 ```bash
-git push -u origin feature/short-topic
+git push origin feature/qwen35-text-foundation
 ```
 
 A pull request must explain the problem, approach, tests, limitations, and any
@@ -88,3 +90,8 @@ The preferred upstream submission is one independently useful correctness or
 performance fix with a minimal reproduction and before/after evidence. Large
 features such as Qwen3.5 support are developed and validated in this fork, then
 split only when a small component has clear value against current upstream.
+Keep only one upstream pull request open at a time. Later candidate branches
+remain local and are pushed to `origin` only when the current pull request has
+closed and the next patch is review-ready. Remove merged or closed PR branches
+from the fork so its remote branch list stays limited to `main`, the active
+product-development branch, and the current upstream PR branch.
