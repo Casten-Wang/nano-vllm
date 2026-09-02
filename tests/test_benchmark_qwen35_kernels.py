@@ -757,6 +757,32 @@ def test_delta_prefill_chunk_sweep_compares_shared_input_to_chunk64():
         ) < 1e-4
 
 
+def test_grouped_delta_prefill_records_reused_correction_workspace():
+    args = SimpleNamespace(
+        prefill_batch=2,
+        prefill_tokens=5,
+        key_head_dim=2,
+        value_head_dim=3,
+        warmup=0,
+        iterations=1,
+        repeats=1,
+        prefill_only=True,
+    )
+
+    result = MODULE.benchmark_delta_prefill_head_groups(
+        args,
+        torch.device("cpu"),
+        torch.float32,
+        local_key_heads=1,
+        local_value_heads=2,
+        chunk_size=4,
+    )
+
+    # Five tokens are padded to two four-token chunks in FP32.
+    expected_mib = 2 * 2 * 8 * 3 * 4 / 1024 / 1024
+    assert result["reused_fp32_correction_buffer_mib"] == expected_mib
+
+
 def test_delta_prefill_state_reuse_compares_allocation_paths():
     args = SimpleNamespace(
         prefill_batch=2,

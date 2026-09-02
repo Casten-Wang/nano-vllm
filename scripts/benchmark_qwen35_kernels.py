@@ -2055,6 +2055,11 @@ def benchmark_delta_prefill_head_groups(
         / 1024
         / 1024
     )
+    result["reused_fp32_correction_buffer_mib"] = (
+        output_elements * torch.empty((), dtype=torch.float32).element_size()
+        / 1024
+        / 1024
+    )
     pairwise_elements = (
         args.prefill_batch
         * local_value_heads
