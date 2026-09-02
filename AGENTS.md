@@ -60,6 +60,25 @@
   local review candidates. The same external-PR approval rule applies to every
   third-party repository, not only GeeeekExplorer/nano-vllm.
 
+## Optimization Tracks
+
+- Treat prefill/decode disaggregation as a first-class research track. Measure
+  KV transfer, placement and load-balancing cost, communication overlap,
+  time-to-first-token, inter-token latency, and throughput before adopting it;
+  retain a simple colocated path for deployments where disaggregation loses.
+- Improve scheduling across continuous batching, chunked prefill, mixed
+  prefill/decode traffic, fairness, preemption, and latency SLOs. Use
+  deterministic workload traces and report both aggregate throughput and tail
+  latency so one class of requests is not optimized at another's expense.
+- Optimize host and device memory from measured tensor lifetimes. Prefer safe
+  reuse of stable workspaces, staging buffers, KV-cache storage, and recurrent
+  state over repeated temporary allocation. Prove shape, dtype, stream/event,
+  aliasing, and CUDA Graph lifetime invariants before reusing storage.
+- For these tracks, inspect current primary-source designs and relevant PRs in
+  vLLM and SGLang, plus specialized systems such as Mooncake, Dynamo, DistServe,
+  TensorRT-LLM, or PyTorch where applicable. Record why a design does or does
+  not fit nano-vllm rather than copying its architecture wholesale.
+
 ## Git Safety
 
 - Review `git status`, staged file names, and `git diff --cached --check`
