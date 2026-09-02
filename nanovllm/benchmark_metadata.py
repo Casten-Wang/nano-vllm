@@ -295,11 +295,12 @@ def validate_execution_stats(
 ) -> dict:
     model_counts = execution_stats.get("model_path_counts", {})
     attention_counts = execution_stats.get("attention_path_counts", {})
+    state_access_counts = execution_stats.get("state_access_path_counts", {})
     dropped_signature_steps = execution_stats.get(
         "dropped_execution_signature_steps",
         0,
     )
-    observed = set(model_counts) | set(attention_counts)
+    observed = set(model_counts) | set(attention_counts) | set(state_access_counts)
     missing = [path for path in required_paths if path not in observed]
     valid = bool(observed) and not missing and dropped_signature_steps == 0
     if not observed:

@@ -171,6 +171,7 @@ class ExecutionPolicyTest(unittest.TestCase):
             max_context_len=1024,
             partition_threshold=8192,
             sliding_window_size=None,
+            state_access_path="decode_contiguous_view",
         )
 
         stats.record(**kwargs)
@@ -182,6 +183,10 @@ class ExecutionPolicyTest(unittest.TestCase):
             result["attention_path_counts"],
             {"int8_fused_decode": 2, "int8_prefill": 2},
         )
+        self.assertEqual(
+            result["state_access_path_counts"],
+            {"decode_contiguous_view": 2},
+        )
         self.assertEqual(len(result["execution_signatures"]), 1)
         self.assertEqual(result["execution_signatures"][0]["count"], 2)
         self.assertEqual(
@@ -191,6 +196,10 @@ class ExecutionPolicyTest(unittest.TestCase):
         self.assertEqual(
             result["execution_signatures"][0]["attention_paths"],
             ["int8_fused_decode", "int8_prefill"],
+        )
+        self.assertEqual(
+            result["execution_signatures"][0]["state_access_path"],
+            "decode_contiguous_view",
         )
 
     def test_execution_stats_bound_unique_signatures(self):

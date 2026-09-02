@@ -157,6 +157,7 @@ class ExecutionStats:
     max_signatures: int = 4096
     model_path_counts: dict[str, int] = field(default_factory=dict)
     attention_path_counts: dict[str, int] = field(default_factory=dict)
+    state_access_path_counts: dict[str, int] = field(default_factory=dict)
     _signature_counts: dict[tuple, int] = field(default_factory=dict)
     _dropped_signature_steps: int = 0
 
@@ -176,6 +177,7 @@ class ExecutionStats:
     def reset(self) -> None:
         self.model_path_counts.clear()
         self.attention_path_counts.clear()
+        self.state_access_path_counts.clear()
         self._signature_counts.clear()
         self._dropped_signature_steps = 0
 
@@ -190,6 +192,7 @@ class ExecutionStats:
         max_context_len: int,
         partition_threshold: int,
         sliding_window_size: int | None,
+        state_access_path: str | None = None,
     ) -> None:
         if not model_path:
             raise ValueError("model_path must be non-empty")
@@ -201,6 +204,8 @@ class ExecutionStats:
         if partition_threshold <= 0:
             raise ValueError("partition_threshold must be positive")
         paths = self._normalize_paths(attention_paths)
+        if state_access_path is not None and not state_access_path:
+            raise ValueError("state_access_path must be non-empty when provided")
         if graph_bucket is not None and graph_bucket < actual_batch_size:
             raise ValueError("graph_bucket must cover actual_batch_size")
 
@@ -210,6 +215,10 @@ class ExecutionStats:
         for path in paths:
             self.attention_path_counts[path] = (
                 self.attention_path_counts.get(path, 0) + 1
+            )
+        if state_access_path is not None:
+            self.state_access_path_counts[state_access_path] = (
+                self.state_access_path_counts.get(state_access_path, 0) + 1
             )
 
         signature = (
@@ -221,6 +230,7 @@ class ExecutionStats:
             max_context_len,
             partition_threshold,
             sliding_window_size,
+            state_access_path,
         )
         if signature in self._signature_counts:
             self._signature_counts[signature] += 1
@@ -241,6 +251,7 @@ class ExecutionStats:
                 max_context_len,
                 partition_threshold,
                 sliding_window_size,
+                state_access_path,
             ) = signature
             signatures.append(
                 {
@@ -252,12 +263,14 @@ class ExecutionStats:
                     "max_context_len": max_context_len,
                     "partition_threshold": partition_threshold,
                     "sliding_window_size": sliding_window_size,
+                    "state_access_path": state_access_path,
                     "count": count,
                 }
             )
         return {
             "model_path_counts": dict(self.model_path_counts),
             "attention_path_counts": dict(self.attention_path_counts),
+            "state_access_path_counts": dict(self.state_access_path_counts),
             "execution_signatures": signatures,
             "max_execution_signatures": self.max_signatures,
             "dropped_execution_signature_steps": self._dropped_signature_steps,

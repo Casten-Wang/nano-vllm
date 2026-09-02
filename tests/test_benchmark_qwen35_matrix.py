@@ -88,6 +88,8 @@ def test_moe_candidate_runs_cuda_graph_and_requires_observed_path():
     required = command[command.index("--require-paths") + 1].split(",")
     assert "decode_cuda_graph" in required
     assert "decode_eager" not in required
+    assert "decode_graph_indexed" in required
+    assert "decode_contiguous_view" not in required
 
 
 def test_default_sequence_capacity_tracks_workload(monkeypatch):
@@ -405,7 +407,8 @@ def test_case_command_is_eager_and_fully_identified():
     assert command[command.index("--kv-cache-dtype") + 1] == "int8"
     assert command[command.index("--name") + 1] == "qwen35_tp8_state-model_kv-int8_r2"
     assert command[command.index("--require-paths") + 1] == (
-        "prefill_eager,decode_eager,int8_prefill,int8_fused_decode"
+        "prefill_eager,decode_eager,prefill_indexed,decode_contiguous_view,"
+        "int8_prefill,int8_fused_decode"
     )
     assert "--enforce-eager" in command
 
@@ -419,6 +422,8 @@ def test_float_kv_case_requires_float_attention_paths():
     assert paths == (
         "prefill_eager",
         "decode_eager",
+        "prefill_indexed",
+        "decode_contiguous_view",
         "float_flash_prefill",
         "float_flash_decode",
     )

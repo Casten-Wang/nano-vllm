@@ -182,6 +182,12 @@ def required_paths(
             if case.moe_decode_backend == "batched"
             else "decode_eager"
         ),
+        "prefill_indexed",
+        (
+            "decode_graph_indexed"
+            if case.moe_decode_backend == "batched"
+            else "decode_contiguous_view"
+        ),
     ]
     if case.kv_cache_dtype == "auto":
         paths.extend(("float_flash_prefill", "float_flash_decode"))

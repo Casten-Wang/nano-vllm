@@ -321,6 +321,7 @@ class ModelRunner:
         actual_input_rows: int,
         graph_bucket: int | None,
         max_context_len: int,
+        state_access_path: str | None,
     ):
         # Worker ranks execute the same model step, but benchmark results are
         # reported from rank 0. Recording only there avoids multiplying counts
@@ -336,6 +337,7 @@ class ModelRunner:
             max_context_len=max_context_len,
             partition_threshold=self.config.int8_partitioned_decode_threshold,
             sliding_window_size=self.config.sliding_window_size,
+            state_access_path=state_access_path,
         )
 
     def _state_access_path(
@@ -1071,6 +1073,11 @@ class ModelRunner:
             partition_threshold=self.config.int8_partitioned_decode_threshold,
             sliding_window_size=self.config.sliding_window_size,
         )
+        state_access_path = self._state_access_path(
+            context,
+            step_kind=step_kind,
+            use_graph=use_graph,
+        )
         self._record_execution(
             model_path=model_path,
             attention_paths=attention_paths,
@@ -1082,6 +1089,7 @@ class ModelRunner:
             actual_input_rows=input_ids.size(0),
             graph_bucket=graph_bucket,
             max_context_len=context.max_context_len,
+            state_access_path=state_access_path,
         )
         self.shape_trace.record_model_step(
             input_ids=input_ids,
@@ -1090,11 +1098,7 @@ class ModelRunner:
             model_path=model_path,
             attention_paths=attention_paths,
             graph_bucket=graph_bucket,
-            state_access_path=self._state_access_path(
-                context,
-                step_kind=step_kind,
-                use_graph=use_graph,
-            ),
+            state_access_path=state_access_path,
         )
         if not use_graph:
             previous_trace = activate(self.shape_trace)
@@ -1140,6 +1144,11 @@ class ModelRunner:
             partition_threshold=self.config.int8_partitioned_decode_threshold,
             sliding_window_size=self.config.sliding_window_size,
         )
+        state_access_path = self._state_access_path(
+            context,
+            step_kind="mixed",
+            use_graph=False,
+        )
         self._record_execution(
             model_path=select_model_path("mixed", use_cuda_graph=False),
             attention_paths=attention_paths,
@@ -1147,6 +1156,7 @@ class ModelRunner:
             actual_input_rows=input_ids.size(0),
             graph_bucket=None,
             max_context_len=context.decode_max_context_len,
+            state_access_path=state_access_path,
         )
         seqs = decode_seqs + prefill_seqs
         sample_args = self.prepare_sample(seqs) if self.rank == 0 else None
@@ -1157,11 +1167,7 @@ class ModelRunner:
             model_path=select_model_path("mixed", use_cuda_graph=False),
             attention_paths=attention_paths,
             graph_bucket=None,
-            state_access_path=self._state_access_path(
-                context,
-                step_kind="mixed",
-                use_graph=False,
-            ),
+            state_access_path=state_access_path,
         )
         previous_trace = activate(self.shape_trace)
         try:

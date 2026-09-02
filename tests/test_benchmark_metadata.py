@@ -198,8 +198,13 @@ class BenchmarkMetadataTest(unittest.TestCase):
             {
                 "model_path_counts": {"decode_cuda_graph": 3},
                 "attention_path_counts": {"int8_fused_decode": 3},
+                "state_access_path_counts": {"decode_graph_indexed": 3},
             },
-            ["decode_cuda_graph", "int8_fused_decode"],
+            [
+                "decode_cuda_graph",
+                "int8_fused_decode",
+                "decode_graph_indexed",
+            ],
         )
 
         self.assertTrue(result["valid"])
