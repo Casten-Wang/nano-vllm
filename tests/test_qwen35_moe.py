@@ -742,14 +742,14 @@ def test_qwen35_rmsnorm_does_not_mutate_input():
 def test_qwen35_rmsnorm_inference_matches_fp32_reference_without_mutation(dtype):
     torch.manual_seed(71)
     norm = qwen35_moe.Qwen35RMSNorm(8)
-    norm.weight.data.normal_(mean=0.0, std=0.2)
+    norm.weight.data.normal_(mean=1.0, std=0.2)
     source = torch.randn(5, 8, dtype=dtype)
     original = source.clone()
     source_float = source.float()
     expected = (
         source_float
         * torch.rsqrt(source_float.square().mean(dim=-1, keepdim=True) + norm.eps)
-        * (1.0 + norm.weight.float())
+        * norm.weight
     ).to(dtype)
 
     with torch.inference_mode():
@@ -767,3 +767,16 @@ def test_qwen35_rmsnorm_autograd_preserves_backward_inputs():
 
     assert source.grad is not None
     assert norm.weight.grad is not None
+
+
+def test_qwen35_rmsnorm_materializes_checkpoint_delta_once():
+    norm = qwen35_moe.Qwen35RMSNorm(3)
+    checkpoint_weight = torch.tensor([-0.25, 0.0, 0.5], dtype=torch.bfloat16)
+
+    norm._load_weight(norm.weight, checkpoint_weight)
+
+    assert norm.weight.dtype == torch.float32
+    torch.testing.assert_close(
+        norm.weight,
+        torch.tensor([0.75, 1.0, 1.5]),
+    )

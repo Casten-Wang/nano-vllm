@@ -739,7 +739,8 @@ def benchmark_rmsnorm(args, device, dtype) -> dict:
         device=device,
         dtype=dtype,
     )
-    weight = torch.randn(args.hidden_size, device=device)
+    weight = torch.randn(args.hidden_size, device=device, dtype=dtype)
+    gain = 1.0 + weight.float()
     eps = 1e-6
 
     def reference():
@@ -747,7 +748,7 @@ def benchmark_rmsnorm(args, device, dtype) -> dict:
         normalized = x_float * torch.rsqrt(
             x_float.pow(2).mean(dim=-1, keepdim=True) + eps
         )
-        return ((normalized * (1.0 + weight)).to(dtype),)
+        return ((normalized * (1.0 + weight.float())).to(dtype),)
 
     def candidate():
         x_float = x.float()
@@ -756,10 +757,10 @@ def benchmark_rmsnorm(args, device, dtype) -> dict:
         )
         if x_float is not x:
             x_float.mul_(inverse_rms)
-            x_float.mul_(1.0 + weight)
+            x_float.mul_(gain)
             return (x_float.to(dtype),)
         normalized = x_float * inverse_rms
-        return ((normalized * (1.0 + weight)).to(dtype),)
+        return ((normalized * gain).to(dtype),)
 
     result = compare(
         reference,
@@ -770,7 +771,19 @@ def benchmark_rmsnorm(args, device, dtype) -> dict:
         repeats=args.repeats,
     )
     result["avoided_fp32_copy_mib"] = x.numel() * 4 / 1024 / 1024
+    result["eliminated_per_call_gain_materialization_mib"] = (
+        gain.numel() * gain.element_size() / 1024 / 1024
+    )
+    result["persistent_gain_storage_mib"] = (
+        gain.numel() * gain.element_size() / 1024 / 1024
+    )
+    result["persistent_storage_delta_mib"] = (
+        gain.numel() * (gain.element_size() - weight.element_size())
+        / 1024
+        / 1024
+    )
     result["candidate_reuses_fp32_workspace"] = dtype != torch.float32
+    result["candidate_uses_precomputed_gain"] = True
     return result
 
 

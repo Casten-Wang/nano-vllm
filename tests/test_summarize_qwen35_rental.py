@@ -365,7 +365,11 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
                     "speedup": 1.1,
                     "errors": [{"max_abs_error": 0.0}],
                     "avoided_fp32_copy_mib": 4.0,
+                    "eliminated_per_call_gain_materialization_mib": 0.01,
+                    "persistent_gain_storage_mib": 0.01,
+                    "persistent_storage_delta_mib": 0.005,
                     "candidate_reuses_fp32_workspace": True,
+                    "candidate_uses_precomputed_gain": True,
                 },
                 "gated_rmsnorm_fp32_reuse": {
                     "reference": {"peak_extra_mib": 12.0},

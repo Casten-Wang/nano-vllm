@@ -44,12 +44,21 @@ def load_json(path: Path) -> dict:
     return json.loads(path.read_text())
 
 
-def summarize_normalization_candidate(result: dict, reuse_key: str) -> dict:
+def summarize_normalization_candidate(
+    result: dict,
+    reuse_key: str,
+    *,
+    required_flags: tuple[str, ...] = (),
+) -> dict:
     max_abs_error = max(item["max_abs_error"] for item in result["errors"])
     reference = result["reference"]
     candidate = result["candidate"]
     return {
-        "valid": result[reuse_key] and max_abs_error <= NORMALIZATION_MAX_ABS_ERROR,
+        "valid": (
+            result[reuse_key]
+            and all(result.get(flag) is True for flag in required_flags)
+            and max_abs_error <= NORMALIZATION_MAX_ABS_ERROR
+        ),
         "speedup": result["speedup"],
         "reference_peak_extra_mib": reference["peak_extra_mib"],
         "candidate_peak_extra_mib": candidate["peak_extra_mib"],
@@ -61,7 +70,10 @@ def summarize_normalization_candidate(result: dict, reuse_key: str) -> dict:
         "workspace": {
             key: value
             for key, value in result.items()
-            if key.endswith("_workspace_mib") or key == "avoided_fp32_copy_mib"
+            if key.endswith("_mib")
+        },
+        "required_optimizations": {
+            flag: result.get(flag) is True for flag in required_flags
         },
     }
 
@@ -696,6 +708,7 @@ def summarize(run_dir: Path, run_id: str) -> dict:
             "rmsnorm": summarize_normalization_candidate(
                 result["results"]["rmsnorm_fp32_reuse"],
                 "candidate_reuses_fp32_workspace",
+                required_flags=("candidate_uses_precomputed_gain",),
             ),
             "gated_rmsnorm": summarize_normalization_candidate(
                 result["results"]["gated_rmsnorm_fp32_reuse"],

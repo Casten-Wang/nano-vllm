@@ -18,7 +18,20 @@ class Qwen35RMSNorm(nn.Module):
     def __init__(self, hidden_size: int, eps: float = 1e-6) -> None:
         super().__init__()
         self.eps = eps
-        self.weight = nn.Parameter(torch.zeros(hidden_size))
+        # Keep the materialized ``1 + checkpoint_weight`` gain in FP32. This
+        # removes a cast and an addition from every norm invocation while
+        # preserving the official accumulation order.
+        self.weight = nn.Parameter(torch.ones(hidden_size, dtype=torch.float32))
+        self.weight.weight_loader = self._load_weight
+        self.weight.safetensors_loader = self._load_weight_slice
+
+    @staticmethod
+    def _load_weight(param: nn.Parameter, loaded_weight: torch.Tensor) -> None:
+        param.data.copy_(loaded_weight.float().add_(1.0))
+
+    @staticmethod
+    def _load_weight_slice(param: nn.Parameter, loaded_weight) -> None:
+        Qwen35RMSNorm._load_weight(param, loaded_weight[:])
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x_float = x.float()
@@ -27,10 +40,10 @@ class Qwen35RMSNorm(nn.Module):
         )
         if not torch.is_grad_enabled() and x_float is not x:
             x_float.mul_(inverse_rms)
-            x_float.mul_(1.0 + self.weight.float())
+            x_float.mul_(self.weight)
             return x_float.to(x.dtype)
         normalized = x_float * inverse_rms
-        return (normalized * (1.0 + self.weight.float())).to(x.dtype)
+        return (normalized * self.weight).to(x.dtype)
 
 
 class Qwen35TopKRouter(nn.Module):

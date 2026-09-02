@@ -46,6 +46,12 @@ def test_rmsnorm_benchmark_compares_workspace_reuse_to_baseline():
 
     assert result["candidate_reuses_fp32_workspace"]
     assert result["avoided_fp32_copy_mib"] == 8 * 16 * 4 / 1024 / 1024
+    assert result["eliminated_per_call_gain_materialization_mib"] == (
+        16 * 4 / 1024 / 1024
+    )
+    assert result["persistent_gain_storage_mib"] == 16 * 4 / 1024 / 1024
+    assert result["persistent_storage_delta_mib"] == 16 * 2 / 1024 / 1024
+    assert result["candidate_uses_precomputed_gain"]
     assert result["errors"][0]["max_abs_error"] == 0
 
 
