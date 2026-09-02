@@ -232,6 +232,7 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
                     "local_parameter_bytes": 16_000,
                     "model_max_position_embeddings": 262_144,
                     "configured_max_model_len": 16_384,
+                    "rotary_cache_bytes_per_rank": 4096,
                     "max_state_bytes_per_rank": 1_000,
                     "minimum_workload_kv_bytes_per_rank": 2_000,
                     "kv_bytes_per_token_by_dtype": {
@@ -269,6 +270,11 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
             "repeat_output_digests_match": True,
             "execution_paths_valid": True,
             "generation_valid": True,
+            "storage": {
+                "recurrent_state_storage": {
+                    "rotary_cache_bytes_local_rank": 4096,
+                }
+            },
             "median": {
                 "output_throughput_tok_s": 10,
                 "avg_tpot_s": 0.2,
@@ -290,6 +296,11 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
             "repeat_output_digests_match": True,
             "execution_paths_valid": True,
             "generation_valid": True,
+            "storage": {
+                "recurrent_state_storage": {
+                    "rotary_cache_bytes_local_rank": 4096,
+                }
+            },
             "median": {
                 "output_throughput_tok_s": 20,
                 "avg_tpot_s": 0.1,
@@ -507,6 +518,7 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     assert report["evidence"]["mixed_workload_evidence"]
     assert report["evidence"]["normalization_workspace_evidence"]
     assert report["evidence"]["buffer_reuse_evidence"]
+    assert report["evidence"]["rotary_storage_matches_preflight"]
     assert report["long_prefill"]["by_tp"]["tp4"]["valid"]
     chunk_sweep = report["long_prefill"]["by_tp"]["tp4"]["chunk_sweep"]
     assert chunk_sweep["fastest_chunk_size"] == 64
@@ -557,6 +569,22 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     assert memory["kv_capacity_by_dtype"]["int8"][
         "memory_limited_context_tokens_per_sequence"
     ] == 3_072
+
+    performance_path = tmp_path / f"performance/{run_id}_matrix_summary.json"
+    performance_result = json.loads(performance_path.read_text())
+    performance_result["runs"][0]["storage"]["recurrent_state_storage"][
+        "rotary_cache_bytes_local_rank"
+    ] = 8192
+    write(performance_path, performance_result)
+    mismatched_storage_report = MODULE.summarize(tmp_path, run_id)
+    assert not mismatched_storage_report["evidence"][
+        "rotary_storage_matches_preflight"
+    ]
+    assert not mismatched_storage_report["valid"]
+    performance_result["runs"][0]["storage"]["recurrent_state_storage"][
+        "rotary_cache_bytes_local_rank"
+    ] = 4096
+    write(performance_path, performance_result)
 
     local_audit_path = tmp_path / "preflight/checkpoint_mapping_audit.json"
     local_audit = json.loads(local_audit_path.read_text())

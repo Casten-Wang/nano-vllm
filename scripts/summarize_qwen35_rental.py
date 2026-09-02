@@ -405,6 +405,9 @@ def summarize_memory_preflight(report: dict) -> dict[str, dict]:
         summaries[tp_name] = {
             "local_parameter_bytes": item["local_parameter_bytes"],
             "max_state_bytes_per_rank": item["max_state_bytes_per_rank"],
+            "rotary_cache_bytes_per_rank": item.get(
+                "rotary_cache_bytes_per_rank"
+            ),
             "minimum_workload_kv_bytes_per_rank": item[
                 "minimum_workload_kv_bytes_per_rank"
             ],
@@ -673,6 +676,15 @@ def summarize(run_dir: Path, run_id: str) -> dict:
         and local_shards_match_official
     )
     memory_by_tp = summarize_memory_preflight(memory)
+    rotary_storage_matches_preflight = all(
+        row.get("storage", {})
+        .get("recurrent_state_storage", {})
+        .get("rotary_cache_bytes_local_rank")
+        == memory_by_tp.get(f"tp{row['tensor_parallel_size']}", {}).get(
+            "rotary_cache_bytes_per_rank"
+        )
+        for row in performance["runs"]
+    )
     attention = {}
     attention_valid = True
     for tp_name in sorted(expected_tp_names):
@@ -1026,6 +1038,7 @@ def summarize(run_dir: Path, run_id: str) -> dict:
         "memory_preflight_valid": (
             memory["valid"] and set(memory_by_tp) == expected_tp_names
         ),
+        "rotary_storage_matches_preflight": rotary_storage_matches_preflight,
         "performance_paths_valid": performance["all_execution_paths_valid"],
         "performance_generation_valid": performance["all_generation_valid"],
         "performance_output_parity": performance["all_output_digests_match"],
