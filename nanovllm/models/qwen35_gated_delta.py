@@ -225,7 +225,15 @@ def recurrent_gated_delta_step(
     else:
         next_state = grouped_state * grouped_decay.exp()[..., None, None]
     prediction = (next_state * normalized_key.unsqueeze(-1)).sum(dim=-2)
-    correction = (grouped_value - prediction) * grouped_beta.unsqueeze(-1)
+    if reuse_state:
+        # Prediction is dead after the correction is formed. Reuse its FP32
+        # storage instead of allocating another [batch, value_heads,
+        # value_dim] decode temporary in every linear-attention layer.
+        prediction.neg_().add_(grouped_value)
+        prediction.mul_(grouped_beta.unsqueeze(-1))
+        correction = prediction
+    else:
+        correction = (grouped_value - prediction) * grouped_beta.unsqueeze(-1)
     if reuse_state:
         next_state.addcmul_(
             normalized_key.unsqueeze(-1),

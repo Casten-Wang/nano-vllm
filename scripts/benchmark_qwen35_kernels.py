@@ -1277,6 +1277,14 @@ def benchmark_delta_decode(
     state_workspace_mib = state.numel() * 4 / 1024 / 1024
     result["reused_recurrent_state_mib"] = state_workspace_mib
     result["avoided_full_state_intermediates"] = 2
+    result["reused_prediction_workspace_mib"] = (
+        args.decode_batch
+        * local_value_heads
+        * args.value_head_dim
+        * 4
+        / 1024
+        / 1024
+    )
     return result
 
 

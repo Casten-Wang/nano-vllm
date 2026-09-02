@@ -294,6 +294,49 @@ def test_decode_step_reuses_explicit_runtime_state_buffer():
     torch.testing.assert_close(actual_state, expected_state)
 
 
+def test_decode_step_reuses_prediction_for_inference_correction():
+    torch.manual_seed(451)
+    query = torch.randn(2, 2, 4, dtype=torch.bfloat16)
+    key = torch.randn_like(query)
+    value = torch.randn(2, 6, 3, dtype=torch.bfloat16)
+    decay = -torch.rand(2, 6)
+    beta = torch.rand(2, 6, dtype=torch.bfloat16)
+    state = torch.randn(2, 6, 4, 3)
+    add_storage = []
+    multiply_storage = []
+    original_add = torch.Tensor.add_
+    original_multiply = torch.Tensor.mul_
+
+    def record_add(tensor, other, *args, **kwargs):
+        if tensor.shape == (2, 2, 3, 3):
+            add_storage.append(tensor.data_ptr())
+        return original_add(tensor, other, *args, **kwargs)
+
+    def record_multiply(tensor, other, *args, **kwargs):
+        if tensor.shape == (2, 2, 3, 3):
+            multiply_storage.append(tensor.data_ptr())
+        return original_multiply(tensor, other, *args, **kwargs)
+
+    with (
+        torch.inference_mode(),
+        patch.object(torch.Tensor, "add_", record_add),
+        patch.object(torch.Tensor, "mul_", record_multiply),
+    ):
+        recurrent_gated_delta_step(
+            query,
+            key,
+            value,
+            decay,
+            beta,
+            state,
+            inplace_state=True,
+        )
+
+    assert add_storage == multiply_storage
+    assert add_storage
+    assert len(set(add_storage)) == 1
+
+
 def test_decode_step_inplace_request_preserves_autograd_state():
     torch.manual_seed(46)
     query = torch.randn(1, 1, 2, requires_grad=True)
