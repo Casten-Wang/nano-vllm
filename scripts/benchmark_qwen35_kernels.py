@@ -1994,6 +1994,7 @@ def benchmark_delta_decode(
             beta,
             state.clone(),
             inplace_state=True,
+            inplace_decay=True,
         )
 
     result = compare(
@@ -2025,6 +2026,9 @@ def benchmark_delta_decode(
         * 4
         / 1024
         / 1024
+    )
+    result["reused_decay_exp_mib"] = (
+        decay.numel() * decay.element_size() / 1024 / 1024
     )
     return result
 

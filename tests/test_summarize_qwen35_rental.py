@@ -638,6 +638,7 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
                     "errors": [{"max_abs_error": 0.0}],
                         "reused_recurrent_state_mib": 8.0,
                         "reused_prediction_workspace_mib": 0.25,
+                        "reused_decay_exp_mib": 0.01,
                         "avoided_full_state_intermediates": 2,
                 },
             },
@@ -743,6 +744,9 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     assert report["buffer_reuse"]["by_tp"]["tp4"]["recurrent_decode"][
         "workspace"
     ]["reused_prediction_workspace_mib"] == 0.25
+    assert report["buffer_reuse"]["by_tp"]["tp4"]["recurrent_decode"][
+        "workspace"
+    ]["reused_decay_exp_mib"] == 0.01
     assert report["buffer_reuse"]["by_tp"]["tp4"]["recurrent_prefill"][
         "workspace"
     ]["reused_recurrent_state_mib"] == 8.0

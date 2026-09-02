@@ -1067,6 +1067,7 @@ def summarize(run_dir: Path, run_id: str) -> dict:
                 (
                     "reused_recurrent_state_mib",
                     "reused_prediction_workspace_mib",
+                    "reused_decay_exp_mib",
                 ),
                 {"avoided_full_state_intermediates": 2},
             ),

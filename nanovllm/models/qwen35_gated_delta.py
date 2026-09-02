@@ -186,6 +186,7 @@ def recurrent_gated_delta_step(
     state: torch.Tensor,
     *,
     inplace_state: bool = False,
+    inplace_decay: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Apply one decode step, broadcasting key heads over value-head groups."""
 
@@ -244,11 +245,17 @@ def recurrent_gated_delta_step(
         value_dim,
     )
     reuse_state = inplace_state and not torch.is_grad_enabled()
+    reuse_decay = (
+        inplace_decay
+        and not torch.is_grad_enabled()
+        and grouped_decay.data_ptr() == log_decay.data_ptr()
+    )
+    decay_factor = grouped_decay.exp_() if reuse_decay else grouped_decay.exp()
     if reuse_state:
-        grouped_state.mul_(grouped_decay.exp()[..., None, None])
+        grouped_state.mul_(decay_factor[..., None, None])
         next_state = grouped_state
     else:
-        next_state = grouped_state * grouped_decay.exp()[..., None, None]
+        next_state = grouped_state * decay_factor[..., None, None]
     prediction = (next_state * normalized_key.unsqueeze(-1)).sum(dim=-2)
     if reuse_state:
         # Prediction is dead after the correction is formed. Reuse its FP32
@@ -968,6 +975,7 @@ class Qwen35GatedDeltaNet(nn.Module):
             beta,
             recurrent_state,
             inplace_state=True,
+            inplace_decay=True,
         )
         if use_contiguous_state:
             if recurrent_state.data_ptr() != cached_recurrent_state.data_ptr():

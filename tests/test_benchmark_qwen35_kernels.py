@@ -879,6 +879,9 @@ def test_delta_decode_benchmark_records_state_workspace_reuse():
     assert result["reused_prediction_workspace_mib"] == (
         2 * 6 * 3 * 4 / 1024 / 1024
     )
+    assert result["reused_decay_exp_mib"] == (
+        args.decode_batch * 6 * 4 / 1024 / 1024
+    )
     assert all(item["max_abs_error"] < 1e-4 for item in result["errors"])
 
 

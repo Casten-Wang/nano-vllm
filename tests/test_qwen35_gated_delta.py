@@ -369,6 +369,42 @@ def test_decode_step_reuses_prediction_for_inference_correction():
     assert len(set(add_storage)) == 1
 
 
+def test_decode_step_can_reuse_private_decay_workspace():
+    torch.manual_seed(452)
+    query = torch.randn(2, 2, 4, dtype=torch.bfloat16)
+    key = torch.randn_like(query)
+    value = torch.randn(2, 6, 3, dtype=torch.bfloat16)
+    decay = -torch.rand(2, 6)
+    beta = torch.rand(2, 6, dtype=torch.bfloat16)
+    state = torch.randn(2, 6, 4, 3)
+    expected, expected_state = recurrent_gated_delta_step(
+        query,
+        key,
+        value,
+        decay.clone(),
+        beta,
+        state.clone(),
+        inplace_state=True,
+    )
+    reusable_decay = decay.clone()
+
+    with torch.inference_mode():
+        actual, actual_state = recurrent_gated_delta_step(
+            query,
+            key,
+            value,
+            reusable_decay,
+            beta,
+            state.clone(),
+            inplace_state=True,
+            inplace_decay=True,
+        )
+
+    torch.testing.assert_close(actual, expected)
+    torch.testing.assert_close(actual_state, expected_state)
+    torch.testing.assert_close(reusable_decay, decay.exp())
+
+
 def test_decode_step_inplace_request_preserves_autograd_state():
     torch.manual_seed(46)
     query = torch.randn(1, 1, 2, requires_grad=True)
