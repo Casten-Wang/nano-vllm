@@ -113,10 +113,10 @@ def make_attention(rank=0, world_size=1, layer_config=None):
 def test_attention_shapes_include_local_query_gate_and_replicated_kv():
     layer = make_attention(rank=3, world_size=4)
 
-    assert layer.q_proj.weight.shape == (8, 8)
-    assert layer.k_proj.weight.shape == (4, 8)
-    assert layer.v_proj.weight.shape == (4, 8)
-    assert layer.k_proj.num_kv_head_replicas == 4
+    assert layer.qkv_proj.weight.shape == (16, 8)
+    assert layer.qkv_proj.q_head_size == 8
+    assert layer.qkv_proj.num_kv_heads == 1
+    assert layer.qkv_proj.num_kv_head_replicas == 4
     assert layer.rotary_emb.head_size == 4
     assert layer.rotary_emb.cos_sin_cache.shape[-1] == 2
 
@@ -136,23 +136,35 @@ def test_query_gate_is_applied_after_attention():
     hidden = torch.randn(3, 8)
     positions = torch.arange(3)
     with torch.no_grad():
-        layer.q_proj.weight.zero_()
+        layer.qkv_proj.weight.zero_()
         # Per head: first head_dim rows are query, second head_dim are gate.
         for head in range(4):
             start = head * 8
-            layer.q_proj.weight[start : start + 4, :4] = torch.eye(4)
-        layer.k_proj.weight.zero_()
-        layer.v_proj.weight.zero_()
+            layer.qkv_proj.weight[start : start + 4, :4] = torch.eye(4)
         layer.o_proj.weight.fill_(0.1)
 
     output_closed = layer(positions, hidden)
     with torch.no_grad():
         for head in range(4):
             start = head * 8
-            layer.q_proj.weight[start + 4 : start + 8].fill_(20)
+            layer.qkv_proj.weight[start + 4 : start + 8].fill_(20)
     output_open = layer(positions, hidden)
 
     assert not torch.allclose(output_closed, output_open)
+
+
+def test_attention_uses_one_packed_qkv_projection():
+    layer = make_attention()
+    calls = []
+    hook = layer.qkv_proj.register_forward_hook(
+        lambda _module, _inputs, _output: calls.append(True)
+    )
+    try:
+        layer(torch.arange(3), torch.randn(3, 8))
+    finally:
+        hook.remove()
+
+    assert calls == [True]
 
 
 @torch.no_grad()
@@ -239,6 +251,18 @@ def test_tensor_parallel_attention_sums_to_single_rank_reference():
 
     def load(layer):
         for name, source in sources.items():
+            packed_shard = {
+                "q_proj.weight": "q",
+                "k_proj.weight": "k",
+                "v_proj.weight": "v",
+            }.get(name)
+            if packed_shard is not None:
+                layer.qkv_proj.weight.weight_loader(
+                    layer.qkv_proj.weight,
+                    source,
+                    packed_shard,
+                )
+                continue
             parameter = layer.get_parameter(name)
             loader = getattr(parameter, "weight_loader", None)
             if loader is None:
@@ -279,6 +303,18 @@ def test_official_head_layout_matches_across_tp4_and_tp8():
 
     def load(layer):
         for name, source in sources.items():
+            packed_shard = {
+                "q_proj.weight": "q",
+                "k_proj.weight": "k",
+                "v_proj.weight": "v",
+            }.get(name)
+            if packed_shard is not None:
+                layer.qkv_proj.weight.weight_loader(
+                    layer.qkv_proj.weight,
+                    source,
+                    packed_shard,
+                )
+                continue
             parameter = layer.get_parameter(name)
             loader = getattr(parameter, "weight_loader", None)
             if loader is None:

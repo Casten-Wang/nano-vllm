@@ -88,6 +88,9 @@ class Qwen3_5MoeForCausalLM(nn.Module):
         "in_proj_z": ("in_proj_zba", 0),
         "in_proj_b": ("in_proj_zba", 1),
         "in_proj_a": ("in_proj_zba", 2),
+        "q_proj": ("qkv_proj", "q"),
+        "k_proj": ("qkv_proj", "k"),
+        "v_proj": ("qkv_proj", "v"),
     }
 
     def __init__(self, config) -> None:

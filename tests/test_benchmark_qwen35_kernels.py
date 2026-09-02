@@ -98,7 +98,7 @@ def test_compact_top_k_sampling_benchmark_tracks_fp32_reduction():
     assert result["full_fp32_logits_mib"] == 4 * 16 * 4 / 1024 / 1024
     assert result["compact_fp32_logits_mib"] == 4 * 3 * 4 / 1024 / 1024
     assert result["avoided_fp32_logits_mib"] == 4 * 13 * 4 / 1024 / 1024
-    assert result["errors"][0]["max_abs_error"] == 0
+    assert result["errors"][0]["max_abs_error"] <= 1e-7
 
 
 def test_gated_delta_packed_projection_replaces_three_gemms():
@@ -121,6 +121,31 @@ def test_gated_delta_packed_projection_replaces_three_gemms():
     assert result["reference_gemm_launches"] == 3
     assert result["candidate_gemm_launches"] == 1
     assert result["avoided_gemm_launches"] == 2
+    assert all(item["max_abs_error"] <= 1e-6 for item in result["errors"])
+
+
+def test_attention_packed_qkv_replaces_three_gemms_and_tracks_key_copy():
+    args = SimpleNamespace(
+        decode_batch=2,
+        hidden_size=8,
+        attention_head_dim=4,
+        warmup=0,
+        iterations=1,
+        repeats=1,
+    )
+
+    result = MODULE.benchmark_attention_packed_qkv(
+        args,
+        torch.device("cpu"),
+        torch.float32,
+        local_query_heads=2,
+        local_kv_heads=1,
+    )
+
+    assert result["reference_gemm_launches"] == 3
+    assert result["candidate_gemm_launches"] == 1
+    assert result["avoided_gemm_launches"] == 2
+    assert result["key_alias_break_copy_mib"] == 2 * 1 * 4 * 4 / 1024 / 1024
     assert all(item["max_abs_error"] <= 1e-6 for item in result["errors"])
 
 

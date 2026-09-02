@@ -1520,6 +1520,62 @@ def benchmark_gated_delta_packed_projection(
     return result
 
 
+def benchmark_attention_packed_qkv(
+    args,
+    device,
+    dtype,
+    local_query_heads: int,
+    local_kv_heads: int,
+) -> dict:
+    hidden = torch.randn(
+        args.decode_batch,
+        args.hidden_size,
+        device=device,
+        dtype=dtype,
+    )
+    output_sizes = (
+        2 * local_query_heads * args.attention_head_dim,
+        local_kv_heads * args.attention_head_dim,
+        local_kv_heads * args.attention_head_dim,
+    )
+    weights = tuple(
+        torch.randn(size, args.hidden_size, device=device, dtype=dtype)
+        for size in output_sizes
+    )
+    packed_weight = torch.cat(weights, dim=0)
+
+    def reference():
+        return tuple(F.linear(hidden, weight) for weight in weights)
+
+    def candidate():
+        query, key, value = F.linear(hidden, packed_weight).split(
+            output_sizes,
+            dim=-1,
+        )
+        return query, key.clone(), value
+
+    result = compare(
+        reference,
+        candidate,
+        device=device,
+        warmup=args.warmup,
+        iterations=args.iterations,
+        repeats=args.repeats,
+    )
+    result["reference_gemm_launches"] = 3
+    result["candidate_gemm_launches"] = 1
+    result["avoided_gemm_launches"] = 2
+    result["key_alias_break_copy_mib"] = (
+        args.decode_batch
+        * local_kv_heads
+        * args.attention_head_dim
+        * torch.empty((), dtype=dtype).element_size()
+        / 1024
+        / 1024
+    )
+    return result
+
+
 def benchmark_decay_rate(args, device, dtype, local_value_heads: int) -> dict:
     hidden = torch.randn(
         args.router_tokens,
@@ -2236,6 +2292,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-experts", type=int, default=256)
     parser.add_argument("--top-k", type=int, default=8)
     parser.add_argument("--hidden-size", type=int, default=2048)
+    parser.add_argument("--attention-heads", type=int, default=16)
+    parser.add_argument("--attention-kv-heads", type=int, default=2)
+    parser.add_argument("--attention-head-dim", type=int, default=256)
     parser.add_argument("--vocab-size", type=int, default=248320)
     parser.add_argument("--sampling-batch", type=int, default=64)
     parser.add_argument("--sampling-top-k", type=int, default=50)
@@ -2322,6 +2381,9 @@ def main() -> None:
         "num_experts": args.num_experts,
         "top_k": args.top_k,
         "hidden_size": args.hidden_size,
+        "attention_heads": args.attention_heads,
+        "attention_kv_heads": args.attention_kv_heads,
+        "attention_head_dim": args.attention_head_dim,
         "vocab_size": args.vocab_size,
         "sampling_batch": args.sampling_batch,
         "sampling_top_k": args.sampling_top_k,
@@ -2369,6 +2431,16 @@ def main() -> None:
         raise ValueError("sampling_top_p must be in (0, 1)")
     if args.moe_intermediate_size % args.tp_size:
         raise ValueError("Qwen3.5 MoE intermediate size must divide TP size")
+    if args.attention_heads % args.tp_size:
+        raise ValueError("Qwen3.5 query heads must divide TP size")
+    if (
+        args.attention_kv_heads >= args.tp_size
+        and args.attention_kv_heads % args.tp_size
+    ) or (
+        args.attention_kv_heads < args.tp_size
+        and args.tp_size % args.attention_kv_heads
+    ):
+        raise ValueError("Qwen3.5 KV heads must shard or replicate across TP")
     if args.device == "auto":
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     else:
@@ -2380,6 +2452,8 @@ def main() -> None:
         raise ValueError("Qwen3.5 linear-attention heads must divide TP size")
     local_key_heads = args.total_key_heads // args.tp_size
     local_value_heads = args.total_value_heads // args.tp_size
+    local_query_heads = args.attention_heads // args.tp_size
+    local_kv_heads = max(args.attention_kv_heads // args.tp_size, 1)
     local_conv_channels = (
         2 * local_key_heads * args.key_head_dim
         + local_value_heads * args.value_head_dim
@@ -2496,6 +2570,13 @@ def main() -> None:
                 device,
                 dtype,
                 local_value_heads,
+            ),
+            "attention_packed_qkv": benchmark_attention_packed_qkv(
+                args,
+                device,
+                dtype,
+                local_query_heads,
+                local_kv_heads,
             ),
             "gated_delta_decay_rate_precompute": benchmark_decay_rate(
                 args,

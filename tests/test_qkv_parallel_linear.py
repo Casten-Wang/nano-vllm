@@ -3,6 +3,7 @@ from pathlib import Path
 import sys
 from unittest.mock import patch
 
+import pytest
 import torch
 
 
@@ -77,6 +78,41 @@ def test_query_weight_loader_remains_rank_sharded():
 
     for rank, layer in enumerate(layers):
         assert torch.equal(layer.weight[:8], loaded_q[rank * 8 : (rank + 1) * 8])
+
+
+def test_query_head_size_can_differ_from_kv_head_size():
+    with (
+        patch.object(LINEAR.dist, "get_world_size", return_value=4),
+        patch.object(LINEAR.dist, "get_rank", return_value=3),
+    ):
+        layer = LINEAR.QKVParallelLinear(
+            hidden_size=3,
+            head_size=2,
+            q_head_size=4,
+            total_num_heads=16,
+            total_num_kv_heads=2,
+        )
+    query = torch.arange(192, dtype=torch.float32).reshape(64, 3)
+    key = torch.arange(12, dtype=torch.float32).reshape(4, 3)
+    value = key + 100
+
+    layer.weight_loader(layer.weight, query, "q")
+    layer.weight_loader(layer.weight, key, "k")
+    layer.weight_loader(layer.weight, value, "v")
+
+    assert layer.weight.shape == (20, 3)
+    assert torch.equal(layer.weight[:16], query[48:64])
+    assert torch.equal(layer.weight[16:18], key[2:4])
+    assert torch.equal(layer.weight[18:20], value[2:4])
+
+
+def test_query_head_size_must_be_positive():
+    with (
+        patch.object(LINEAR.dist, "get_world_size", return_value=1),
+        patch.object(LINEAR.dist, "get_rank", return_value=0),
+        pytest.raises(ValueError, match="q_head_size must be positive"),
+    ):
+        LINEAR.QKVParallelLinear(3, 2, 4, q_head_size=0)
 
 
 def test_standalone_kv_projection_replicates_heads_and_bias():

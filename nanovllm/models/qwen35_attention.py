@@ -8,8 +8,7 @@ from torch import nn
 
 from nanovllm.layers.attention import Attention
 from nanovllm.layers.linear import (
-    ColumnParallelLinear,
-    KVParallelLinear,
+    QKVParallelLinear,
     RowParallelLinear,
 )
 from nanovllm.layers.rotary_embedding import get_rope
@@ -35,24 +34,15 @@ class Qwen35Attention(nn.Module):
             )
         )
         attention_bias = bool(getattr(config, "attention_bias", False))
-        self.q_proj = ColumnParallelLinear(
-            int(config.hidden_size),
-            2 * self.total_num_heads * self.head_dim,
-            bias=attention_bias,
-        )
-        self.k_proj = KVParallelLinear(
+        self.qkv_proj = QKVParallelLinear(
             int(config.hidden_size),
             self.head_dim,
+            self.total_num_heads,
             self.total_num_kv_heads,
             bias=attention_bias,
+            q_head_size=2 * self.head_dim,
         )
-        self.v_proj = KVParallelLinear(
-            int(config.hidden_size),
-            self.head_dim,
-            self.total_num_kv_heads,
-            bias=attention_bias,
-        )
-        self.num_kv_heads = self.k_proj.num_kv_heads
+        self.num_kv_heads = self.qkv_proj.num_kv_heads
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
             int(config.hidden_size),
@@ -94,18 +84,30 @@ class Qwen35Attention(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
-        query_and_gate = self.q_proj(hidden_states).view(
+        query_and_gate, key, value = self.qkv_proj(hidden_states).split(
+            (
+                self.num_heads * 2 * self.head_dim,
+                self.num_kv_heads * self.head_dim,
+                self.num_kv_heads * self.head_dim,
+            ),
+            dim=-1,
+        )
+        query_and_gate = query_and_gate.view(
             -1,
             self.num_heads,
             2 * self.head_dim,
         )
         query, gate = query_and_gate.chunk(2, dim=-1)
-        key = self.k_proj(hidden_states).view(
+        # RotaryEmbedding is compiled separately. Give its key input distinct
+        # storage so Dynamo does not have to synthesize a base for non-overlap
+        # views of the packed QKV result. This copies only the small local KV
+        # projection (256 values per token for the official TP4/TP8 model).
+        key = key.view(
             -1,
             self.num_kv_heads,
             self.head_dim,
-        )
-        value = self.v_proj(hidden_states).view_as(key)
+        ).clone()
+        value = value.view_as(key)
         query = self.q_norm(query, inplace_output=True)
         key = self.k_norm(key, inplace_output=True)
         query, key = self.rotary_emb(

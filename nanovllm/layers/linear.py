@@ -147,10 +147,14 @@ class QKVParallelLinear(ColumnParallelLinear):
         total_num_heads: int,
         total_num_kv_heads: int | None = None,
         bias: bool = False,
+        q_head_size: int | None = None,
     ):
         tp_size = dist.get_world_size()
         total_num_kv_heads = total_num_kv_heads or total_num_heads
         self.head_size = head_size
+        self.q_head_size = head_size if q_head_size is None else q_head_size
+        if self.q_head_size <= 0:
+            raise ValueError("q_head_size must be positive")
         self.num_heads = divide(total_num_heads, tp_size)
         if tp_size >= total_num_kv_heads:
             self.num_kv_heads = 1
@@ -159,8 +163,9 @@ class QKVParallelLinear(ColumnParallelLinear):
             self.num_kv_heads = divide(total_num_kv_heads, tp_size)
             self.num_kv_head_replicas = 1
         output_size = (
-            self.num_heads + 2 * self.num_kv_heads
-        ) * self.head_size * tp_size
+            self.num_heads * self.q_head_size
+            + 2 * self.num_kv_heads * self.head_size
+        ) * tp_size
         super().__init__(hidden_size, output_size, bias)
         self.weight.packed_safetensors_loader = self.packed_safetensors_loader
         if self.bias is not None:
@@ -170,14 +175,17 @@ class QKVParallelLinear(ColumnParallelLinear):
         param_data = param.data
         assert loaded_shard_id in ["q", "k", "v"]
         if loaded_shard_id == "q":
-            shard_size = self.num_heads * self.head_size
+            shard_size = self.num_heads * self.q_head_size
             shard_offset = 0
         elif loaded_shard_id == "k":
             shard_size = self.num_kv_heads * self.head_size
-            shard_offset = self.num_heads * self.head_size
+            shard_offset = self.num_heads * self.q_head_size
         else:
             shard_size = self.num_kv_heads * self.head_size
-            shard_offset = self.num_heads * self.head_size + self.num_kv_heads * self.head_size
+            shard_offset = (
+                self.num_heads * self.q_head_size
+                + self.num_kv_heads * self.head_size
+            )
         param_data = param_data.narrow(self.tp_dim, shard_offset, shard_size)
         shard_rank = (
             self.tp_rank
@@ -200,13 +208,13 @@ class QKVParallelLinear(ColumnParallelLinear):
         if loaded_shard_id not in ("q", "k", "v"):
             raise ValueError("invalid QKV shard id")
         if loaded_shard_id == "q":
-            shard_size = self.num_heads * self.head_size
+            shard_size = self.num_heads * self.q_head_size
             target_start = 0
             source_rank = self.tp_rank
             source_rows = shard_size * self.tp_size
         else:
             shard_size = self.num_kv_heads * self.head_size
-            target_start = self.num_heads * self.head_size
+            target_start = self.num_heads * self.q_head_size
             if loaded_shard_id == "v":
                 target_start += shard_size
             source_rank = self.tp_rank // self.num_kv_head_replicas

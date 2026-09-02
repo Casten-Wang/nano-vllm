@@ -933,6 +933,14 @@ def summarize(run_dir: Path, run_id: str) -> dict:
                     "candidate_gemm_launches": 1,
                 },
             ),
+            "attention_packed_qkv": summarize_buffer_reuse_candidate(
+                result["results"]["attention_packed_qkv"],
+                ("avoided_gemm_launches",),
+                {
+                    "reference_gemm_launches": 3,
+                    "candidate_gemm_launches": 1,
+                },
+            ),
             "sampling_greedy_precision": summarize_buffer_reuse_candidate(
                 result["results"]["greedy_sampler_precision_fast_path"],
                 ("avoided_fp32_logits_mib",),

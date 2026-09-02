@@ -443,6 +443,16 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
                     "candidate_gemm_launches": 1,
                     "avoided_gemm_launches": 2,
                 },
+                "attention_packed_qkv": {
+                    "reference": {"peak_extra_mib": 2.0},
+                    "candidate": {"peak_extra_mib": 2.0},
+                    "speedup": 1.1,
+                    "errors": [{"max_abs_error": 0.0}],
+                    "reference_gemm_launches": 3,
+                    "candidate_gemm_launches": 1,
+                    "avoided_gemm_launches": 2,
+                    "key_alias_break_copy_mib": 0.01,
+                },
                 "decode_convolution_state_reuse": {
                     "reference": {"peak_extra_mib": 16.0},
                     "candidate": {"peak_extra_mib": 8.0},
@@ -661,6 +671,9 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     assert report["buffer_reuse"]["by_tp"]["tp4"][
         "gated_delta_packed_projection"
     ]["workspace"]["avoided_gemm_launches"] == 2
+    assert report["buffer_reuse"]["by_tp"]["tp4"]["attention_packed_qkv"][
+        "workspace"
+    ]["avoided_gemm_launches"] == 2
     assert report["buffer_reuse"]["by_tp"]["tp4"]["attention_norm_output"][
         "workspace"
     ]["reused_projection_output_mib"] == 4.0
