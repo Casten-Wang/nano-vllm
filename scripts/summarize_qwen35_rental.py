@@ -750,6 +750,10 @@ def summarize(run_dir: Path, run_id: str) -> dict:
                 result["results"]["sampling_filter_fast_paths"]["top_k"],
                 ("avoided_full_sort_workspace_mib",),
             ),
+            "sampling_top_k_top_p": summarize_buffer_reuse_candidate(
+                result["results"]["sampling_filter_fast_paths"]["top_k_top_p"],
+                ("avoided_full_sort_workspace_mib",),
+            ),
             "router_softmax": summarize_buffer_reuse_candidate(
                 result["results"]["router_topk_first"],
                 ("reused_selected_logits_mib",),

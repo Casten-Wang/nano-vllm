@@ -28,6 +28,8 @@ def apply_top_k_top_p(
         raise ValueError("sampling tensors must be on the same device as logits")
     if logits.size(1) == 0:
         raise ValueError("vocabulary dimension must be non-empty")
+    if logits.size(0) == 0:
+        return logits
     if torch.any((top_ks != -1) & (top_ks <= 0)):
         raise ValueError("top_k must be -1 or positive")
     if torch.any(~torch.isfinite(top_ps)) or torch.any((top_ps <= 0) | (top_ps > 1)):
@@ -36,6 +38,30 @@ def apply_top_k_top_p(
     vocab_size = logits.size(1)
     top_k_enabled = (top_ks > 0) & (top_ks < vocab_size)
     top_p_enabled = top_ps < 1.0
+    if bool(top_k_enabled.all()):
+        max_top_k = int(top_ks.max().item())
+        selected_logits, selected_indices = torch.topk(
+            logits,
+            max_top_k,
+            dim=-1,
+        )
+        ranks = torch.arange(max_top_k, device=logits.device).unsqueeze(0)
+        top_k_keep = ranks < top_ks.unsqueeze(1)
+        selected_logits.masked_fill_(~top_k_keep, float("-inf"))
+        if bool(top_p_enabled.any()):
+            selected_probs = torch.softmax(selected_logits, dim=-1)
+            cumulative_probs = torch.cumsum(selected_probs, dim=-1)
+            selected_remove = cumulative_probs > top_ps.unsqueeze(1)
+            selected_remove[:, 1:] = selected_remove[:, :-1].clone()
+            selected_remove[:, 0] = False
+            selected_logits.masked_fill_(selected_remove, float("-inf"))
+        filtered_logits = torch.full_like(logits, float("-inf"))
+        filtered_logits.scatter_(
+            dim=-1,
+            index=selected_indices,
+            src=selected_logits,
+        )
+        return filtered_logits
     if not bool(top_p_enabled.any()):
         if not bool(top_k_enabled.any()):
             return logits

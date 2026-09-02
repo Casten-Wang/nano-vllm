@@ -41,7 +41,12 @@ class SamplerTest(unittest.TestCase):
         top_ks = torch.tensor([2], dtype=torch.int32)
         top_ps = torch.tensor([1.0], dtype=torch.float32)
 
-        filtered = apply_top_k_top_p(logits, top_ks, top_ps)
+        with unittest.mock.patch.object(
+            torch,
+            "sort",
+            side_effect=AssertionError("full sort should not run"),
+        ):
+            filtered = apply_top_k_top_p(logits, top_ks, top_ps)
 
         self.assertTrue(torch.isfinite(filtered[0, 1]))
         self.assertTrue(torch.isfinite(filtered[0, 2]))
@@ -54,6 +59,16 @@ class SamplerTest(unittest.TestCase):
         top_ps = torch.tensor([1.0], dtype=torch.float32)
 
         filtered = apply_top_k_top_p(logits, top_ks, top_ps)
+
+        self.assertIs(filtered, logits)
+
+    def test_empty_batch_returns_input(self):
+        logits = torch.empty((0, 4))
+        filtered = apply_top_k_top_p(
+            logits,
+            torch.empty(0, dtype=torch.int32),
+            torch.empty(0),
+        )
 
         self.assertIs(filtered, logits)
 
@@ -104,6 +119,30 @@ class SamplerTest(unittest.TestCase):
         self.assertTrue(torch.isneginf(filtered[0, 1]))
         self.assertTrue(torch.isneginf(filtered[0, 2]))
         self.assertTrue(torch.isneginf(filtered[0, 3]))
+
+    def test_top_k_top_p_fast_path_supports_per_row_k(self):
+        logits = torch.log(
+            torch.tensor(
+                [
+                    [0.40, 0.30, 0.20, 0.10],
+                    [0.40, 0.30, 0.20, 0.10],
+                ]
+            )
+        )
+        top_ks = torch.tensor([2, 3], dtype=torch.int32)
+        top_ps = torch.tensor([0.50, 0.70], dtype=torch.float32)
+
+        with unittest.mock.patch.object(
+            torch,
+            "sort",
+            side_effect=AssertionError("full sort should not run"),
+        ):
+            filtered = apply_top_k_top_p(logits, top_ks, top_ps)
+
+        self.assertTrue(torch.isfinite(filtered[0, :1]).all())
+        self.assertTrue(torch.isneginf(filtered[0, 1:]).all())
+        self.assertTrue(torch.isfinite(filtered[1, :2]).all())
+        self.assertTrue(torch.isneginf(filtered[1, 2:]).all())
 
     def test_all_greedy_rows_use_argmax_without_sampling(self):
         sampler = Sampler()

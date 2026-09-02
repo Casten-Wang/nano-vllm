@@ -245,7 +245,6 @@ def benchmark_sampling_filter(args, device, dtype) -> dict:
         device=device,
         dtype=dtype,
     )
-    top_ps = torch.ones(args.sampling_batch, device=device)
     full_sort_workspace_mib = (
         logits.numel()
         * (logits.element_size() + 8)
@@ -253,12 +252,23 @@ def benchmark_sampling_filter(args, device, dtype) -> dict:
         / 1024
     )
     results = {}
-    for name, top_k in (("unfiltered", -1), ("top_k", args.sampling_top_k)):
+    cases = (
+        ("unfiltered", -1, 1.0),
+        ("top_k", args.sampling_top_k, 1.0),
+        ("top_k_top_p", args.sampling_top_k, args.sampling_top_p),
+    )
+    for name, top_k, top_p in cases:
         top_ks = torch.full(
             (args.sampling_batch,),
             top_k,
             device=device,
             dtype=torch.int32,
+        )
+        top_ps = torch.full(
+            (args.sampling_batch,),
+            top_p,
+            device=device,
+            dtype=torch.float32,
         )
 
         def reference():
@@ -1479,6 +1489,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--vocab-size", type=int, default=248320)
     parser.add_argument("--sampling-batch", type=int, default=64)
     parser.add_argument("--sampling-top-k", type=int, default=50)
+    parser.add_argument("--sampling-top-p", type=float, default=0.9)
     parser.add_argument("--moe-intermediate-size", type=int, default=512)
     parser.add_argument("--num-hidden-layers", type=int, default=40)
     parser.add_argument(
@@ -1580,6 +1591,8 @@ def main() -> None:
         raise ValueError("top_k cannot exceed num_experts")
     if args.sampling_top_k > args.vocab_size:
         raise ValueError("sampling_top_k cannot exceed vocab_size")
+    if not 0.0 < args.sampling_top_p < 1.0:
+        raise ValueError("sampling_top_p must be in (0, 1)")
     if args.moe_intermediate_size % args.tp_size:
         raise ValueError("Qwen3.5 MoE intermediate size must divide TP size")
     if args.device == "auto":

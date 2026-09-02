@@ -357,7 +357,7 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
                         "errors": [{"max_abs_error": 0.0}],
                         "avoided_full_sort_workspace_mib": 128.0,
                     }
-                    for name in ("unfiltered", "top_k")
+                    for name in ("unfiltered", "top_k", "top_k_top_p")
                 },
                 "router_topk_first": {
                     "reference": {"peak_extra_mib": 2.0},

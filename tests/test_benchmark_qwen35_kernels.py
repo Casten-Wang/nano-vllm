@@ -43,6 +43,7 @@ def test_sampling_filter_benchmark_covers_unfiltered_and_top_k_paths():
         sampling_batch=4,
         vocab_size=16,
         sampling_top_k=3,
+        sampling_top_p=0.9,
         warmup=0,
         iterations=1,
         repeats=1,
@@ -54,7 +55,7 @@ def test_sampling_filter_benchmark_covers_unfiltered_and_top_k_paths():
         torch.bfloat16,
     )
 
-    assert set(result) == {"unfiltered", "top_k"}
+    assert set(result) == {"unfiltered", "top_k", "top_k_top_p"}
     assert all(
         item["avoided_full_sort_workspace_mib"] == 4 * 16 * 10 / 1024 / 1024
         for item in result.values()
