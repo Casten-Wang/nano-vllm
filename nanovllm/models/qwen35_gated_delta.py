@@ -256,7 +256,10 @@ def recurrent_gated_delta_step(
         next_state = grouped_state
     else:
         next_state = grouped_state * decay_factor[..., None, None]
-    prediction = (next_state * normalized_key.unsqueeze(-1)).sum(dim=-2)
+    prediction = torch.matmul(
+        normalized_key.unsqueeze(-2),
+        next_state,
+    ).squeeze(-2)
     if reuse_state:
         # Prediction is dead after the correction is formed. Reuse its FP32
         # storage instead of allocating another [batch, value_heads,
@@ -276,7 +279,10 @@ def recurrent_gated_delta_step(
             next_state
             + normalized_key.unsqueeze(-1) * correction.unsqueeze(-2)
         )
-    output = (next_state * normalized_query.unsqueeze(-1)).sum(dim=-2)
+    output = torch.matmul(
+        normalized_query.unsqueeze(-2),
+        next_state,
+    ).squeeze(-2)
     return (
         output.reshape(batch_size, value_heads, value_dim).to(value.dtype),
         next_state.reshape(expected_state_shape),

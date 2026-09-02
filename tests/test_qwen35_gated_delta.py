@@ -369,6 +369,44 @@ def test_decode_step_reuses_prediction_for_inference_correction():
     assert len(set(add_storage)) == 1
 
 
+def test_decode_step_contracts_state_without_full_elementwise_products():
+    query = torch.randn(2, 2, 4, dtype=torch.bfloat16)
+    key = torch.randn_like(query)
+    value = torch.randn(2, 6, 3, dtype=torch.bfloat16)
+    decay = -torch.rand(2, 6)
+    beta = torch.rand(2, 6, dtype=torch.bfloat16)
+    state = torch.randn(2, 6, 4, 3)
+    matmul_shapes = []
+    original_matmul = qwen35_gated_delta.torch.matmul
+
+    def record_matmul(left, right, *args, **kwargs):
+        matmul_shapes.append((tuple(left.shape), tuple(right.shape)))
+        return original_matmul(left, right, *args, **kwargs)
+
+    with (
+        torch.inference_mode(),
+        patch.object(
+            qwen35_gated_delta.torch,
+            "matmul",
+            side_effect=record_matmul,
+        ),
+    ):
+        recurrent_gated_delta_step(
+            query,
+            key,
+            value,
+            decay,
+            beta,
+            state,
+            inplace_state=True,
+        )
+
+    assert matmul_shapes == [
+        ((2, 2, 1, 1, 4), (2, 2, 3, 4, 3)),
+        ((2, 2, 1, 1, 4), (2, 2, 3, 4, 3)),
+    ]
+
+
 def test_decode_step_can_reuse_private_decay_workspace():
     torch.manual_seed(452)
     query = torch.randn(2, 2, 4, dtype=torch.bfloat16)
