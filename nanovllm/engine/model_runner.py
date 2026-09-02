@@ -15,7 +15,7 @@ from nanovllm.engine.execution import (
     select_model_path,
     supports_cudagraph_policy,
 )
-from nanovllm.engine.sequence import Sequence
+from nanovllm.engine.sequence import Sequence, SequenceStatus
 from nanovllm.engine.sampling_input_batch import SamplingInputBatch
 from nanovllm.engine.kv_cache_packing import PackedBlockMetadata, build_packed_block_metadata
 from nanovllm.models.registry import create_model
@@ -850,7 +850,12 @@ class ModelRunner:
 
         from nanovllm.engine.cache_transfer import import_rank_cache
 
-        if payload.cached_tokens != seq.num_cached_tokens:
+        expected_cached_tokens = (
+            seq.num_prompt_tokens
+            if getattr(seq, "status", None) is SequenceStatus.TRANSFERRING
+            else seq.num_cached_tokens
+        )
+        if payload.cached_tokens != expected_cached_tokens:
             raise ValueError(
                 "cache transfer token count does not match destination sequence"
             )

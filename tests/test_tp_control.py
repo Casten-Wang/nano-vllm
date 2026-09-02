@@ -116,6 +116,7 @@ def load_model_runner_module():
         decode_input_module.TokenInputBatch = object
         sampling_input_module.SamplingInputBatch = object
         sequence_module.Sequence = object
+        sequence_module.SequenceStatus = SimpleNamespace(TRANSFERRING=object())
         packing_module.PackedBlockMetadata = object
         packing_module.build_packed_block_metadata = lambda *args, **kwargs: None
         qwen_module.Qwen3ForCausalLM = object

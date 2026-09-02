@@ -12,6 +12,7 @@ from nanovllm.engine.cache_transfer import (
     import_rank_cache,
 )
 from nanovllm.engine.model_runner import ModelRunner
+from nanovllm.engine.sequence import SequenceStatus
 
 
 def make_float_cache(fill: bool = True):
@@ -226,7 +227,9 @@ def test_model_runner_exports_and_imports_complete_hybrid_state():
     destination_seq = SimpleNamespace(
         block_table=[0, 2],
         state_slot=0,
-        num_cached_tokens=3,
+        status=SequenceStatus.TRANSFERRING,
+        num_prompt_tokens=3,
+        num_cached_tokens=0,
     )
 
     payload = source.export_sequence_cache(
