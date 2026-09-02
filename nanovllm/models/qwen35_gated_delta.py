@@ -232,6 +232,28 @@ def effective_chunk_size(sequence_length: int, maximum: int) -> int:
     return min(maximum, next_power_of_two)
 
 
+def _gather_prefill_group(
+    tensor: torch.Tensor,
+    sequence_length: int,
+    group: tuple[tuple[int, int, int], ...],
+) -> torch.Tensor:
+    """Batch contiguous ranges as a view and copy only interleaved groups."""
+
+    first_start = group[0][0]
+    contiguous = all(
+        start == first_start + index * sequence_length
+        and end == start + sequence_length
+        for index, (start, end, _) in enumerate(group)
+    )
+    if contiguous:
+        return tensor.narrow(
+            0,
+            first_start,
+            len(group) * sequence_length,
+        ).view(len(group), sequence_length, *tensor.shape[1:])
+    return torch.stack([tensor[start:end] for start, end, _ in group])
+
+
 def chunk_gated_delta_rule(
     query: torch.Tensor,
     key: torch.Tensor,
@@ -915,15 +937,15 @@ class Qwen35GatedDeltaNet(nn.Module):
                 for sequence_length, group in ranges_by_length.items()
             )
         for sequence_length, group, group_slots in prefill_groups:
-            group_qkv = torch.stack(
-                [mixed_qkv[start:end] for start, end, _ in group]
+            group_qkv = _gather_prefill_group(
+                mixed_qkv, sequence_length, group
             )
-            group_z = torch.stack([z[start:end] for start, end, _ in group])
-            group_beta = torch.stack(
-                [beta[start:end] for start, end, _ in group]
+            group_z = _gather_prefill_group(z, sequence_length, group)
+            group_beta = _gather_prefill_group(
+                beta, sequence_length, group
             )
-            group_decay = torch.stack(
-                [log_decay[start:end] for start, end, _ in group]
+            group_decay = _gather_prefill_group(
+                log_decay, sequence_length, group
             )
             group_output = self._prefill_batch(
                 group_qkv,

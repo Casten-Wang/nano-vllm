@@ -28,6 +28,7 @@ causal_conv1d_scan = qwen35_gated_delta.causal_conv1d_scan
 causal_conv1d_prefill = qwen35_gated_delta.causal_conv1d_prefill
 chunk_gated_delta_rule = qwen35_gated_delta.chunk_gated_delta_rule
 effective_chunk_size = qwen35_gated_delta.effective_chunk_size
+gather_prefill_group = qwen35_gated_delta._gather_prefill_group
 recurrent_gated_delta_rule = qwen35_gated_delta.recurrent_gated_delta_rule
 recurrent_gated_delta_step = qwen35_gated_delta.recurrent_gated_delta_step
 
@@ -52,6 +53,31 @@ def test_effective_chunk_size_avoids_excess_short_prefill_padding(
     expected,
 ):
     assert effective_chunk_size(sequence_length, maximum) == expected
+
+
+def test_contiguous_prefill_group_reuses_projected_storage():
+    projected = torch.arange(40).view(10, 4)
+    group = ((2, 5, 0), (5, 8, 1))
+
+    batched = gather_prefill_group(projected, 3, group)
+
+    assert batched.shape == (2, 3, 4)
+    assert batched.untyped_storage().data_ptr() == projected.untyped_storage().data_ptr()
+    torch.testing.assert_close(batched, projected[2:8].view(2, 3, 4))
+
+
+def test_interleaved_prefill_group_keeps_copy_fallback():
+    projected = torch.arange(40).view(10, 4)
+    group = ((0, 2, 0), (3, 5, 2))
+
+    batched = gather_prefill_group(projected, 2, group)
+
+    assert batched.shape == (2, 2, 4)
+    assert batched.untyped_storage().data_ptr() != projected.untyped_storage().data_ptr()
+    torch.testing.assert_close(
+        batched,
+        torch.stack((projected[0:2], projected[3:5])),
+    )
 
 
 @pytest.mark.parametrize("batch_size", [1, 3])

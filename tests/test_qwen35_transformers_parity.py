@@ -43,6 +43,7 @@ def _load_local_runtime():
         "nanovllm.layers.embed_head",
         "nanovllm.layers.rotary_embedding",
         "nanovllm.layers.attention",
+        "nanovllm.models.moe_dispatch",
         "nanovllm.models.qwen35_moe",
         "nanovllm.models.qwen35_gated_delta",
         "nanovllm.models.qwen35_attention",
@@ -63,6 +64,7 @@ def _load_local_runtime():
             "nanovllm.layers.rotary_embedding",
             "nanovllm/layers/rotary_embedding.py",
         )
+        _load("nanovllm.models.moe_dispatch", "nanovllm/models/moe_dispatch.py")
         _load("nanovllm.models.qwen35_moe", "nanovllm/models/qwen35_moe.py")
         _load(
             "nanovllm.models.qwen35_gated_delta",
