@@ -396,6 +396,69 @@ def test_mixed_batched_backend_only_splits_decode_prefix():
     assert batched.call_args.kwargs["output"].data_ptr() == actual[:2].data_ptr()
 
 
+def test_mixed_batched_backend_preserves_autograd():
+    torch.manual_seed(60)
+    sorted_experts = make_experts(num_experts=4)
+    mixed_experts = make_experts(
+        num_experts=4,
+        decode_backend="batched",
+        decode_chunk_size=2,
+    )
+    mixed_experts.load_state_dict(sorted_experts.state_dict())
+    sorted_hidden = torch.randn(5, 2, requires_grad=True)
+    mixed_hidden = sorted_hidden.detach().clone().requires_grad_()
+    topk_ids = torch.tensor([[3, 0], [1, 2], [0, 3], [2, 1], [3, 2]])
+    sorted_weights = torch.rand(5, 2)
+    sorted_weights /= sorted_weights.sum(dim=-1, keepdim=True)
+    sorted_weights.requires_grad_()
+    mixed_weights = sorted_weights.detach().clone().requires_grad_()
+
+    expected = sorted_experts(
+        sorted_hidden,
+        topk_ids,
+        sorted_weights,
+        is_decode=False,
+    )
+    actual = mixed_experts(
+        mixed_hidden,
+        topk_ids,
+        mixed_weights,
+        is_decode=False,
+        decode_token_count=2,
+    )
+    expected.square().sum().backward()
+    actual.square().sum().backward()
+
+    torch.testing.assert_close(actual, expected)
+    torch.testing.assert_close(mixed_hidden.grad, sorted_hidden.grad)
+    torch.testing.assert_close(mixed_weights.grad, sorted_weights.grad)
+    torch.testing.assert_close(
+        mixed_experts.gate_up_proj.grad,
+        sorted_experts.gate_up_proj.grad,
+    )
+    torch.testing.assert_close(
+        mixed_experts.down_proj.grad,
+        sorted_experts.down_proj.grad,
+    )
+
+
+@pytest.mark.parametrize("decode_token_count", [-1, 6])
+def test_mixed_decode_count_must_fit_batch(decode_token_count):
+    experts = make_experts(decode_backend="batched")
+    hidden = torch.randn(5, 2)
+    topk_ids = torch.zeros(5, 2, dtype=torch.long)
+    topk_weights = torch.full((5, 2), 0.5)
+
+    with pytest.raises(ValueError, match="decode_token_count"):
+        experts(
+            hidden,
+            topk_ids,
+            topk_weights,
+            is_decode=False,
+            decode_token_count=decode_token_count,
+        )
+
+
 def test_batched_decode_preallocated_output_preserves_autograd():
     torch.manual_seed(59)
     experts = make_experts(

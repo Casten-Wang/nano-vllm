@@ -375,6 +375,63 @@ def test_graph_safe_batched_decode_matches_multi_token_path():
     torch.testing.assert_close(actual, expected)
 
 
+def test_mixed_expert_dispatch_matches_whole_batch_grouped_path():
+    torch.manual_seed(127)
+    hidden = torch.randn(7, 4)
+    topk_ids = torch.randint(0, 4, (7, 2))
+    topk_weights = torch.rand(7, 2)
+    topk_weights /= topk_weights.sum(dim=-1, keepdim=True)
+    gate_up = torch.randn(4, 6, 4)
+    down = torch.randn(4, 4, 3)
+
+    expected = MODULE.expert_dispatch_general(
+        hidden,
+        topk_ids,
+        topk_weights,
+        gate_up,
+        down,
+    )
+    actual = MODULE.expert_dispatch_mixed(
+        hidden,
+        topk_ids,
+        topk_weights,
+        gate_up,
+        down,
+        decode_token_count=2,
+        chunk_size=2,
+    )
+
+    torch.testing.assert_close(actual, expected)
+
+
+def test_mixed_expert_benchmark_records_cuda_evidence_boundary():
+    args = SimpleNamespace(
+        mixed_decode_tokens=2,
+        mixed_prefill_tokens=3,
+        moe_intermediate_size=6,
+        tp_size=1,
+        hidden_size=4,
+        num_experts=4,
+        top_k=2,
+        moe_decode_chunk_size=2,
+        warmup=0,
+        iterations=1,
+        repeats=1,
+    )
+
+    result = MODULE.benchmark_mixed_expert_dispatch(
+        args,
+        torch.device("cpu"),
+        torch.float32,
+    )
+
+    assert result["decode_tokens"] == 2
+    assert result["prefill_tokens"] == 3
+    assert result["speedup_vs_grouped"] > 0
+    assert not result["measured_on_cuda"]
+    assert result["errors"][0]["max_abs_error"] < 1e-5
+
+
 def test_expert_dispatch_sweep_preserves_requested_token_counts(monkeypatch):
     calls = []
 

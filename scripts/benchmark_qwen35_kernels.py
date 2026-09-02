@@ -536,10 +536,15 @@ def expert_dispatch_general(
     topk_weights: torch.Tensor,
     gate_up_proj: torch.Tensor,
     down_proj: torch.Tensor,
+    *,
+    output: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Previous general sorted dispatch, retained as a benchmark baseline."""
 
-    output = torch.zeros_like(hidden_states)
+    if output is None:
+        output = torch.zeros_like(hidden_states)
+    else:
+        output.zero_()
 
     assignments = topk_ids.reshape(-1)
     routing_weights = topk_weights.reshape(-1)
@@ -565,6 +570,40 @@ def expert_dispatch_general(
             expert_output * sorted_weights[offset:end].unsqueeze(-1),
         )
         offset = end
+    return output
+
+
+def expert_dispatch_mixed(
+    hidden_states: torch.Tensor,
+    topk_ids: torch.Tensor,
+    topk_weights: torch.Tensor,
+    gate_up_proj: torch.Tensor,
+    down_proj: torch.Tensor,
+    decode_token_count: int,
+    chunk_size: int = 8,
+) -> torch.Tensor:
+    """Mirror runtime mixed dispatch with one shared output buffer."""
+
+    if not 0 < decode_token_count < hidden_states.shape[0]:
+        raise ValueError("mixed decode token count must split the batch")
+    output = torch.zeros_like(hidden_states)
+    MOE_DISPATCH.batched_expert_dispatch(
+        hidden_states[:decode_token_count],
+        topk_ids[:decode_token_count],
+        topk_weights[:decode_token_count],
+        gate_up_proj,
+        down_proj,
+        chunk_size,
+        output=output[:decode_token_count],
+    )
+    expert_dispatch_general(
+        hidden_states[decode_token_count:],
+        topk_ids[decode_token_count:],
+        topk_weights[decode_token_count:],
+        gate_up_proj,
+        down_proj,
+        output=output[decode_token_count:],
+    )
     return output
 
 
@@ -846,6 +885,92 @@ def benchmark_expert_dispatch_sweep(args, device, dtype) -> dict[str, dict]:
         )
         for token_count in args.expert_token_counts
     }
+
+
+def benchmark_mixed_expert_dispatch(args, device, dtype) -> dict:
+    """Compare whole-batch grouped dispatch with decode/prefill splitting."""
+
+    decode_tokens = args.mixed_decode_tokens
+    prefill_tokens = args.mixed_prefill_tokens
+    token_count = decode_tokens + prefill_tokens
+    local_intermediate_size = args.moe_intermediate_size // args.tp_size
+    hidden = torch.randn(
+        token_count,
+        args.hidden_size,
+        device=device,
+        dtype=dtype,
+    )
+    topk_ids = torch.randint(
+        args.num_experts,
+        (token_count, args.top_k),
+        device=device,
+    )
+    topk_weights = torch.rand(
+        token_count,
+        args.top_k,
+        device=device,
+        dtype=dtype,
+    )
+    topk_weights /= topk_weights.sum(dim=-1, keepdim=True)
+    gate_up_proj = torch.randn(
+        args.num_experts,
+        2 * local_intermediate_size,
+        args.hidden_size,
+        device=device,
+        dtype=dtype,
+    )
+    down_proj = torch.randn(
+        args.num_experts,
+        args.hidden_size,
+        local_intermediate_size,
+        device=device,
+        dtype=dtype,
+    )
+
+    def baseline():
+        return (
+            expert_dispatch_general(
+                hidden,
+                topk_ids,
+                topk_weights,
+                gate_up_proj,
+                down_proj,
+            ),
+        )
+
+    def candidate():
+        return (
+            expert_dispatch_mixed(
+                hidden,
+                topk_ids,
+                topk_weights,
+                gate_up_proj,
+                down_proj,
+                decode_tokens,
+                args.moe_decode_chunk_size,
+            ),
+        )
+
+    result = compare(
+        baseline,
+        candidate,
+        device=device,
+        warmup=args.warmup,
+        iterations=args.iterations,
+        repeats=args.repeats,
+    )
+    result.update(
+        {
+            "decode_tokens": decode_tokens,
+            "prefill_tokens": prefill_tokens,
+            "speedup_vs_grouped": (
+                result["reference"]["median_ms"]
+                / result["candidate"]["median_ms"]
+            ),
+            "measured_on_cuda": device.type == "cuda",
+        }
+    )
+    return result
 
 
 def recommend_moe_decode_chunk_size(
@@ -1660,6 +1785,8 @@ def parse_args() -> argparse.Namespace:
         default=(4, 8, 16),
     )
     parser.add_argument("--max-decode-tokens", type=int, default=64)
+    parser.add_argument("--mixed-decode-tokens", type=int, default=32)
+    parser.add_argument("--mixed-prefill-tokens", type=int, default=512)
     parser.add_argument("--moe-graph-safe-min-speedup", type=float, default=1.05)
     parser.add_argument(
         "--moe-graph-safe-max-peak-extra-mib",
@@ -1698,6 +1825,8 @@ def main() -> None:
         "warmup": args.warmup,
         "moe_decode_chunk_size": args.moe_decode_chunk_size,
         "max_decode_tokens": args.max_decode_tokens,
+        "mixed_decode_tokens": args.mixed_decode_tokens,
+        "mixed_prefill_tokens": args.mixed_prefill_tokens,
         "iterations": args.iterations,
         "repeats": args.repeats,
         "moe_graph_safe_min_speedup": args.moe_graph_safe_min_speedup,
@@ -1805,6 +1934,11 @@ def main() -> None:
             "moe_decode_chunk_recommendation": recommend_moe_decode_chunk_size(
                 expert_dispatch,
                 args.max_decode_tokens,
+            ),
+            "mixed_expert_dispatch": benchmark_mixed_expert_dispatch(
+                args,
+                device,
+                dtype,
             ),
             "rmsnorm_fp32_reuse": benchmark_rmsnorm(args, device, dtype),
             "gated_delta_beta_buffer_reuse": benchmark_beta_gate(
