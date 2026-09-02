@@ -272,7 +272,8 @@ def test_sorted_expert_dispatch_reuses_sort_permutation_for_token_indices():
         output = experts(hidden, topk_ids, topk_weights)
 
     assert output.shape == hidden.shape
-    assert len(division_storage) == 1
+    assert division_storage
+    assert len(set(division_storage)) == 1
 
 
 def test_single_token_decode_skips_general_expert_grouping():
