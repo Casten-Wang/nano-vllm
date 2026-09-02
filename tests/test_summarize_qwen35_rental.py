@@ -234,6 +234,10 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
                     "configured_max_model_len": 16_384,
                     "rotary_cache_bytes_per_rank": 4096,
                     "max_state_bytes_per_rank": 1_000,
+                    "state_bytes_per_rank_by_dtype": {
+                        "float32": 1_000,
+                        "model": 500,
+                    },
                     "minimum_workload_kv_bytes_per_rank": 2_000,
                     "kv_bytes_per_token_by_dtype": {
                         "auto": 10_240,
@@ -272,6 +276,7 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
             "generation_valid": True,
             "storage": {
                 "recurrent_state_storage": {
+                    "total_bytes_local_rank": 500,
                     "rotary_cache_bytes_local_rank": 4096,
                 }
             },
@@ -298,6 +303,7 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
             "generation_valid": True,
             "storage": {
                 "recurrent_state_storage": {
+                    "total_bytes_local_rank": 500,
                     "rotary_cache_bytes_local_rank": 4096,
                 }
             },
@@ -519,6 +525,7 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     assert report["evidence"]["normalization_workspace_evidence"]
     assert report["evidence"]["buffer_reuse_evidence"]
     assert report["evidence"]["rotary_storage_matches_preflight"]
+    assert report["evidence"]["recurrent_storage_matches_preflight"]
     assert report["long_prefill"]["by_tp"]["tp4"]["valid"]
     chunk_sweep = report["long_prefill"]["by_tp"]["tp4"]["chunk_sweep"]
     assert chunk_sweep["fastest_chunk_size"] == 64
@@ -584,6 +591,18 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     performance_result["runs"][0]["storage"]["recurrent_state_storage"][
         "rotary_cache_bytes_local_rank"
     ] = 4096
+    performance_result["runs"][0]["storage"]["recurrent_state_storage"][
+        "total_bytes_local_rank"
+    ] = 501
+    write(performance_path, performance_result)
+    mismatched_state_report = MODULE.summarize(tmp_path, run_id)
+    assert not mismatched_state_report["evidence"][
+        "recurrent_storage_matches_preflight"
+    ]
+    assert not mismatched_state_report["valid"]
+    performance_result["runs"][0]["storage"]["recurrent_state_storage"][
+        "total_bytes_local_rank"
+    ] = 500
     write(performance_path, performance_result)
 
     local_audit_path = tmp_path / "preflight/checkpoint_mapping_audit.json"

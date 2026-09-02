@@ -405,6 +405,9 @@ def summarize_memory_preflight(report: dict) -> dict[str, dict]:
         summaries[tp_name] = {
             "local_parameter_bytes": item["local_parameter_bytes"],
             "max_state_bytes_per_rank": item["max_state_bytes_per_rank"],
+            "state_bytes_per_rank_by_dtype": item.get(
+                "state_bytes_per_rank_by_dtype"
+            ),
             "rotary_cache_bytes_per_rank": item.get(
                 "rotary_cache_bytes_per_rank"
             ),
@@ -683,6 +686,15 @@ def summarize(run_dir: Path, run_id: str) -> dict:
         == memory_by_tp.get(f"tp{row['tensor_parallel_size']}", {}).get(
             "rotary_cache_bytes_per_rank"
         )
+        for row in performance["runs"]
+    )
+    recurrent_storage_matches_preflight = all(
+        row.get("storage", {})
+        .get("recurrent_state_storage", {})
+        .get("total_bytes_local_rank")
+        == memory_by_tp.get(f"tp{row['tensor_parallel_size']}", {})
+        .get("state_bytes_per_rank_by_dtype", {})
+        .get(row["recurrent_state_dtype"])
         for row in performance["runs"]
     )
     attention = {}
@@ -1039,6 +1051,9 @@ def summarize(run_dir: Path, run_id: str) -> dict:
             memory["valid"] and set(memory_by_tp) == expected_tp_names
         ),
         "rotary_storage_matches_preflight": rotary_storage_matches_preflight,
+        "recurrent_storage_matches_preflight": (
+            recurrent_storage_matches_preflight
+        ),
         "performance_paths_valid": performance["all_execution_paths_valid"],
         "performance_generation_valid": performance["all_generation_valid"],
         "performance_output_parity": performance["all_output_digests_match"],

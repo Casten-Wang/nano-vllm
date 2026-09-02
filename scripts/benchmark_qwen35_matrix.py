@@ -277,6 +277,10 @@ def validate_memory_capacity(
             state_sizes["model"],
         )
         state_slot_count = max_num_seqs + recurrent_padding_slots
+        state_bytes_by_dtype = {
+            dtype: state_sizes[dtype] * state_slot_count
+            for dtype in ("float32", "model")
+        }
         state_bytes = state_bytes_per_sequence * state_slot_count
         model_max_position_embeddings = audit.get(
             "model_max_position_embeddings"
@@ -380,6 +384,7 @@ def validate_memory_capacity(
         results[f"tp{tp_size}"] = {
             "local_parameter_bytes": parameter_bytes,
             "max_state_bytes_per_rank": state_bytes,
+            "state_bytes_per_rank_by_dtype": state_bytes_by_dtype,
             "rotary_cache_bytes_per_rank": rotary_bytes,
             "minimum_workload_kv_bytes_per_rank": kv_bytes,
             "kv_bytes_per_token_by_dtype": kv_sizes,

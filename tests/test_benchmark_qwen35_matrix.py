@@ -176,6 +176,10 @@ def test_memory_preflight_covers_each_tp_rank():
 
     assert result["valid"]
     assert result["results"]["tp4"]["max_state_bytes_per_rank"] == 8 * 65
+    assert result["results"]["tp4"]["state_bytes_per_rank_by_dtype"] == {
+        "float32": 8 * 65,
+        "model": 4 * 65,
+    }
     assert result["results"]["tp4"]["recurrent_padding_slots"] == 1
     assert result["results"]["tp4"]["allocated_state_slot_count"] == 65
     assert result["results"]["tp4"]["minimum_workload_kv_bytes_per_rank"] == (
