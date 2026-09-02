@@ -348,9 +348,17 @@ def summarize_long_prefill(result: dict, *, expected_tp_size: int) -> dict:
         }
         if name == "grouped_delta_prefill":
             reused_mib = item.get("reused_fp32_output_buffer_mib")
+            reused_pairwise_mib = item.get(
+                "reused_fp32_pairwise_buffer_mib"
+            )
             cases[name]["reused_fp32_output_buffer_mib"] = reused_mib
+            cases[name]["reused_fp32_pairwise_buffer_mib"] = (
+                reused_pairwise_mib
+            )
             cases[name]["buffer_reuse_evidence_valid"] = (
                 isinstance(reused_mib, (int, float)) and reused_mib > 0
+                and isinstance(reused_pairwise_mib, (int, float))
+                and reused_pairwise_mib > 0
             )
             cases[name]["valid"] = (
                 cases[name]["valid"]

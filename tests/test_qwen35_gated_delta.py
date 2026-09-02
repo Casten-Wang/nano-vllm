@@ -259,6 +259,17 @@ def test_chunk_rule_preserves_autograd_with_separate_output_buffer():
     assert v.grad is not None
 
 
+def test_chunk_rule_inference_path_does_not_mutate_inputs():
+    tensors = inputs(17)
+    originals = tuple(tensor.clone() for tensor in tensors)
+
+    with torch.no_grad():
+        chunk_gated_delta_rule(*tensors, chunk_size=16)
+
+    for actual, expected in zip(tensors, originals):
+        torch.testing.assert_close(actual, expected)
+
+
 def test_grouped_chunk_rule_handles_empty_prefill():
     query = torch.empty(2, 0, 2, 4, dtype=torch.bfloat16)
     value = torch.empty(2, 0, 6, 3, dtype=torch.bfloat16)

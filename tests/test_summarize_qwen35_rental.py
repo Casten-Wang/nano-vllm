@@ -102,6 +102,7 @@ def write_long_prefill_case(root, *, max_abs_error=0.01):
         "speedup": None,
         "errors": [{"max_abs_error": max_abs_error}],
         "reused_fp32_output_buffer_mib": 32.0,
+        "reused_fp32_pairwise_buffer_mib": 16.0,
     }
     write(
         root / "kernels_long/tp4.json",

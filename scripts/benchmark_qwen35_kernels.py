@@ -847,6 +847,19 @@ def benchmark_delta_prefill_head_groups(
         / 1024
         / 1024
     )
+    pairwise_elements = (
+        args.prefill_batch
+        * local_value_heads
+        * (padded_tokens // effective_chunk)
+        * effective_chunk
+        * effective_chunk
+    )
+    result["reused_fp32_pairwise_buffer_mib"] = (
+        pairwise_elements
+        * torch.empty((), dtype=torch.float32).element_size()
+        / 1024
+        / 1024
+    )
     result["chunk_size"] = chunk_size
     return result
 

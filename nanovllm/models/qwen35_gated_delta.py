@@ -361,10 +361,35 @@ def chunk_gated_delta_rule(
     pairwise_decay = (
         cumulative_decay.unsqueeze(-1) - cumulative_decay.unsqueeze(-2)
     )
-    pairwise_decay = pairwise_decay.masked_fill(upper_mask, float("-inf")).exp()
-    transform = (key_beta @ key.transpose(-1, -2)) * pairwise_decay
-    intra_attention = (query @ key.transpose(-1, -2)) * pairwise_decay
-    decayed_key_beta = key_beta * cumulative_decay.exp().unsqueeze(-1)
+    if pairwise_decay.requires_grad:
+        pairwise_decay = pairwise_decay.masked_fill(
+            upper_mask,
+            float("-inf"),
+        ).exp()
+    else:
+        pairwise_decay.masked_fill_(upper_mask, float("-inf")).exp_()
+    transform = key_beta @ key.transpose(-1, -2)
+    intra_attention = query @ key.transpose(-1, -2)
+    if transform.requires_grad:
+        transform = transform * pairwise_decay
+    else:
+        transform.mul_(pairwise_decay)
+    # The query matmul keeps a singleton group dimension and relies on
+    # broadcasting across value-head groups, so it cannot be multiplied
+    # in-place unless the shapes already match.
+    if (
+        intra_attention.requires_grad
+        or intra_attention.shape != pairwise_decay.shape
+    ):
+        intra_attention = intra_attention * pairwise_decay
+    else:
+        intra_attention.mul_(pairwise_decay)
+    key_beta_scale = cumulative_decay.exp().unsqueeze(-1)
+    if key_beta.requires_grad:
+        decayed_key_beta = key_beta * key_beta_scale
+    else:
+        key_beta.mul_(key_beta_scale)
+        decayed_key_beta = key_beta
     new_values = torch.linalg.solve_triangular(
         transform,
         value_beta,
