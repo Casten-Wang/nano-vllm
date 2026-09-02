@@ -62,6 +62,11 @@
 
 ## Optimization Tracks
 
+- Execute the tracks in evidence-driven stages: first establish memory-capacity
+  accounting and allocation/lifetime instrumentation; next improve the
+  colocated scheduler; then prototype prefill/decode disaggregation on top of
+  stable scheduler and transfer interfaces. A measured bottleneck may justify
+  changing this order, but the evidence must be recorded.
 - Treat prefill/decode disaggregation as a first-class research track. Measure
   KV transfer, placement and load-balancing cost, communication overlap,
   time-to-first-token, inter-token latency, and throughput before adopting it;
@@ -74,6 +79,11 @@
   reuse of stable workspaces, staging buffers, KV-cache storage, and recurrent
   state over repeated temporary allocation. Prove shape, dtype, stream/event,
   aliasing, and CUDA Graph lifetime invariants before reusing storage.
+- Treat tensor-space reuse as a correctness-sensitive allocator change. Add
+  peak allocated/reserved memory, allocation count, fragmentation, and
+  end-to-end latency measurements, plus tests that detect overlapping live
+  ranges and stale data. Do not accept lower allocator traffic alone as proof
+  of an end-to-end improvement.
 - For these tracks, inspect current primary-source designs and relevant PRs in
   vLLM and SGLang, plus specialized systems such as Mooncake, Dynamo, DistServe,
   TensorRT-LLM, or PyTorch where applicable. Record why a design does or does

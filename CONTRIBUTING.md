@@ -75,6 +75,16 @@ Potential fixes discovered in any third-party project may be prepared as local
 review candidates. Never create or update an external pull request without the
 user's explicit approval for that exact revision and PR text.
 
+The main runtime optimization tracks are memory/capacity management, scheduling,
+and prefill/decode disaggregation. Start with measured tensor lifetimes and
+capacity accounting, including safe reuse of workspaces, staging buffers, KV
+cache, and recurrent state. Then evaluate continuous batching, chunked prefill,
+mixed prefill/decode traffic, fairness, preemption, and latency SLOs. Prototype
+disaggregation only with explicit KV-transfer, placement, load-balancing, and
+communication-overlap measurements, while retaining the colocated path. Every
+track must report throughput together with TTFT, inter-token latency, tail
+latency, and peak host/device memory where applicable.
+
 ## Releases
 
 After the pull request is merged and the resulting `main` is verified, create
