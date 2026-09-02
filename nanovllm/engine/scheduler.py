@@ -302,13 +302,26 @@ class Scheduler:
         self.waiting.appendleft(seq)
 
     def postprocess(self, seqs: list[Sequence], token_ids: list[int], is_prefill: bool):
+        self._validate_sample_count(seqs, token_ids)
         for seq, token_id in zip(seqs, token_ids):
             self.postprocess_one(seq, token_id, is_prefill)
 
     def postprocess_mixed(self, result: ScheduleResult, token_ids: list[int]):
         seqs = result.decode_seqs + result.prefill_seqs
+        self._validate_sample_count(seqs, token_ids)
         for seq, token_id in zip(seqs, token_ids):
             self.postprocess_one(seq, token_id, seq.is_prefill)
+
+    @staticmethod
+    def _validate_sample_count(
+        seqs: list[Sequence],
+        token_ids: list[int],
+    ) -> None:
+        if len(token_ids) != len(seqs):
+            raise RuntimeError(
+                "sampler returned an unexpected number of tokens: "
+                f"expected {len(seqs)}, got {len(token_ids)}"
+            )
 
     def postprocess_one(self, seq: Sequence, token_id: int, is_prefill: bool):
         if self.prefix_cache_enabled:

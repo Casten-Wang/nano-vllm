@@ -287,6 +287,35 @@ def test_mixed_postprocess_keeps_decode_then_prefill_token_order():
     assert waiting.num_cached_tokens == 4
 
 
+def test_mixed_postprocess_rejects_sample_count_before_mutating_sequences():
+    scheduler = make_scheduler(max_tokens=8, max_seqs=8, block_size=4)
+    running = Sequence([1, 2, 3, 4])
+    waiting = Sequence([10, 11, 12, 13])
+    scheduler.block_manager.allocate(running, 0)
+    running.status = SequenceStatus.RUNNING
+    running.is_prefill = False
+    running.num_cached_tokens = len(running)
+    scheduler.running.append(running)
+    scheduler.waiting.append(waiting)
+    result = scheduler.schedule()
+    before = [
+        (seq.num_tokens, seq.num_cached_tokens, seq.last_token)
+        for seq in result.seqs
+    ]
+
+    for token_ids in ([101], [101, 202, 303]):
+        try:
+            scheduler.postprocess_mixed(result, token_ids)
+        except RuntimeError as error:
+            assert "expected 2" in str(error)
+        else:
+            raise AssertionError("mismatched sampler output was accepted")
+        assert [
+            (seq.num_tokens, seq.num_cached_tokens, seq.last_token)
+            for seq in result.seqs
+        ] == before
+
+
 if __name__ == "__main__":
     test_dynamic_schedule_decodes_first_and_uses_remaining_budget_for_prefill()
     test_dynamic_schedule_prefill_waits_when_decode_fills_token_budget()
