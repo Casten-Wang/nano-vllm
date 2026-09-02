@@ -47,6 +47,12 @@ def write_attention_case(
             "max_abs_diff_vs_flash_reference": 0.02,
             "peak_extra_mib": 4.0,
         }
+        results["int8_partitioned_ps512"] = {
+            "status": "ok",
+            "median_ms": 0.9,
+            "max_abs_diff_vs_flash_reference": 0.015,
+            "peak_extra_mib": 3.0,
+        }
     write(
         root / f"attention/tp4/{name}.json",
         {
@@ -230,6 +236,9 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     assert attention["long"]["best_partitioned"]["backend"] == (
         "int8_partitioned_ps256"
     )
+    assert attention["long"]["production_partitioned"]["backend"] == (
+        "int8_partitioned_ps512"
+    )
     memory = report["memory"]["by_tp"]["tp4"]
     assert memory["int8_kv_reduction_ratio"] == 0.49609375
     assert memory["minimum_budget_margin_bytes"] == 5_000
@@ -258,6 +267,33 @@ def test_summary_rejects_inaccurate_attention_kernel(tmp_path):
     assert not summary["fused_correctness_valid"]
     assert summary["best_fused"] is None
     assert summary["max_allowed_abs_error"] == 0.05
+
+
+def test_long_context_requires_production_partition_size():
+    result = {
+        "results": {
+            "flash_reference": {"status": "ok", "median_ms": 2.0},
+            "int8_v3_bt256_w8_s2": {
+                "status": "ok",
+                "median_ms": 1.0,
+                "max_abs_diff_vs_flash_reference": 0.01,
+                "peak_extra_mib": 1.0,
+            },
+            "int8_partitioned_ps256": {
+                "status": "ok",
+                "median_ms": 0.8,
+                "max_abs_diff_vs_flash_reference": 0.01,
+                "peak_extra_mib": 2.0,
+            },
+        },
+        "context_len": 16_384,
+        "batch_size": 4,
+    }
+
+    summary = MODULE.summarize_attention_case(result, partitioned=True)
+
+    assert not summary["partitioned_correctness_valid"]
+    assert summary["production_partitioned"] is None
 
 
 def test_runtime_promotion_rejects_unstable_or_regressing_candidate():

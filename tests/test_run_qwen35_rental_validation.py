@@ -57,6 +57,7 @@ def test_commands_are_fail_fast_and_cover_complete_validation_suite():
     assert "--include-partitioned" not in stages[2][1]
     assert stages[3][1][stages[3][1].index("--context-len") + 1] == "16384"
     assert "--include-partitioned" in stages[3][1]
+    assert stages[3][1][stages[3][1].index("--partition-sizes") + 1] == "256,512"
     assert stages[4][1][stages[4][1].index("--tensor-parallel-size") + 1] == "4"
     assert stages[5][1][stages[5][1].index("--tp-size") + 1] == "8"
     assert stages[6][1][stages[6][1].index("--num-heads") + 1] == "2"

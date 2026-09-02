@@ -17,6 +17,7 @@ QWEN35_HEAD_DIM = 256
 ATTENTION_SHORT_CONTEXT = 4096
 ATTENTION_LONG_CONTEXT = 16384
 ATTENTION_MAX_ABS_ERROR = 0.05
+PRODUCTION_PARTITION_SIZE = 512
 
 
 def load_json(path: Path) -> dict:
@@ -185,16 +186,35 @@ def summarize_attention_case(result: dict, *, partitioned: bool) -> dict:
             "peak_extra_mib": item["peak_extra_mib"],
         }
 
+    production_name = f"int8_partitioned_ps{PRODUCTION_PARTITION_SIZE}"
+    production_item = result["results"].get(production_name)
+    production_accurate = (
+        isinstance(production_item, dict)
+        and production_item.get("status") == "ok"
+        and production_item["max_abs_diff_vs_flash_reference"]
+        <= ATTENTION_MAX_ABS_ERROR
+    )
+    production_summary = (
+        best_accurate([(production_name, production_item)])
+        if production_accurate
+        else None
+    )
     return {
         "context_len": result["context_len"],
         "batch_size": result["batch_size"],
         "max_allowed_abs_error": ATTENTION_MAX_ABS_ERROR,
         "fused_correctness_valid": best_accurate(fused) is not None,
         "partitioned_correctness_valid": (
-            not partitioned or best_accurate(partitioned_results) is not None
+            not partitioned
+            or (
+                best_accurate(partitioned_results) is not None
+                and production_accurate
+            )
         ),
         "best_fused": best_accurate(fused),
         "best_partitioned": best_accurate(partitioned_results),
+        "production_partition_size": PRODUCTION_PARTITION_SIZE,
+        "production_partitioned": production_summary,
     }
 
 

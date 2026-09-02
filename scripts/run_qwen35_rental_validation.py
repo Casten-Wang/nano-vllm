@@ -113,7 +113,9 @@ def commands(args: argparse.Namespace) -> list[tuple[str, list[str]]]:
                 context_name,
             ]
             if context_name == "long":
-                command.append("--include-partitioned")
+                command.extend(
+                    ("--include-partitioned", "--partition-sizes", "256,512")
+                )
             result.append(
                 (f"attention-{context_name}-tp{tp_size}", command)
             )
