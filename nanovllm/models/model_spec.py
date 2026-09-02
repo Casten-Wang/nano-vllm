@@ -47,6 +47,20 @@ def _architecture(hf_config: Any) -> str:
     return architecture
 
 
+def _validate_qwen35_semantics(text_config: Any) -> None:
+    """Reject variants whose configured math is not implemented locally."""
+
+    if not bool(getattr(text_config, "attn_output_gate", True)):
+        raise ValueError("Qwen3.5 requires attn_output_gate=True")
+    if getattr(text_config, "hidden_act", "silu") != "silu":
+        raise ValueError("Qwen3.5 supports only hidden_act='silu'")
+    if tuple(getattr(text_config, "mlp_only_layers", ())) != ():
+        raise ValueError("Qwen3.5 mlp_only_layers are not supported")
+    rope_parameters = getattr(text_config, "rope_parameters", None) or {}
+    if rope_parameters.get("rope_type", "default") != "default":
+        raise ValueError("Qwen3.5 supports only default RoPE")
+
+
 def resolve_model_spec(hf_config: Any) -> ModelSpec:
     """Resolve dense and hybrid Qwen configs to a common text-only view."""
 
@@ -87,6 +101,7 @@ def resolve_model_spec(hf_config: Any) -> ModelSpec:
         )
         if not full_attention_layers or not linear_attention_layers:
             raise ValueError("Qwen3.5 must contain both full and linear attention layers")
+        _validate_qwen35_semantics(text_config)
         return ModelSpec(
             architecture=architecture,
             text_config=text_config,

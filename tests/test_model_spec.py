@@ -71,6 +71,34 @@ def test_qwen35_rejects_inconsistent_layer_metadata():
         resolve_model_spec(config)
 
 
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    (
+        ("attn_output_gate", False, "attn_output_gate=True"),
+        ("hidden_act", "gelu", "hidden_act='silu'"),
+        ("mlp_only_layers", [1], "mlp_only_layers"),
+        (
+            "rope_parameters",
+            {"rope_type": "dynamic"},
+            "only default RoPE",
+        ),
+    ),
+)
+def test_qwen35_rejects_unimplemented_model_semantics(field, value, message):
+    text_config = SimpleNamespace(
+        num_hidden_layers=2,
+        layer_types=("linear_attention", "full_attention"),
+    )
+    setattr(text_config, field, value)
+    config = SimpleNamespace(
+        architectures=["Qwen3_5MoeForConditionalGeneration"],
+        text_config=text_config,
+    )
+
+    with pytest.raises(ValueError, match=message):
+        resolve_model_spec(config)
+
+
 def test_unknown_architecture_is_rejected_early():
     config = SimpleNamespace(
         architectures=["UnknownForCausalLM"],
