@@ -88,8 +88,8 @@ def test_commands_are_fail_fast_and_cover_complete_validation_suite():
     assert short_attention[short_attention.index("--context-len") + 1] == "4096"
     assert short_attention[short_attention.index("--num-heads") + 1] == "4"
     assert "--include-partitioned" not in short_attention
-    assert long_attention[long_attention.index("--context-len") + 1] == "16384"
     assert "--include-partitioned" in long_attention
+    assert long_attention[long_attention.index("--context-len") + 1] == "16385"
     assert long_attention[long_attention.index("--partition-sizes") + 1] == "256,512"
     short_graph = commands["cudagraph-short-tp4"]
     long_graph = commands["cudagraph-long-tp4"]

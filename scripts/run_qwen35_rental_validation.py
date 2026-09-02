@@ -214,7 +214,10 @@ def commands(args: argparse.Namespace) -> list[tuple[str, list[str]]]:
                 ],
             )
         )
-        for context_name, context_len in (("short", 4096), ("long", 16384)):
+        # Keep the long case one token past both the 256-token cache block and
+        # the 256/512-token partition boundaries so the CUDA gate exercises a
+        # partially filled final block and partition.
+        for context_name, context_len in (("short", 4096), ("long", 16385)):
             command = [
                 sys.executable,
                 str(ATTENTION_KERNEL_SCRIPT),
