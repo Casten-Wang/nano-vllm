@@ -23,14 +23,48 @@ def write(path, value):
 
 def write_gptq_summary_inputs(root, run_id, *, backend="triton"):
     gptq_run_id = f"{run_id}-gptq"
+    shards = [
+        {"name": "model-00001.safetensors", "size_bytes": 123, "sha256": "a" * 64}
+    ]
     write(
         root / "gptq/official_checkpoint_header_audit.json",
         {
             "valid": True,
             "repo": MODULE.OFFICIAL_GPTQ_CHECKPOINT_REPO,
             "resolved_revision": MODULE.OFFICIAL_GPTQ_CHECKPOINT_REVISION,
+            "config_sha256": "b" * 64,
+            "index_sha256": "c" * 64,
+            "shard_count": 1,
+            "checkpoint_shards": shards,
             "results": {"tp4": {"valid": True}, "tp8": {"valid": True}},
         },
+    )
+    write(
+        root / "gptq/preflight/checkpoint_mapping_audit.json",
+        {
+            "valid": True,
+            "complete": True,
+            "results": {"tp4": {"valid": True}, "tp8": {"valid": True}},
+            "checkpoint_manifest": {
+                "config_sha256": "b" * 64,
+                "index_sha256": "c" * 64,
+                "shard_count": 1,
+                "present_shard_count": 1,
+                "missing_shards": [],
+                "files": [
+                    {
+                        "name": shards[0]["name"],
+                        "size_bytes": shards[0]["size_bytes"],
+                        "content_sha256": shards[0]["sha256"],
+                        "present": True,
+                    }
+                ],
+            },
+        },
+    )
+    write(
+        root / "gptq/preflight/memory_preflight.json",
+        {"valid": True, "results": {"tp4": {}, "tp8": {}}},
     )
     rows = [
         {
@@ -90,6 +124,8 @@ def test_optional_gptq_summary_requires_actual_triton_execution(tmp_path):
     report = MODULE.summarize_optional_gptq(tmp_path, "run")
 
     assert report["valid"]
+    assert report["local_checkpoint_matches_official"]
+    assert report["memory_preflight_valid"]
     assert report["tensor_parallel_sizes"] == [4, 8]
     assert report["best_throughput"]["tensor_parallel_size"] == 8
     assert report["lowest_peak_memory"]["tensor_parallel_size"] == 8

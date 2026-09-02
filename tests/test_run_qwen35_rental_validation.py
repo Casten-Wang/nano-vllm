@@ -158,8 +158,9 @@ def test_optional_gptq_checkpoint_adds_audited_eager_tp_matrix():
     stages = MODULE.commands(arguments)
     names = [name for name, _ in stages]
 
-    assert names[-4:] == [
+    assert names[-5:] == [
         "official-gptq-checkpoint-audit",
+        "gptq-preflight",
         "gptq-performance-matrix",
         "gptq-quality-matrix",
         "final-summary",
@@ -168,9 +169,14 @@ def test_optional_gptq_checkpoint_adds_audited_eager_tp_matrix():
     audit = commands["official-gptq-checkpoint-audit"]
     assert audit[audit.index("--repo") + 1] == MODULE.OFFICIAL_GPTQ_CHECKPOINT_REPO
     assert audit[audit.index("--revision") + 1] == MODULE.OFFICIAL_GPTQ_CHECKPOINT_REVISION
+    preflight = commands["gptq-preflight"]
+    assert "--preflight-only" in preflight
+    assert "--verify-checkpoint-shards" in preflight
+    assert preflight[preflight.index("--weight-quant-backend") + 1] == "auto"
     performance = commands["gptq-performance-matrix"]
     assert performance[performance.index("--weight-quant-backend") + 1] == "auto"
     assert "--no-checkpoint-audit" in performance
+    assert "--no-memory-preflight" in performance
     quality = commands["gptq-quality-matrix"]
     assert quality[quality.index("--weight-quant-backend") + 1] == "auto"
     assert quality[quality.index("--qwen35-moe-decode-backend") + 1] == "sorted"
@@ -201,6 +207,22 @@ def test_gptq_artifact_collection_is_isolated(tmp_path):
 
     assert expected in artifacts
     assert all(path.is_relative_to(quality_dir) for path in artifacts)
+
+
+def test_gptq_preflight_requires_mapping_and_memory_artifacts(tmp_path):
+    arguments = args()
+    arguments.result_dir = str(tmp_path)
+    preflight = tmp_path / arguments.run_id / "gptq" / "preflight"
+    preflight.mkdir(parents=True)
+    mapping = preflight / "checkpoint_mapping_audit.json"
+    memory = preflight / "memory_preflight.json"
+    mapping.write_text('{"valid": true}\n')
+    memory.write_text('{"valid": true}\n')
+
+    assert MODULE.collect_stage_artifacts(arguments, "gptq-preflight") == [
+        mapping,
+        memory,
+    ]
 
 
 def test_attention_commands_match_summary_contract():

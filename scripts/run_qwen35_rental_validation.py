@@ -542,6 +542,35 @@ def commands(args: argparse.Namespace) -> list[tuple[str, list[str]]]:
                     ],
                 ),
                 (
+                    "gptq-preflight",
+                    [
+                        sys.executable,
+                        str(MATRIX_SCRIPT),
+                        "--model",
+                        args.gptq_model,
+                        "--tp-sizes",
+                        tp_sizes,
+                        "--num-seqs",
+                        str(args.num_seqs),
+                        "--input-len",
+                        str(args.input_len),
+                        "--output-len",
+                        str(args.output_len),
+                        "--max-model-len",
+                        str(args.max_model_len),
+                        "--max-num-seqs",
+                        str(args.max_num_seqs),
+                        "--run-id",
+                        gptq_run_id,
+                        "--result-dir",
+                        str(gptq_root / "preflight"),
+                        "--weight-quant-backend",
+                        "auto",
+                        "--preflight-only",
+                        "--verify-checkpoint-shards",
+                    ],
+                ),
+                (
                     "gptq-performance-matrix",
                     [
                         sys.executable,
@@ -569,6 +598,7 @@ def commands(args: argparse.Namespace) -> list[tuple[str, list[str]]]:
                         "--weight-quant-backend",
                         "auto",
                         "--no-checkpoint-audit",
+                        "--no-memory-preflight",
                     ],
                 ),
                 (
@@ -688,6 +718,12 @@ def collect_stage_artifacts(
     elif stage_name == "official-gptq-checkpoint-audit":
         required = [root / "gptq" / "official_checkpoint_header_audit.json"]
         search_root = root / "gptq"
+    elif stage_name == "gptq-preflight":
+        search_root = root / "gptq" / "preflight"
+        required = [
+            search_root / "checkpoint_mapping_audit.json",
+            search_root / "memory_preflight.json",
+        ]
     elif stage_name == "preflight":
         required = [
             root / "preflight" / "checkpoint_mapping_audit.json",
@@ -766,6 +802,7 @@ def collect_stage_artifacts(
         if stage_name in (
             "official-checkpoint-audit",
             "official-gptq-checkpoint-audit",
+            "gptq-preflight",
             "preflight",
             "final-summary",
         )

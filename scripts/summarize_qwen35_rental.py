@@ -60,6 +60,42 @@ def load_json(path: Path) -> dict:
     return json.loads(path.read_text())
 
 
+def checkpoint_manifest_matches_remote(local: dict, remote: dict) -> bool:
+    remote_shards = {
+        item.get("name"): item
+        for item in remote.get("checkpoint_shards", ())
+        if isinstance(item, dict)
+    }
+    local_shards = {
+        item.get("name"): item
+        for item in local.get("files", ())
+        if isinstance(item, dict)
+    }
+    shards_match = (
+        bool(remote_shards)
+        and set(local_shards) == set(remote_shards)
+        and all(
+            local_shards[name].get("present") is True
+            and local_shards[name].get("size_bytes")
+            == remote_shards[name].get("size_bytes")
+            and (
+                local_shards[name].get("content_sha256")
+                or local_shards[name].get("content_id")
+            )
+            == remote_shards[name].get("sha256")
+            for name in remote_shards
+        )
+    )
+    return (
+        local.get("config_sha256") == remote.get("config_sha256")
+        and local.get("index_sha256") == remote.get("index_sha256")
+        and local.get("shard_count") == remote.get("shard_count")
+        and local.get("present_shard_count") == remote.get("shard_count")
+        and not local.get("missing_shards")
+        and shards_match
+    )
+
+
 def summarize_optional_gptq(run_dir: Path, run_id: str) -> dict:
     """Validate and summarize the optional GPTQ rental stages."""
 
@@ -68,6 +104,8 @@ def summarize_optional_gptq(run_dir: Path, run_id: str) -> dict:
         return {"enabled": False, "valid": True}
     gptq_run_id = f"{run_id}-gptq"
     audit = load_json(root / "official_checkpoint_header_audit.json")
+    local_audit = load_json(root / "preflight" / "checkpoint_mapping_audit.json")
+    memory = load_json(root / "preflight" / "memory_preflight.json")
     performance = load_json(
         root / "performance" / f"{gptq_run_id}_matrix_summary.json"
     )
@@ -86,6 +124,19 @@ def summarize_optional_gptq(run_dir: Path, run_id: str) -> dict:
             result.get("valid") is True
             for result in audit.get("results", {}).values()
         )
+    )
+    local_checkpoint_valid = (
+        local_audit.get("valid") is True
+        and local_audit.get("complete") is True
+        and set(local_audit.get("results", {})) == tp_names
+        and checkpoint_manifest_matches_remote(
+            local_audit.get("checkpoint_manifest", {}),
+            audit,
+        )
+    )
+    memory_valid = (
+        memory.get("valid") is True
+        and set(memory.get("results", {})) == tp_names
     )
     performance_valid = (
         bool(performance_runs)
@@ -125,8 +176,16 @@ def summarize_optional_gptq(run_dir: Path, run_id: str) -> dict:
     ]
     return {
         "enabled": True,
-        "valid": audit_valid and performance_valid and quality_valid,
+        "valid": (
+            audit_valid
+            and local_checkpoint_valid
+            and memory_valid
+            and performance_valid
+            and quality_valid
+        ),
         "audit_valid": audit_valid,
+        "local_checkpoint_matches_official": local_checkpoint_valid,
+        "memory_preflight_valid": memory_valid,
         "performance_valid": performance_valid,
         "quality_valid": quality_valid,
         "official_checkpoint": {
@@ -1384,42 +1443,9 @@ def summarize(run_dir: Path, run_id: str) -> dict:
         )
     )
     local_checkpoint_manifest = audit.get("checkpoint_manifest", {})
-    official_shards = {
-        item.get("name"): item
-        for item in official_audit.get("checkpoint_shards", ())
-        if isinstance(item, dict)
-    }
-    local_shards = {
-        item.get("name"): item
-        for item in local_checkpoint_manifest.get("files", ())
-        if isinstance(item, dict)
-    }
-    local_shards_match_official = (
-        bool(official_shards)
-        and set(local_shards) == set(official_shards)
-        and all(
-            local_shards[name].get("present") is True
-            and local_shards[name].get("size_bytes")
-            == official_shards[name].get("size_bytes")
-            and (
-                local_shards[name].get("content_sha256")
-                or local_shards[name].get("content_id")
-            )
-            == official_shards[name].get("sha256")
-            for name in official_shards
-        )
-    )
-    local_checkpoint_identity_valid = (
-        local_checkpoint_manifest.get("config_sha256")
-        == official_audit.get("config_sha256")
-        and local_checkpoint_manifest.get("index_sha256")
-        == official_audit.get("index_sha256")
-        and local_checkpoint_manifest.get("shard_count")
-        == official_audit.get("shard_count")
-        and local_checkpoint_manifest.get("present_shard_count")
-        == official_audit.get("shard_count")
-        and not local_checkpoint_manifest.get("missing_shards")
-        and local_shards_match_official
+    local_checkpoint_identity_valid = checkpoint_manifest_matches_remote(
+        local_checkpoint_manifest,
+        official_audit,
     )
     memory_by_tp = summarize_memory_preflight(memory)
     pd_transfer = {}
