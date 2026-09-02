@@ -351,6 +351,31 @@ def test_delta_prefill_chunk_sweep_compares_shared_input_to_chunk64():
         ) < 1e-4
 
 
+def test_delta_decode_benchmark_records_state_workspace_reuse():
+    args = SimpleNamespace(
+        decode_batch=2,
+        key_head_dim=4,
+        value_head_dim=3,
+        warmup=0,
+        iterations=1,
+        repeats=1,
+    )
+
+    result = MODULE.benchmark_delta_decode(
+        args,
+        torch.device("cpu"),
+        torch.bfloat16,
+        2,
+        6,
+    )
+
+    assert result["reused_recurrent_state_mib"] == (
+        2 * 6 * 4 * 3 * 4 / 1024 / 1024
+    )
+    assert result["avoided_full_state_intermediates"] == 2
+    assert all(item["max_abs_error"] < 1e-4 for item in result["errors"])
+
+
 def test_graph_safe_candidate_requires_every_promotion_gate():
     promoted = MODULE.evaluate_graph_safe_moe_candidate(
         device_type="cuda",

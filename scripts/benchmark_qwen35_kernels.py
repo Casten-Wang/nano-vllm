@@ -917,7 +917,7 @@ def benchmark_delta_decode(
             value.unsqueeze(1),
             decay.unsqueeze(1),
             beta.unsqueeze(1),
-            state,
+            state.clone(),
         )
         return output.squeeze(1), next_state
 
@@ -928,7 +928,8 @@ def benchmark_delta_decode(
             value,
             decay,
             beta,
-            state,
+            state.clone(),
+            inplace_state=True,
         )
 
     result = compare(
@@ -950,6 +951,9 @@ def benchmark_delta_decode(
         / 1024
         / 1024
     )
+    state_workspace_mib = state.numel() * 4 / 1024 / 1024
+    result["reused_recurrent_state_mib"] = state_workspace_mib
+    result["avoided_full_state_intermediates"] = 2
     return result
 
 

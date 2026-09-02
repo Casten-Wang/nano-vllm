@@ -213,6 +213,66 @@ def test_decode_step_broadcasts_key_heads_without_replication(dtype):
     torch.testing.assert_close(actual_state, expected_state)
 
 
+def test_decode_step_reuses_explicit_runtime_state_buffer():
+    torch.manual_seed(45)
+    query = torch.randn(2, 2, 4, dtype=torch.bfloat16)
+    key = torch.randn_like(query)
+    value = torch.randn(2, 6, 3, dtype=torch.bfloat16)
+    decay = -torch.rand(2, 6)
+    beta = torch.rand(2, 6, dtype=torch.bfloat16)
+    state = torch.randn(2, 6, 4, 3, dtype=torch.float32)
+    expected, expected_state = recurrent_gated_delta_step(
+        query,
+        key,
+        value,
+        decay,
+        beta,
+        state.clone(),
+    )
+    state_storage = state.data_ptr()
+
+    with torch.inference_mode():
+        actual, actual_state = recurrent_gated_delta_step(
+            query,
+            key,
+            value,
+            decay,
+            beta,
+            state,
+            inplace_state=True,
+        )
+
+    assert actual_state.data_ptr() == state_storage
+    torch.testing.assert_close(actual, expected)
+    torch.testing.assert_close(actual_state, expected_state)
+
+
+def test_decode_step_inplace_request_preserves_autograd_state():
+    torch.manual_seed(46)
+    query = torch.randn(1, 1, 2, requires_grad=True)
+    key = torch.randn_like(query)
+    value = torch.randn(1, 1, 2, requires_grad=True)
+    decay = -torch.rand(1, 1)
+    beta = torch.rand(1, 1)
+    state = torch.randn(1, 1, 2, 2, requires_grad=True)
+    original = state.detach().clone()
+
+    output, next_state = recurrent_gated_delta_step(
+        query,
+        key,
+        value,
+        decay,
+        beta,
+        state,
+        inplace_state=True,
+    )
+    (output.square().mean() + next_state.square().mean()).backward()
+
+    assert next_state.data_ptr() != state.data_ptr()
+    assert torch.equal(state, original)
+    assert state.grad is not None
+
+
 @pytest.mark.parametrize("sequence_length", [1, 5, 17, 64, 65])
 def test_chunk_rule_matches_recurrent_oracle(sequence_length):
     q, k, v, decay, beta = inputs(5)
