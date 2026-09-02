@@ -7,6 +7,7 @@ from nanovllm.sampling_params import SamplingParams
 
 class SequenceStatus(Enum):
     WAITING = auto()
+    TRANSFERRING = auto()
     RUNNING = auto()
     FINISHED = auto()
 

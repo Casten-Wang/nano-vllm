@@ -3,6 +3,9 @@ import sys
 import types
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -86,11 +89,17 @@ sequence_mod = load_module("nanovllm.engine.sequence", ROOT / "nanovllm" / "engi
 block_manager_mod = load_module("nanovllm.engine.block_manager", ROOT / "nanovllm" / "engine" / "block_manager.py")
 load_module("nanovllm.engine.state_manager", ROOT / "nanovllm" / "engine" / "state_manager.py")
 scheduler_mod = load_module("nanovllm.engine.scheduler", ROOT / "nanovllm" / "engine" / "scheduler.py")
+cache_transfer_mod = load_module(
+    "cache_transfer_under_test",
+    ROOT / "nanovllm" / "engine" / "cache_transfer.py",
+)
 
 Sequence = sequence_mod.Sequence
 SequenceStatus = sequence_mod.SequenceStatus
 Scheduler = scheduler_mod.Scheduler
 ScheduleResult = scheduler_mod.ScheduleResult
+CacheTransferPhase = cache_transfer_mod.CacheTransferPhase
+CacheTransferSession = cache_transfer_mod.CacheTransferSession
 
 for name, module in SAVED_MODULES.items():
     if module is None:
@@ -105,17 +114,191 @@ def make_scheduler(
     block_size=4,
     num_blocks=32,
     preemption_policy="fcfs",
+    hybrid=False,
 ):
     Sequence.block_size = block_size
-    return Scheduler(
-        FakeConfig(
+    config = FakeConfig(
             max_num_seqs=max_seqs,
             max_num_batched_tokens=max_tokens,
             kvcache_block_size=block_size,
             num_kvcache_blocks=num_blocks,
             preemption_policy=preemption_policy,
         )
+    if hybrid:
+        config.model_spec = SimpleNamespace(is_hybrid=True)
+    return Scheduler(config)
+
+
+def make_transfer(transfer_id="request/attempt-1", tp_size=2):
+    return CacheTransferSession(
+        transfer_id,
+        tp_size,
+        started_at=10.0,
+        timeout_s=5.0,
     )
+
+
+def test_remote_prefill_reserves_resources_until_all_ranks_commit():
+    scheduler = make_scheduler(
+        max_tokens=8,
+        max_seqs=2,
+        block_size=4,
+        num_blocks=4,
+        hybrid=True,
+    )
+    seq = Sequence([1, 2, 3, 4, 5])
+    scheduler.add(seq)
+    session = make_transfer()
+
+    scheduler.reserve_remote_prefill(seq, session)
+
+    assert seq.status is SequenceStatus.TRANSFERRING
+    assert seq not in scheduler.waiting
+    assert seq not in scheduler.running
+    assert len(seq.block_table) == 2
+    assert seq.state_slot is not None
+    assert scheduler.block_manager.num_used_blocks == 2
+    assert not scheduler.is_finished()
+    with pytest.raises(RuntimeError, match="still pending"):
+        scheduler.schedule()
+
+    session.acknowledge(0, now=11.0)
+    session.acknowledge(1, now=11.0)
+    scheduler.commit_remote_prefill(
+        session.transfer_id,
+        first_token_id=9,
+        now=11.0,
+    )
+
+    assert session.phase is CacheTransferPhase.COMMITTED
+    assert seq.status is SequenceStatus.RUNNING
+    assert seq.num_cached_tokens == seq.num_prompt_tokens
+    assert seq.completion_token_ids == [9]
+    assert list(scheduler.running) == [seq]
+    assert scheduler.block_manager.num_used_blocks == 2
+    assert scheduler.state_manager.num_used_slots == 1
+
+
+def test_failed_remote_prefill_releases_resources_and_requeues_locally():
+    scheduler = make_scheduler(
+        max_tokens=8,
+        max_seqs=2,
+        block_size=4,
+        num_blocks=4,
+        hybrid=True,
+    )
+    seq = Sequence([1, 2, 3, 4, 5])
+    scheduler.add(seq)
+    session = make_transfer()
+    scheduler.reserve_remote_prefill(seq, session)
+
+    fallback = scheduler.fail_remote_prefill(
+        session.transfer_id,
+        rank=1,
+        reason="payload validation failed",
+        now=11.0,
+    )
+
+    assert fallback is seq
+    assert session.phase is CacheTransferPhase.ABORTED
+    assert seq.status is SequenceStatus.WAITING
+    assert seq.state_slot is None
+    assert seq.block_table == []
+    assert seq.num_cached_tokens == 0
+    assert list(scheduler.waiting) == [seq]
+    assert scheduler.block_manager.num_used_blocks == 0
+    assert scheduler.state_manager.num_used_slots == 0
+
+
+def test_remote_prefill_timeout_requeues_and_preserves_capacity():
+    scheduler = make_scheduler(
+        max_tokens=8,
+        max_seqs=1,
+        block_size=4,
+        num_blocks=2,
+        hybrid=True,
+    )
+    seq = Sequence([1, 2, 3, 4])
+    scheduler.add(seq)
+    session = make_transfer(tp_size=1)
+    scheduler.reserve_remote_prefill(seq, session)
+
+    fallback = scheduler.poll_remote_prefills(now=15.0)
+
+    assert fallback == [seq]
+    assert session.phase is CacheTransferPhase.TIMED_OUT
+    assert scheduler.block_manager.num_free_blocks == 2
+    assert scheduler.state_manager.num_free_slots == 1
+    result = scheduler.schedule()
+    assert result.prefill_seqs == [seq]
+
+
+def test_remote_prefill_reservation_counts_against_sequence_capacity():
+    scheduler = make_scheduler(
+        max_tokens=8,
+        max_seqs=1,
+        block_size=4,
+        num_blocks=4,
+        hybrid=True,
+    )
+    first = Sequence([1, 2, 3, 4])
+    second = Sequence([5, 6, 7, 8])
+    scheduler.add(first)
+    scheduler.add(second)
+    scheduler.reserve_remote_prefill(first, make_transfer("first", tp_size=1))
+
+    with pytest.raises(RuntimeError, match="no sequence slot"):
+        scheduler.reserve_remote_prefill(
+            second,
+            make_transfer("second", tp_size=1),
+        )
+
+    assert second.status is SequenceStatus.WAITING
+    assert second.block_table == []
+    assert second.state_slot is None
+    assert scheduler.block_manager.num_used_blocks == 1
+    assert scheduler.state_manager.num_used_slots == 1
+    assert list(scheduler.waiting) == [second]
+
+
+@pytest.mark.parametrize(
+    ("sampling_params", "first_token_id"),
+    [
+        (SimpleNamespace(temperature=0.0, top_k=-1, top_p=1.0,
+                         max_tokens=1, ignore_eos=True), 9),
+        (SimpleNamespace(temperature=0.0, top_k=-1, top_p=1.0,
+                         max_tokens=8, ignore_eos=False), -1),
+    ],
+)
+def test_remote_prefill_terminal_first_token_releases_resources(
+    sampling_params,
+    first_token_id,
+):
+    scheduler = make_scheduler(
+        max_tokens=8,
+        max_seqs=1,
+        block_size=4,
+        num_blocks=2,
+        hybrid=True,
+    )
+    seq = Sequence([1, 2, 3, 4], sampling_params)
+    scheduler.add(seq)
+    session = make_transfer(tp_size=1)
+    scheduler.reserve_remote_prefill(seq, session)
+    session.acknowledge(0, now=11.0)
+
+    scheduler.commit_remote_prefill(
+        session.transfer_id,
+        first_token_id,
+        now=11.0,
+    )
+
+    assert seq.status is SequenceStatus.FINISHED
+    assert seq.completion_token_ids == [first_token_id]
+    assert not scheduler.running
+    assert scheduler.block_manager.num_used_blocks == 0
+    assert scheduler.state_manager.num_used_slots == 0
+    assert scheduler.is_finished()
 
 
 def test_dynamic_schedule_decodes_first_and_uses_remaining_budget_for_prefill():
