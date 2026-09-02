@@ -28,6 +28,7 @@ class FakeConfig:
     kvcache_block_size: int = 4
     num_kvcache_blocks: int = 32
     enable_dynamic_chunked_prefill: bool = True
+    prefill_starvation_token_budget: int = 1
     preemption_policy: str = "fcfs"
 
 
@@ -114,6 +115,7 @@ def make_scheduler(
     block_size=4,
     num_blocks=32,
     preemption_policy="fcfs",
+    starvation_token_budget=1,
     hybrid=False,
 ):
     Sequence.block_size = block_size
@@ -123,6 +125,7 @@ def make_scheduler(
             kvcache_block_size=block_size,
             num_kvcache_blocks=num_blocks,
             preemption_policy=preemption_policy,
+            prefill_starvation_token_budget=starvation_token_budget,
         )
     if hybrid:
         config.model_spec = SimpleNamespace(is_hybrid=True)
@@ -540,6 +543,68 @@ def test_dynamic_scheduler_reserves_prefill_after_starvation_threshold():
     assert waiting.num_scheduled_tokens == 1
     assert scheduler.current_prefill_starvation_steps == 0
     assert scheduler.max_prefill_starvation_steps == 2
+
+
+def test_dynamic_scheduler_reserves_useful_prefill_chunk_after_starvation():
+    scheduler = make_scheduler(
+        max_tokens=16,
+        max_seqs=20,
+        block_size=4,
+        starvation_token_budget=6,
+    )
+    scheduler.prefill_starvation_threshold = 1
+    running = []
+    for token in range(16):
+        seq = Sequence([token + 1] * 4)
+        scheduler.block_manager.allocate(seq, 0)
+        seq.status = SequenceStatus.RUNNING
+        seq.is_prefill = False
+        seq.num_cached_tokens = len(seq)
+        scheduler.running.append(seq)
+        running.append(seq)
+    waiting = Sequence([99] * 20)
+    scheduler.waiting.append(waiting)
+
+    first = scheduler.schedule()
+    assert first.decode_seqs == running
+    assert first.prefill_seqs == []
+    scheduler.postprocess_mixed(first, [100] * len(first.seqs))
+
+    second = scheduler.schedule()
+
+    assert len(second.decode_seqs) == 10
+    assert second.prefill_seqs == [waiting]
+    assert waiting.num_scheduled_tokens == 6
+    assert scheduler.current_prefill_starvation_steps == 0
+
+
+def test_fairness_reserve_keeps_half_of_multi_token_budget_for_decode():
+    scheduler = make_scheduler(
+        max_tokens=4,
+        max_seqs=8,
+        block_size=4,
+        starvation_token_budget=256,
+    )
+    scheduler.prefill_starvation_threshold = 1
+    running = []
+    for token in range(4):
+        seq = Sequence([token + 1] * 4)
+        scheduler.block_manager.allocate(seq, 0)
+        seq.status = SequenceStatus.RUNNING
+        seq.is_prefill = False
+        seq.num_cached_tokens = len(seq)
+        scheduler.running.append(seq)
+        running.append(seq)
+    waiting = Sequence([99] * 8)
+    scheduler.waiting.append(waiting)
+
+    first = scheduler.schedule()
+    scheduler.postprocess_mixed(first, [100] * len(first.seqs))
+    second = scheduler.schedule()
+
+    assert len(second.decode_seqs) == 2
+    assert second.prefill_seqs == [waiting]
+    assert waiting.num_scheduled_tokens == 2
 
 
 def test_kv_pressure_workload_preempts_and_eventually_completes():

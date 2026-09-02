@@ -78,6 +78,7 @@ def validate_workload(args: argparse.Namespace) -> tuple[tuple[int, ...], tuple[
         args.max_model_len,
         args.max_num_batched_tokens,
         args.max_num_seqs,
+        getattr(args, "prefill_starvation_token_budget", 256),
         args.vocab_size,
     )
     if any(value <= 0 for value in numeric):
@@ -150,6 +151,15 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--prefill-starvation-token-budget",
+        type=int,
+        default=256,
+        help=(
+            "Prefill tokens reserved after the starvation threshold; capped "
+            "at half of a multi-token scheduler step."
+        ),
+    )
+    parser.add_argument(
         "--preemption-policy",
         choices=("fcfs", "min_recompute"),
         default="fcfs",
@@ -210,6 +220,7 @@ def main() -> None:
         sliding_window_size=args.sliding_window_size,
         enable_dynamic_chunked_prefill=args.enable_dynamic_chunked_prefill,
         prefill_starvation_threshold=args.prefill_starvation_threshold,
+        prefill_starvation_token_budget=args.prefill_starvation_token_budget,
         preemption_policy=args.preemption_policy,
     )
     llm.model_runner.call("reset_execution_stats")
@@ -388,6 +399,7 @@ def main() -> None:
         "sliding_window_size": args.sliding_window_size,
         "enable_dynamic_chunked_prefill": args.enable_dynamic_chunked_prefill,
         "prefill_starvation_threshold": args.prefill_starvation_threshold,
+        "prefill_starvation_token_budget": args.prefill_starvation_token_budget,
         "preemption_policy": args.preemption_policy,
         "require_paths": required_paths,
         "injected": injected,
@@ -437,7 +449,10 @@ def main() -> None:
         if args.enable_dynamic_chunked_prefill:
             prefix += "_dynchunk"
         if args.prefill_starvation_threshold:
-            prefix += f"_fair{args.prefill_starvation_threshold}"
+            prefix += (
+                f"_fair{args.prefill_starvation_threshold}"
+                f"x{args.prefill_starvation_token_budget}"
+            )
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     json_path = args.output or result_dir / f"{prefix}_{timestamp}.json"
     json_path.parent.mkdir(parents=True, exist_ok=True)

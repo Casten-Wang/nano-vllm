@@ -97,6 +97,18 @@ def test_negative_prefill_starvation_threshold_is_rejected(monkeypatch, tmp_path
         )
 
 
+def test_non_positive_prefill_starvation_token_budget_is_rejected(
+    monkeypatch,
+    tmp_path,
+):
+    with pytest.raises(ValueError, match="prefill_starvation_token_budget"):
+        make_config(
+            monkeypatch,
+            tmp_path,
+            prefill_starvation_token_budget=0,
+        )
+
+
 def test_gptq_auto_selects_triton_backend(monkeypatch, tmp_path):
     text_config = SimpleNamespace(max_position_embeddings=32768)
     monkeypatch.setattr(

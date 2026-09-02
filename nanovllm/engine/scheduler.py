@@ -52,6 +52,11 @@ class Scheduler:
             "prefill_starvation_threshold",
             0,
         )
+        self.prefill_starvation_token_budget = getattr(
+            config,
+            "prefill_starvation_token_budget",
+            1,
+        )
         self.preemption_policy = getattr(config, "preemption_policy", "fcfs")
         self.block_manager = BlockManager(config.num_kvcache_blocks, config.kvcache_block_size)
         model_spec = getattr(config, "model_spec", None)
@@ -353,7 +358,14 @@ class Scheduler:
             and self.current_prefill_starvation_steps
             >= self.prefill_starvation_threshold
         ):
-            decode_budget = max(decode_budget - 1, 0)
+            # Reserve a useful prefill chunk instead of merely one token, but
+            # retain at least half of a multi-token step for decode latency.
+            reserve_cap = max(1, self.max_num_batched_tokens // 2)
+            prefill_reserve = min(
+                self.prefill_starvation_token_budget,
+                reserve_cap,
+            )
+            decode_budget = max(decode_budget - prefill_reserve, 0)
         decode_seqs = self.schedule_decode_first(decode_budget)
         prefill_budget = self.max_num_batched_tokens - len(decode_seqs)
         # ``self.running`` still contains decode requests that did not fit the
