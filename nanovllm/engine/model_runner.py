@@ -876,6 +876,9 @@ class ModelRunner:
                 )
                 dequant_block_ids, dequant_block_tables = self.prepare_packed_block_metadata(metadata)
         state_token_ranges = tuple(zip(cu_seqlens_q[:-1], cu_seqlens_q[1:]))
+        logits_indices = self.token_inputs.update_logits_indices(
+            [end - 1 for end in cu_seqlens_q[1:]]
+        )
         input_ids, positions, slot_mapping = self.token_inputs.update_tokens(
             input_ids,
             positions,
@@ -906,6 +909,7 @@ class ModelRunner:
                 reuse_decode_buffer=True,
             ),
             state_token_ranges=state_token_ranges,
+            logits_indices=logits_indices,
         )
         return input_ids, positions
 
@@ -1117,6 +1121,13 @@ class ModelRunner:
                 prefill["cu_seqlens_k"],
             )
         )
+        logits_indices = self.token_inputs.update_logits_indices(
+            [*range(len(decode_seqs))]
+            + [
+                len(decode_seqs) + end - 1
+                for end in prefill["cu_seqlens_q"][1:]
+            ]
+        )
 
         set_context(
             False,
@@ -1153,6 +1164,7 @@ class ModelRunner:
                 for start, end in prefill["state_token_ranges"]
             ),
             decode_state_span=decode.get("decode_state_span"),
+            logits_indices=logits_indices,
         )
         return input_ids, positions
 

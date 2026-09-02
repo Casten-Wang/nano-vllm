@@ -124,3 +124,48 @@ def test_nonzero_lm_head_rank_does_not_allocate_gather_output():
         "gather_list": None,
         "dst": 0,
     }
+
+
+@pytest.mark.parametrize(
+    ("context", "indices"),
+    [
+        (
+            SimpleNamespace(
+                is_mixed=False,
+                is_prefill=True,
+                logits_indices=torch.tensor([1, 4]),
+            ),
+            torch.tensor([1, 4]),
+        ),
+        (
+            SimpleNamespace(
+                is_mixed=True,
+                is_prefill=False,
+                logits_indices=torch.tensor([0, 3, 5]),
+            ),
+            torch.tensor([0, 3, 5]),
+        ),
+    ],
+)
+def test_lm_head_uses_precomputed_logits_indices(context, indices):
+    head = make_lm_head(world_size=1)
+    hidden = torch.randn(6, 2)
+
+    with (
+        torch.inference_mode(),
+        patch.object(embed_head, "get_context", return_value=context),
+        patch.object(
+            embed_head.torch,
+            "arange",
+            side_effect=AssertionError("logits indices must be precomputed"),
+        ),
+        patch.object(
+            embed_head.torch,
+            "cat",
+            side_effect=AssertionError("logits indices must be precomputed"),
+        ),
+    ):
+        actual = head(hidden)
+
+    expected = torch.nn.functional.linear(hidden[indices], head.weight)
+    torch.testing.assert_close(actual, expected)

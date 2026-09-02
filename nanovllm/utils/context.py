@@ -84,6 +84,7 @@ class Context:
     context_lens: torch.Tensor | None = None
     max_context_len: int = 0
     block_tables: torch.Tensor | None = None
+    logits_indices: torch.Tensor | None = None
     state_slots: torch.Tensor | None = None
     dequant_block_ids: torch.Tensor | None = None
     dequant_block_tables: torch.Tensor | None = None
@@ -147,6 +148,7 @@ def set_context(
     state_reset_slots=None,
     state_token_ranges=(),
     decode_state_span=None,
+    logits_indices=None,
 ):
     global _CONTEXT
     state_prefill_groups = build_state_prefill_groups(
@@ -169,6 +171,7 @@ def set_context(
         context_lens=context_lens,
         max_context_len=max_context_len,
         block_tables=block_tables,
+        logits_indices=logits_indices,
         state_slots=state_slots,
         dequant_block_ids=dequant_block_ids,
         dequant_block_tables=dequant_block_tables,

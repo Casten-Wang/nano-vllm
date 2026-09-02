@@ -548,6 +548,7 @@ class HybridStateContextTest(unittest.TestCase):
                 FakeTensor(slots),
             ),
             update_decode_context_lens=lambda values: FakeTensor(values),
+            update_logits_indices=lambda values: FakeTensor(values),
             update_cu_seqlens=lambda query, key: (
                 FakeTensor(query),
                 FakeTensor(key),

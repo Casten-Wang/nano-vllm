@@ -69,12 +69,25 @@ class ParallelLMHead(VocabParallelEmbedding):
     def forward(self, x: torch.Tensor):
         context = get_context()
         if context.is_mixed:
-            decode_indices = torch.arange(context.decode_token_count, device=x.device)
-            prefill_indices = context.decode_token_count + context.prefill_cu_seqlens_q[1:] - 1
-            last_indices = torch.cat([decode_indices, prefill_indices]).to(torch.long)
+            last_indices = getattr(context, "logits_indices", None)
+            if last_indices is None:
+                decode_indices = torch.arange(
+                    context.decode_token_count,
+                    device=x.device,
+                )
+                prefill_indices = (
+                    context.decode_token_count
+                    + context.prefill_cu_seqlens_q[1:]
+                    - 1
+                )
+                last_indices = torch.cat(
+                    [decode_indices, prefill_indices]
+                ).to(torch.long)
             x = x[last_indices].contiguous()
         elif context.is_prefill:
-            last_indices = context.cu_seqlens_q[1:] - 1
+            last_indices = getattr(context, "logits_indices", None)
+            if last_indices is None:
+                last_indices = context.cu_seqlens_q[1:] - 1
             x = x[last_indices].contiguous()
         logits = F.linear(x, self.weight)
         if self.tp_size > 1:

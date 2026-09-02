@@ -131,10 +131,12 @@ def test_token_input_batch_handles_warmup_and_reuses_storage():
 
     second = batch.update_tokens([2, 3], [4, 5], [8, 9])
     lengths = batch.update_decode_context_lens([5, 6])
+    indices = batch.update_logits_indices([0, 3])
 
     assert first[2].numel() == 0
     assert pointers == tuple(value.data_ptr() for value in second[:2])
     assert torch.equal(lengths, torch.tensor([5, 6], dtype=torch.int32))
+    assert torch.equal(indices, torch.tensor([0, 3], dtype=torch.int64))
 
 
 def test_token_input_batch_rejects_invalid_sizes():

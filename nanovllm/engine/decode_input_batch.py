@@ -176,6 +176,7 @@ class TokenInputBatch:
             "cu_seqlens_q": (sequence_capacity + 1, torch.int32),
             "cu_seqlens_k": (sequence_capacity + 1, torch.int32),
             "decode_context_lens": (sequence_capacity, torch.int32),
+            "logits_indices": (sequence_capacity, torch.int64),
         }
         self.host = {
             name: torch.empty(
@@ -238,3 +239,6 @@ class TokenInputBatch:
 
     def update_decode_context_lens(self, values: list[int]) -> torch.Tensor:
         return self._update("decode_context_lens", values)
+
+    def update_logits_indices(self, values: list[int]) -> torch.Tensor:
+        return self._update("logits_indices", values)
