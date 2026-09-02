@@ -185,6 +185,14 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
             "headers_sha256": MODULE.OFFICIAL_HEADERS_SHA256,
             "source_tensor_count": 1811,
             "shard_count": 14,
+            "checkpoint_shards": [
+                {
+                    "name": f"model-{index:05d}-of-00014.safetensors",
+                    "size_bytes": index,
+                    "sha256": f"{index:064x}",
+                }
+                for index in range(1, 15)
+            ],
             "results": {"tp4": {"valid": True}},
         },
     )
@@ -202,6 +210,15 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
                 "present_shard_count": 14,
                 "missing_shards": [],
                 "total_size_bytes": 71_903_655_008,
+                "files": [
+                    {
+                        "name": f"model-{index:05d}-of-00014.safetensors",
+                        "size_bytes": index,
+                        "content_id": f"{index:064x}",
+                        "present": True,
+                    }
+                    for index in range(1, 15)
+                ],
             },
         },
     )

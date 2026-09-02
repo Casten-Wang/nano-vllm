@@ -176,6 +176,32 @@ def parse_tp_sizes(value: str) -> tuple[int, ...]:
     return sizes
 
 
+def official_shard_metadata(model_metadata: dict, shards: list[str]) -> list[dict]:
+    siblings = {
+        item.get("rfilename"): item
+        for item in model_metadata.get("siblings", ())
+        if isinstance(item, dict)
+    }
+    results = []
+    for shard in shards:
+        item = siblings.get(shard, {})
+        lfs = item.get("lfs") or {}
+        sha256 = lfs.get("sha256")
+        size = lfs.get("size")
+        if (
+            not isinstance(sha256, str)
+            or len(sha256) != 64
+            or any(character not in "0123456789abcdef" for character in sha256)
+            or not isinstance(size, int)
+            or size <= 0
+        ):
+            raise ValueError(f"missing valid official LFS identity for {shard}")
+        results.append(
+            {"name": shard, "size_bytes": size, "sha256": sha256}
+        )
+    return results
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", required=True, help="Hugging Face model repo")
@@ -199,11 +225,12 @@ def main() -> None:
     model_metadata = json.loads(
         fetch_bytes(
             f"https://huggingface.co/api/models/{args.repo}/revision/"
-            f"{quote(args.revision, safe='')}"
+            f"{quote(args.revision, safe='')}?blobs=true"
         )
     )
     index = json.loads(index_bytes)
     shards = sorted(set(index["weight_map"].values()))
+    checkpoint_shards = official_shard_metadata(model_metadata, shards)
     headers = {}
     downloaded_header_bytes = 0
     for shard in shards:
@@ -246,6 +273,7 @@ def main() -> None:
         ).hexdigest(),
         "tensor_parallel_sizes": list(args.tp_sizes),
         "shard_count": len(shards),
+        "checkpoint_shards": checkpoint_shards,
         "source_tensor_count": len(headers),
         "downloaded_header_bytes": downloaded_header_bytes,
         "results": results,

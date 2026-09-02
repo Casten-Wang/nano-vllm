@@ -139,3 +139,32 @@ def test_header_document_excludes_metadata(monkeypatch):
 
     assert list(tensors) == ["weight"]
     assert downloaded == len(header) + 8
+
+
+def test_official_shard_metadata_requires_lfs_sha256_and_size():
+    digest = "a" * 64
+    metadata = {
+        "siblings": [
+            {
+                "rfilename": "model-1.safetensors",
+                "lfs": {"sha256": digest, "size": 123},
+            }
+        ]
+    }
+
+    result = MODULE.official_shard_metadata(
+        metadata,
+        ["model-1.safetensors"],
+    )
+
+    assert result == [
+        {"name": "model-1.safetensors", "size_bytes": 123, "sha256": digest}
+    ]
+
+
+def test_official_shard_metadata_rejects_missing_identity():
+    with pytest.raises(ValueError, match="official LFS identity"):
+        MODULE.official_shard_metadata(
+            {"siblings": [{"rfilename": "model-1.safetensors"}]},
+            ["model-1.safetensors"],
+        )
