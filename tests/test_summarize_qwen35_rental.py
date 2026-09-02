@@ -389,6 +389,8 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
                             },
                         },
                     },
+                    "pd_transfer_allocated_tokens": 512,
+                    "pd_transfer_context_tokens": 511,
                     "kv_capacity_by_dtype": {
                         "auto": {
                             "memory_limited_total_token_slots": 100_000,
@@ -936,6 +938,38 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
                 "limitations": ["loopback TCP is not cross-node network evidence"],
             },
         )
+        write(
+            tmp_path / f"pd_export/tp4/{profile_name}.json",
+            {
+                "schema_version": 1,
+                "scope": "single-rank Qwen3.5 GPU-to-host cache export",
+                "environment": {"device": "NVIDIA H20"},
+                "correctness": {"candidate_matches_reference": True},
+                "profile": {
+                    "tp_size": 4,
+                    "kv_dtype": kv_dtype,
+                    "state_dtype": state_dtype,
+                    "components": components,
+                    "allocated_tokens": 512,
+                    "cached_tokens": 511,
+                    "warmup": 2,
+                    "repeats": 10,
+                },
+                "reference_gpu_gather_then_host_copy": {
+                    "latency_ms_samples": [2.0] * 10,
+                    "latency_ms_p50": 2.0,
+                    "peak_extra_device_bytes_samples": [components["total"]] * 10,
+                    "peak_extra_device_bytes_max": components["total"],
+                },
+                "candidate_direct_host_staging": {
+                    "latency_ms_samples": [2.5] * 10,
+                    "latency_ms_p50": 2.5,
+                    "peak_extra_device_bytes_samples": [1024] * 10,
+                    "peak_extra_device_bytes_max": 1024,
+                },
+                "limitations": ["synthetic export benchmark"],
+            },
+        )
 
     report = MODULE.summarize(tmp_path, run_id)
 
@@ -968,6 +1002,8 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     assert report["evidence"]["recurrent_storage_matches_preflight"]
     assert report["evidence"]["kv_storage_matches_preflight"]
     assert report["evidence"]["pd_transfer_baseline_valid"]
+    assert report["evidence"]["pd_export_memory_evidence"]
+    assert report["pd_export"]["by_tp"]["tp4"]["int8-model"]["valid"]
     assert report["pd_transfer"]["by_tp"]["tp4"]["int8-model"]["valid"]
     transfer_path = tmp_path / "pd_transfer/tp4/int8-model.json"
     transfer_result = json.loads(transfer_path.read_text())
@@ -978,6 +1014,18 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     assert not invalid_transfer_report["valid"]
     transfer_result["workload"]["components_bytes"]["kv"] -= 1
     write(transfer_path, transfer_result)
+    export_path = tmp_path / "pd_export/tp4/int8-model.json"
+    export_result = json.loads(export_path.read_text())
+    export_result["candidate_direct_host_staging"][
+        "peak_extra_device_bytes_samples"
+    ] = [components["total"]] * 10
+    export_result["candidate_direct_host_staging"][
+        "peak_extra_device_bytes_max"
+    ] = components["total"]
+    write(export_path, export_result)
+    invalid_export_report = MODULE.summarize(tmp_path, run_id)
+    assert not invalid_export_report["evidence"]["pd_export_memory_evidence"]
+    assert not invalid_export_report["valid"]
     assert report["long_prefill"]["by_tp"]["tp4"]["valid"]
     chunk_sweep = report["long_prefill"]["by_tp"]["tp4"]["chunk_sweep"]
     assert chunk_sweep["fastest_chunk_size"] == 64

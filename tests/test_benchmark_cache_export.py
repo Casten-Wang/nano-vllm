@@ -1,0 +1,85 @@
+import json
+from pathlib import Path
+
+import pytest
+import torch
+
+from scripts.benchmark_cache_export import _profile, make_source
+
+
+def write_preflight(path: Path, *, total_delta: int = 0) -> None:
+    auto_components = {
+        "kv": 2 * 10 * 512 * 256 * 2,
+        "kv_scales": 0,
+        "recurrent": 30 * 8 * 128 * 128 * 4,
+        "convolution": 30 * (2 * 4 * 128 + 8 * 128) * 4 * 2,
+    }
+    auto_components["total"] = sum(auto_components.values()) + total_delta
+    int8_components = {
+        "kv": 2 * 10 * 512 * 256,
+        "kv_scales": 2 * 10 * 512 * 2,
+        "recurrent": 30 * 8 * 128 * 128 * 2,
+        "convolution": 30 * (2 * 4 * 128 + 8 * 128) * 4 * 2,
+    }
+    int8_components["total"] = sum(int8_components.values())
+    path.write_text(
+        json.dumps(
+            {
+                "results": {
+                    "tp4": {
+                        "pd_transfer_allocated_tokens": 512,
+                        "pd_transfer_context_tokens": 511,
+                        "pd_transfer_components_per_sequence_by_dtype": {
+                            "auto": {"float32": auto_components},
+                            "int8": {"model": int8_components},
+                        },
+                    }
+                }
+            }
+        )
+    )
+
+
+def test_profile_builds_exact_qwen35_cpu_source(tmp_path):
+    path = tmp_path / "preflight.json"
+    write_preflight(path)
+    profile = _profile(path, 4, "auto", "float32")
+
+    kv, scale, recurrent, convolution = make_source(
+        profile,
+        kv_dtype="auto",
+        state_dtype="float32",
+        device=torch.device("cpu"),
+    )
+
+    assert kv.shape == (2, 10, 2, 256, 1, 256)
+    assert scale is None
+    assert len(recurrent) == len(convolution) == 30
+    assert sum(t.numel() * t.element_size() for t in recurrent) == profile["components"]["recurrent"]
+    assert sum(t.numel() * t.element_size() for t in convolution) == profile["components"]["convolution"]
+
+
+def test_profile_builds_exact_int8_scale_and_model_state_source(tmp_path):
+    path = tmp_path / "preflight.json"
+    write_preflight(path)
+    profile = _profile(path, 4, "int8", "model")
+
+    kv, scale, recurrent, convolution = make_source(
+        profile,
+        kv_dtype="int8",
+        state_dtype="model",
+        device=torch.device("cpu"),
+    )
+
+    assert kv.dtype is torch.int8
+    assert scale is not None and scale.shape == (2, 10, 2, 256, 1)
+    assert all(tensor.dtype is torch.bfloat16 for tensor in recurrent)
+    assert all(tensor.dtype is torch.bfloat16 for tensor in convolution)
+
+
+def test_profile_rejects_inconsistent_component_total(tmp_path):
+    path = tmp_path / "preflight.json"
+    write_preflight(path, total_delta=1)
+
+    with pytest.raises(ValueError, match="component total"):
+        _profile(path, 4, "auto", "float32")

@@ -17,6 +17,7 @@ MATRIX_SCRIPT = ROOT / "scripts" / "benchmark_qwen35_matrix.py"
 KERNEL_SCRIPT = ROOT / "scripts" / "benchmark_qwen35_kernels.py"
 ATTENTION_KERNEL_SCRIPT = ROOT / "scripts" / "benchmark_attention_kernel.py"
 CACHE_TRANSFER_SCRIPT = ROOT / "scripts" / "benchmark_cache_transfer.py"
+CACHE_EXPORT_SCRIPT = ROOT / "scripts" / "benchmark_cache_export.py"
 QUALITY_SCRIPT = ROOT / "scripts" / "benchmark_qwen35_quality_matrix.py"
 ONLINE_MIXED_SCRIPT = ROOT / "scripts" / "benchmark_online_mixed.py"
 SUMMARY_SCRIPT = ROOT / "scripts" / "summarize_qwen35_rental.py"
@@ -176,6 +177,34 @@ def commands(args: argparse.Namespace) -> list[tuple[str, list[str]]]:
             ("int8", "model"),
         ):
             profile_name = f"{kv_dtype}-{state_dtype}"
+            result.append(
+                (
+                    f"pd-export-{profile_name}-tp{tp_size}",
+                    [
+                        sys.executable,
+                        str(CACHE_EXPORT_SCRIPT),
+                        "--memory-preflight",
+                        str(root / "preflight" / "memory_preflight.json"),
+                        "--tp-size",
+                        str(tp_size),
+                        "--kv-dtype",
+                        kv_dtype,
+                        "--state-dtype",
+                        state_dtype,
+                        "--warmup",
+                        "2",
+                        "--repeats",
+                        "10",
+                        "--output",
+                        str(
+                            root
+                            / "pd_export"
+                            / f"tp{tp_size}"
+                            / f"{profile_name}.json"
+                        ),
+                    ],
+                )
+            )
             result.append(
                 (
                     f"pd-transfer-{profile_name}-tp{tp_size}",
@@ -584,6 +613,12 @@ def collect_stage_artifacts(
             "-", 1
         )
         search_root = root / "pd_transfer" / tp_name
+        required = [search_root / f"{profile_name}.json"]
+    elif stage_name.startswith("pd-export-"):
+        profile_name, tp_name = stage_name.removeprefix("pd-export-").rsplit(
+            "-", 1
+        )
+        search_root = root / "pd_export" / tp_name
         required = [search_root / f"{profile_name}.json"]
     elif stage_name.startswith("attention-"):
         _, context_name, tp_name = stage_name.split("-")

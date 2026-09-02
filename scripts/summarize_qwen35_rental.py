@@ -978,6 +978,74 @@ def summarize_pd_transfer(
     }
 
 
+def summarize_pd_export(
+    result: dict,
+    *,
+    expected_tp_size: int,
+    expected_kv_dtype: str,
+    expected_state_dtype: str,
+    expected_components: dict,
+    expected_allocated_tokens: int,
+    expected_cached_tokens: int,
+) -> dict:
+    profile = result.get("profile", {})
+    reference = result.get("reference_gpu_gather_then_host_copy", {})
+    candidate = result.get("candidate_direct_host_staging", {})
+    repeats = profile.get("repeats")
+
+    def measurements_valid(item: dict) -> bool:
+        latency = item.get("latency_ms_samples", [])
+        peaks = item.get("peak_extra_device_bytes_samples", [])
+        return (
+            isinstance(repeats, int)
+            and repeats >= 2
+            and isinstance(latency, list)
+            and len(latency) == repeats
+            and all(
+                isinstance(value, (int, float))
+                and math.isfinite(value)
+                and value > 0
+                for value in latency
+            )
+            and isinstance(peaks, list)
+            and len(peaks) == repeats
+            and all(isinstance(value, int) and value >= 0 for value in peaks)
+            and item.get("peak_extra_device_bytes_max") == max(peaks)
+            and item.get("latency_ms_p50") == statistics.median(latency)
+        )
+
+    valid = (
+        result.get("schema_version") == 1
+        and result.get("scope")
+        == "single-rank Qwen3.5 GPU-to-host cache export"
+        and profile.get("tp_size") == expected_tp_size
+        and profile.get("kv_dtype") == expected_kv_dtype
+        and profile.get("state_dtype") == expected_state_dtype
+        and profile.get("components") == expected_components
+        and profile.get("allocated_tokens") == expected_allocated_tokens
+        and profile.get("cached_tokens") == expected_cached_tokens
+        and isinstance(result.get("environment", {}).get("device"), str)
+        and bool(result["environment"]["device"])
+        and result.get("correctness", {}).get("candidate_matches_reference")
+        is True
+        and measurements_valid(reference)
+        and measurements_valid(candidate)
+        and candidate["peak_extra_device_bytes_max"]
+        < reference["peak_extra_device_bytes_max"]
+    )
+    return {
+        "valid": valid,
+        "profile": profile,
+        "reference": reference,
+        "candidate": candidate,
+        "avoided_peak_device_bytes": (
+            reference.get("peak_extra_device_bytes_max", 0)
+            - candidate.get("peak_extra_device_bytes_max", 0)
+        ),
+        "limitations": result.get("limitations", []),
+    }
+
+
 def summarize_long_prefill(result: dict, *, expected_tp_size: int) -> dict:
     configuration = result.get("configuration", {})
     configuration_valid = (
@@ -1255,6 +1323,7 @@ def summarize(run_dir: Path, run_id: str) -> dict:
     )
     memory_by_tp = summarize_memory_preflight(memory)
     pd_transfer = {}
+    pd_export = {}
     for tp_name in sorted(expected_tp_names):
         tp_size = int(tp_name.removeprefix("tp"))
         expected_profiles = (
@@ -1276,6 +1345,24 @@ def summarize(run_dir: Path, run_id: str) -> dict:
                     expected_kv_dtype=kv_dtype,
                     expected_state_dtype=state_dtype,
                     expected_components=expected_components,
+                )
+            )
+            export_result = load_json(
+                run_dir / "pd_export" / tp_name / f"{profile_name}.json"
+            )
+            pd_export.setdefault(tp_name, {})[profile_name] = (
+                summarize_pd_export(
+                    export_result,
+                    expected_tp_size=tp_size,
+                    expected_kv_dtype=kv_dtype,
+                    expected_state_dtype=state_dtype,
+                    expected_components=expected_components,
+                    expected_allocated_tokens=memory["results"][tp_name][
+                        "pd_transfer_allocated_tokens"
+                    ],
+                    expected_cached_tokens=memory["results"][tp_name][
+                        "pd_transfer_context_tokens"
+                    ],
                 )
             )
     def rank_storage_matches(row, field, expected):
@@ -1905,6 +1992,14 @@ def summarize(run_dir: Path, run_id: str) -> dict:
                 for profiles in pd_transfer.values()
             )
         ),
+        "pd_export_memory_evidence": (
+            set(pd_export) == expected_tp_names
+            and all(
+                set(profiles) == {"auto-float32", "int8-model"}
+                and all(item["valid"] for item in profiles.values())
+                for profiles in pd_export.values()
+            )
+        ),
         "rotary_storage_matches_preflight": rotary_storage_matches_preflight,
         "recurrent_storage_matches_preflight": (
             recurrent_storage_matches_preflight
@@ -2043,6 +2138,10 @@ def summarize(run_dir: Path, run_id: str) -> dict:
         "pd_transfer": {
             "scope": "single-rank TCP loopback; not cross-node GPU evidence",
             "by_tp": pd_transfer,
+        },
+        "pd_export": {
+            "scope": "synthetic single-rank GPU-to-host export evidence",
+            "by_tp": pd_export,
         },
         "quality": {
             "scope": quality["quality_scope"],
