@@ -454,6 +454,7 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
                         "errors": [{"max_abs_error": 0.01}],
                         "decode_tokens": 32,
                         "prefill_tokens": 512,
+                        "avoided_route_hidden_allocation_mib_per_step": 1.0,
                         "speedup_vs_grouped": 1.1,
                         "measured_on_cuda": True,
                     }
@@ -883,6 +884,7 @@ def test_mixed_moe_summary_requires_cuda_and_non_regressing_speed():
         "errors": [{"max_abs_error": 0.01}],
         "decode_tokens": 32,
         "prefill_tokens": 512,
+        "avoided_route_hidden_allocation_mib_per_step": 1.0,
         "speedup_vs_grouped": 0.99,
         "measured_on_cuda": False,
     }
@@ -902,6 +904,7 @@ def test_mixed_moe_sweep_rejects_one_regressing_shape():
         "errors": [{"max_abs_error": 0.01}],
         "decode_tokens": 8,
         "prefill_tokens": 128,
+        "avoided_route_hidden_allocation_mib_per_step": 0.25,
         "speedup_vs_grouped": 1.1,
         "measured_on_cuda": True,
     }

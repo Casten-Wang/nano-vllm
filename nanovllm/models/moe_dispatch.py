@@ -54,16 +54,21 @@ def batched_expert_dispatch(
         raise ValueError("output must match hidden_states shape, dtype, and device")
     for start in range(0, hidden_states.shape[0], chunk_size):
         end = min(start + chunk_size, hidden_states.shape[0])
+        chunk_tokens = end - start
         expert_ids = topk_ids[start:end].reshape(-1)
-        selected_gate_up = gate_up_proj.index_select(0, expert_ids)
-        route_hidden = (
-            hidden_states[start:end]
-            .unsqueeze(1)
-            .expand(-1, top_k, -1)
-            .reshape(expert_ids.numel(), -1, 1)
+        selected_gate_up = gate_up_proj.index_select(0, expert_ids).view(
+            chunk_tokens,
+            top_k,
+            gate_up_proj.shape[1],
+            gate_up_proj.shape[2],
         )
-        gate_up = torch.bmm(selected_gate_up, route_hidden).squeeze(-1)
-        del selected_gate_up, route_hidden
+        # Broadcast each token across its top-k routes inside matmul instead
+        # of materializing a [chunk, top_k, hidden] repeated-input tensor.
+        gate_up = torch.matmul(
+            selected_gate_up,
+            hidden_states[start:end, None, :, None],
+        ).squeeze(-1).flatten(0, 1)
+        del selected_gate_up
         gate, up = gate_up.chunk(2, dim=-1)
         activated = silu_and_mul(gate, up)
         selected_down = down_proj.index_select(0, expert_ids)

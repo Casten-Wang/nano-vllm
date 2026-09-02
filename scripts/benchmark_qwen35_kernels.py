@@ -973,6 +973,13 @@ def benchmark_mixed_expert_dispatch(
         {
             "decode_tokens": decode_tokens,
             "prefill_tokens": prefill_tokens,
+            "avoided_route_hidden_allocation_mib_per_step": (
+                decode_tokens
+                * args.top_k
+                * args.hidden_size
+                * hidden.element_size()
+                / (1024**2)
+            ),
             "speedup_vs_grouped": (
                 result["reference"]["median_ms"]
                 / result["candidate"]["median_ms"]

@@ -290,12 +290,12 @@ def test_batched_multi_token_decode_matches_sorted_backend_in_chunks():
         is_decode=False,
     )
     selected_route_counts = []
-    original_bmm = qwen35_moe.torch.bmm
+    original_matmul = qwen35_moe.torch.matmul
 
-    def record_bmm(left, right, *args, **kwargs):
-        if left.shape[1] == 2 * batched_experts.local_intermediate_size:
-            selected_route_counts.append(left.shape[0])
-        return original_bmm(left, right, *args, **kwargs)
+    def record_matmul(left, right, *args, **kwargs):
+        if left.ndim == 4:
+            selected_route_counts.append(left.shape[0] * left.shape[1])
+        return original_matmul(left, right, *args, **kwargs)
 
     with (
         patch.object(
@@ -309,9 +309,14 @@ def test_batched_multi_token_decode_matches_sorted_backend_in_chunks():
             side_effect=AssertionError("decode chunks must write into final storage"),
         ),
         patch.object(
+            qwen35_moe.torch.Tensor,
+            "expand",
+            side_effect=AssertionError("decode must broadcast without copying hidden"),
+        ),
+        patch.object(
             qwen35_moe.torch,
-            "bmm",
-            side_effect=record_bmm,
+            "matmul",
+            side_effect=record_matmul,
         ),
     ):
         actual = batched_experts(
