@@ -39,6 +39,7 @@ OPTIMIZATION_FIELDS = (
     "qwen35_moe_decode_backend",
     "qwen35_moe_decode_chunk_size",
     "quantization_format",
+    "requested_weight_quant_backend",
     "weight_quant_backend",
     "kv_cache_dtype",
     "kv_dequant_backend",

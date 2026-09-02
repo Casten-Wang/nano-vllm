@@ -166,6 +166,15 @@ def summarize_results(
             {
                 "tensor_parallel_size": case.tensor_parallel_size,
                 "recurrent_state_dtype": case.recurrent_state_dtype,
+                "requested_weight_quant_backend": configuration.get(
+                    "requested_weight_quant_backend"
+                ),
+                "weight_quant_backend": configuration.get(
+                    "weight_quant_backend"
+                ),
+                "qwen35_moe_decode_backend": configuration.get(
+                    "qwen35_moe_decode_backend"
+                ),
                 "decode_ppl_bf16_kv": decode_ppl["bf16"],
                 "decode_ppl_int8_kv": decode_ppl["int8"],
                 "int8_kv_relative_change": decode_ppl["relative_change"],

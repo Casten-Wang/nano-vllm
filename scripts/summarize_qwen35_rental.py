@@ -41,6 +41,8 @@ OFFICIAL_CHECKPOINT_REPO = "Qwen/Qwen3.5-35B-A3B"
 OFFICIAL_SKIPPED_WEIGHT_GROUPS = {"model.visual": 333, "mtp": 785}
 OFFICIAL_SKIPPED_WEIGHT_PREFIXES = {"model.visual.": 333, "mtp.": 785}
 OFFICIAL_CHECKPOINT_REVISION = "59d61f3ce65a6d9863b86d2e96597125219dc754"
+OFFICIAL_GPTQ_CHECKPOINT_REPO = "Qwen/Qwen3.5-35B-A3B-GPTQ-Int4"
+OFFICIAL_GPTQ_CHECKPOINT_REVISION = "3af5ca2972faf6de1fd6f4efc4d8d319ca751e8b"
 OFFICIAL_CONFIG_SHA256 = (
     "5e4d7f74fec2f360eb9cfbfcd6ec0c4c76e684d3a11caaed259d9fd9bfbc7944"
 )
@@ -56,6 +58,103 @@ def load_json(path: Path) -> dict:
     if not path.is_file():
         raise ValueError(f"required validation artifact is missing: {path}")
     return json.loads(path.read_text())
+
+
+def summarize_optional_gptq(run_dir: Path, run_id: str) -> dict:
+    """Validate and summarize the optional GPTQ rental stages."""
+
+    root = run_dir / "gptq"
+    if not root.exists():
+        return {"enabled": False, "valid": True}
+    gptq_run_id = f"{run_id}-gptq"
+    audit = load_json(root / "official_checkpoint_header_audit.json")
+    performance = load_json(
+        root / "performance" / f"{gptq_run_id}_matrix_summary.json"
+    )
+    quality = load_json(root / "quality" / f"{gptq_run_id}_summary.json")
+    performance_runs = performance.get("runs", [])
+    quality_cases = quality.get("cases", [])
+    tp_names = {
+        f"tp{row.get('tensor_parallel_size')}" for row in performance_runs
+    }
+    audit_valid = (
+        audit.get("valid") is True
+        and audit.get("repo") == OFFICIAL_GPTQ_CHECKPOINT_REPO
+        and audit.get("resolved_revision") == OFFICIAL_GPTQ_CHECKPOINT_REVISION
+        and set(audit.get("results", {})) == tp_names
+        and all(
+            result.get("valid") is True
+            for result in audit.get("results", {}).values()
+        )
+    )
+    performance_valid = (
+        bool(performance_runs)
+        and performance.get("all_execution_paths_valid") is True
+        and performance.get("all_generation_valid") is True
+        and performance.get("all_repeat_output_digests_match") is True
+        and all(
+            row.get("requested_weight_quant_backend") == "auto"
+            and row.get("weight_quant_backend") == "triton"
+            and row.get("quantization_format") == "gptq_int4"
+            and row.get("qwen35_moe_decode_backend") == "sorted"
+            and row.get("enforce_eager") is True
+            for row in performance_runs
+        )
+    )
+    quality_tp_names = {
+        f"tp{row.get('tensor_parallel_size')}" for row in quality_cases
+    }
+    quality_valid = (
+        bool(quality_cases)
+        and quality_tp_names == tp_names
+        and quality.get("quality_gates", {}).get("all_passed") is True
+        and quality.get("cross_tp", {}).get("all_passed") is True
+        and all(
+            row.get("requested_weight_quant_backend") == "auto"
+            and row.get("weight_quant_backend") == "triton"
+            and row.get("qwen35_moe_decode_backend") == "sorted"
+            for row in quality_cases
+        )
+    )
+    valid_runs = [
+        row
+        for row in performance_runs
+        if row.get("repeat_output_digests_match")
+        and row.get("execution_paths_valid")
+        and row.get("generation_valid")
+    ]
+    return {
+        "enabled": True,
+        "valid": audit_valid and performance_valid and quality_valid,
+        "audit_valid": audit_valid,
+        "performance_valid": performance_valid,
+        "quality_valid": quality_valid,
+        "official_checkpoint": {
+            "repo": audit.get("repo"),
+            "resolved_revision": audit.get("resolved_revision"),
+        },
+        "tensor_parallel_sizes": sorted(
+            {row["tensor_parallel_size"] for row in performance_runs}
+        ),
+        "best_throughput": (
+            max(
+                valid_runs,
+                key=lambda row: row["median"]["output_throughput_tok_s"],
+            )
+            if valid_runs
+            else None
+        ),
+        "lowest_peak_memory": (
+            min(
+                valid_runs,
+                key=lambda row: row["median"]["peak_torch_allocated_mib"],
+            )
+            if valid_runs
+            else None
+        ),
+        "quality_gates": quality.get("quality_gates"),
+        "cross_tp": quality.get("cross_tp"),
+    }
 
 
 def summarize_normalization_candidate(
@@ -1207,6 +1306,7 @@ def summarize(run_dir: Path, run_id: str) -> dict:
         run_dir / "performance" / f"{run_id}_matrix_summary.json"
     )
     quality = load_json(run_dir / "quality" / f"{run_id}_summary.json")
+    gptq = summarize_optional_gptq(run_dir, run_id)
     kernel_paths = sorted((run_dir / "kernels").glob("tp*.json"))
     if not kernel_paths:
         raise ValueError("no kernel benchmark artifacts were found")
@@ -2075,6 +2175,7 @@ def summarize(run_dir: Path, run_id: str) -> dict:
         ),
         "quality_cross_tp_parity": quality["cross_tp"]["all_passed"],
         "quality_thresholds_passed": quality["quality_gates"]["all_passed"],
+        "gptq_validation": gptq["valid"],
         "cuda_measurements": cuda_measurements,
         "clean_worktrees": clean_worktrees,
         "single_commit": len(commits) == 1,
@@ -2149,6 +2250,7 @@ def summarize(run_dir: Path, run_id: str) -> dict:
             "cross_tp": quality["cross_tp"],
             "gates": quality["quality_gates"],
         },
+        "gptq": gptq,
         "graph_safe_moe": {
             "all_tp_promoted": (
                 same_tp_coverage

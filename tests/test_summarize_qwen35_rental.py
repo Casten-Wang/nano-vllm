@@ -21,6 +21,86 @@ def write(path, value):
     path.write_text(json.dumps(value))
 
 
+def write_gptq_summary_inputs(root, run_id, *, backend="triton"):
+    gptq_run_id = f"{run_id}-gptq"
+    write(
+        root / "gptq/official_checkpoint_header_audit.json",
+        {
+            "valid": True,
+            "repo": MODULE.OFFICIAL_GPTQ_CHECKPOINT_REPO,
+            "resolved_revision": MODULE.OFFICIAL_GPTQ_CHECKPOINT_REVISION,
+            "results": {"tp4": {"valid": True}, "tp8": {"valid": True}},
+        },
+    )
+    rows = [
+        {
+            "tensor_parallel_size": tp,
+            "requested_weight_quant_backend": "auto",
+            "weight_quant_backend": backend,
+            "quantization_format": "gptq_int4",
+            "qwen35_moe_decode_backend": "sorted",
+            "enforce_eager": True,
+            "repeat_output_digests_match": True,
+            "execution_paths_valid": True,
+            "generation_valid": True,
+            "median": {
+                "output_throughput_tok_s": throughput,
+                "peak_torch_allocated_mib": memory,
+            },
+        }
+        for tp, throughput, memory in ((4, 100.0, 20_000.0), (8, 180.0, 12_000.0))
+    ]
+    write(
+        root / f"gptq/performance/{gptq_run_id}_matrix_summary.json",
+        {
+            "all_execution_paths_valid": True,
+            "all_generation_valid": True,
+            "all_repeat_output_digests_match": True,
+            "runs": rows,
+        },
+    )
+    write(
+        root / f"gptq/quality/{gptq_run_id}_summary.json",
+        {
+            "cases": [
+                {
+                    "tensor_parallel_size": tp,
+                    "requested_weight_quant_backend": "auto",
+                    "weight_quant_backend": backend,
+                    "qwen35_moe_decode_backend": "sorted",
+                }
+                for tp in (4, 8)
+            ],
+            "quality_gates": {"all_passed": True},
+            "cross_tp": {"all_passed": True},
+        },
+    )
+
+
+def test_optional_gptq_summary_is_disabled_when_directory_is_absent(tmp_path):
+    assert MODULE.summarize_optional_gptq(tmp_path, "run") == {
+        "enabled": False,
+        "valid": True,
+    }
+
+
+def test_optional_gptq_summary_requires_actual_triton_execution(tmp_path):
+    write_gptq_summary_inputs(tmp_path, "run")
+
+    report = MODULE.summarize_optional_gptq(tmp_path, "run")
+
+    assert report["valid"]
+    assert report["tensor_parallel_sizes"] == [4, 8]
+    assert report["best_throughput"]["tensor_parallel_size"] == 8
+    assert report["lowest_peak_memory"]["tensor_parallel_size"] == 8
+
+    write_gptq_summary_inputs(tmp_path, "run", backend="reference")
+    invalid = MODULE.summarize_optional_gptq(tmp_path, "run")
+    assert not invalid["valid"]
+    assert not invalid["performance_valid"]
+    assert not invalid["quality_valid"]
+
+
 def write_attention_case(
     root,
     name,
