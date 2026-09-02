@@ -1563,6 +1563,56 @@ def benchmark_delta_l2_normalization(
     return result
 
 
+def benchmark_delta_causal_mask_cache(args, device) -> dict:
+    """Measure cross-layer reuse of immutable DeltaNet chunk masks."""
+
+    candidates = {}
+    cache = GDN._cached_causal_upper_mask
+    for chunk_size in sorted(set(args.delta_prefill_chunk_sizes)):
+        cache.cache_clear()
+
+        def reference():
+            return (
+                torch.ones(
+                    chunk_size,
+                    chunk_size,
+                    dtype=torch.bool,
+                    device=device,
+                ).triu_(1),
+            )
+
+        def candidate():
+            return (GDN.causal_upper_mask(chunk_size, device),)
+
+        result = compare(
+            reference,
+            candidate,
+            device=device,
+            warmup=args.warmup,
+            iterations=args.iterations,
+            repeats=args.repeats,
+        )
+        first = candidate()[0]
+        second = candidate()[0]
+        result.update(
+            {
+                "chunk_size": chunk_size,
+                "cache_reuses_storage": first.data_ptr() == second.data_ptr(),
+                "persistent_mask_mib": first.numel() * first.element_size()
+                / 1024
+                / 1024,
+                "eliminated_allocations_per_additional_layer": 1,
+            }
+        )
+        candidates[str(chunk_size)] = result
+    cache_info = cache.cache_info()
+    return {
+        "candidates": candidates,
+        "cache_max_entries": cache_info.maxsize,
+        "maximum_cached_chunk_size": GDN._MAX_CACHED_CAUSAL_MASK_SIZE,
+    }
+
+
 def benchmark_attention_norm_output_reuse(args, device, dtype) -> dict:
     x = torch.randn(
         args.router_tokens,
@@ -2965,6 +3015,10 @@ def main() -> None:
                     dtype,
                     local_key_heads,
                 )
+            ),
+            "delta_causal_mask_cache": benchmark_delta_causal_mask_cache(
+                args,
+                device,
             ),
             "attention_norm_output_reuse": benchmark_attention_norm_output_reuse(
                 args,

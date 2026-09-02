@@ -153,6 +153,37 @@ def summarize_buffer_reuse_candidate(
     }
 
 
+def summarize_delta_causal_mask_cache(
+    result: dict | None,
+    *,
+    measured_on_cuda: bool,
+) -> dict:
+    if result is None:
+        return {"available": False, "measured_on_cuda": measured_on_cuda}
+    candidates = result.get("candidates", {})
+    if not candidates:
+        raise ValueError("DeltaNet causal-mask benchmark has no candidates")
+    summaries = {
+        chunk_size: summarize_buffer_reuse_candidate(
+            candidate,
+            ("persistent_mask_mib",),
+            {
+                "cache_reuses_storage": True,
+                "eliminated_allocations_per_additional_layer": 1,
+            },
+        )
+        for chunk_size, candidate in candidates.items()
+    }
+    return {
+        "available": True,
+        "measured_on_cuda": measured_on_cuda,
+        "valid": all(item["valid"] for item in summaries.values()),
+        "cache_max_entries": result["cache_max_entries"],
+        "maximum_cached_chunk_size": result["maximum_cached_chunk_size"],
+        "by_chunk_size": summaries,
+    }
+
+
 def summarize_mixed_moe_dispatch(result: dict) -> dict:
     errors = result.get("errors", [])
     max_abs_error = max(
@@ -1077,6 +1108,10 @@ def summarize(run_dir: Path, run_id: str) -> dict:
             "delta_l2_normalization": summarize_buffer_reuse_candidate(
                 result["results"]["delta_l2_normalization_reuse"],
                 ("reused_query_key_fp32_mib",),
+            ),
+            "delta_causal_mask": summarize_delta_causal_mask_cache(
+                result["results"].get("delta_causal_mask_cache"),
+                measured_on_cuda=result["cuda_available"],
             ),
             "attention_norm_output": summarize_buffer_reuse_candidate(
                 result["results"]["attention_norm_output_reuse"],

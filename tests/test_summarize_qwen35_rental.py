@@ -609,6 +609,22 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
                     "errors": [{"max_abs_error": 0.0}],
                     "reused_query_key_fp32_mib": 4.0,
                 },
+                "delta_causal_mask_cache": {
+                    "cache_max_entries": 32,
+                    "maximum_cached_chunk_size": 1024,
+                    "candidates": {
+                        chunk_size: {
+                            "reference": {"peak_extra_mib": 1.0},
+                            "candidate": {"peak_extra_mib": 0.0},
+                            "speedup": 1.2,
+                            "errors": [{"max_abs_error": 0.0}],
+                            "persistent_mask_mib": 0.01,
+                            "cache_reuses_storage": True,
+                            "eliminated_allocations_per_additional_layer": 1,
+                        }
+                        for chunk_size in ("32", "64", "128")
+                    },
+                },
                 "gated_rmsnorm_fp32_reuse": {
                     "reference": {"peak_extra_mib": 12.0},
                     "candidate": {"peak_extra_mib": 4.0},
@@ -856,6 +872,13 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     assert report["buffer_reuse"]["by_tp"]["tp4"][
         "batched_route_sum_output"
     ]["workspace"]["avoided_route_sum_output_mib"] == 4.0
+    delta_mask = report["buffer_reuse"]["by_tp"]["tp4"][
+        "delta_causal_mask"
+    ]
+    assert delta_mask["available"]
+    assert delta_mask["measured_on_cuda"]
+    assert delta_mask["valid"]
+    assert set(delta_mask["by_chunk_size"]) == {"32", "64", "128"}
     assert report["graph_safe_moe"]["by_tp"]["tp4"]["promotion"][
         "selected_decode_batches"
     ] == [1, 64]

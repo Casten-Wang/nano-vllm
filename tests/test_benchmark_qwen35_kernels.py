@@ -888,6 +888,29 @@ def test_delta_prefill_chunk_sweep_compares_shared_input_to_chunk64():
         ) < 1e-4
 
 
+def test_delta_causal_mask_benchmark_records_bounded_reuse():
+    args = SimpleNamespace(
+        delta_prefill_chunk_sizes=(4, 2, 4),
+        warmup=0,
+        iterations=1,
+        repeats=1,
+    )
+
+    result = MODULE.benchmark_delta_causal_mask_cache(
+        args,
+        torch.device("cpu"),
+    )
+
+    assert set(result["candidates"]) == {"2", "4"}
+    assert result["cache_max_entries"] == 32
+    assert result["maximum_cached_chunk_size"] == 1024
+    for candidate in result["candidates"].values():
+        assert candidate["cache_reuses_storage"]
+        assert candidate["persistent_mask_mib"] > 0
+        assert candidate["eliminated_allocations_per_additional_layer"] == 1
+        assert candidate["errors"][0]["max_abs_error"] == 0.0
+
+
 def test_grouped_delta_prefill_records_reused_correction_workspace():
     args = SimpleNamespace(
         prefill_batch=2,
