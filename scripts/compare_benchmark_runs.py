@@ -51,6 +51,7 @@ STORAGE_FIELDS = (
     "kv_cache_storage",
     "num_kvcache_blocks",
     "recurrent_state_storage",
+    "recurrent_state_storage_by_rank",
     "recurrent_state_total_all_ranks_bytes",
 )
 

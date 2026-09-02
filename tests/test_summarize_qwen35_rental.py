@@ -280,7 +280,15 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
                 "recurrent_state_storage": {
                     "total_bytes_local_rank": 500,
                     "rotary_cache_bytes_local_rank": 4096,
-                }
+                },
+                "recurrent_state_storage_by_rank": [
+                    {
+                        "rank": rank,
+                        "total_bytes_local_rank": 500,
+                        "rotary_cache_bytes_local_rank": 4096,
+                    }
+                    for rank in range(4)
+                ],
             },
             "median": {
                 "output_throughput_tok_s": 10,
@@ -309,7 +317,15 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
                 "recurrent_state_storage": {
                     "total_bytes_local_rank": 500,
                     "rotary_cache_bytes_local_rank": 4096,
-                }
+                },
+                "recurrent_state_storage_by_rank": [
+                    {
+                        "rank": rank,
+                        "total_bytes_local_rank": 500,
+                        "rotary_cache_bytes_local_rank": 4096,
+                    }
+                    for rank in range(4)
+                ],
             },
             "median": {
                 "output_throughput_tok_s": 20,
@@ -586,7 +602,7 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
 
     performance_path = tmp_path / f"performance/{run_id}_matrix_summary.json"
     performance_result = json.loads(performance_path.read_text())
-    performance_result["runs"][0]["storage"]["recurrent_state_storage"][
+    performance_result["runs"][0]["storage"]["recurrent_state_storage_by_rank"][1][
         "rotary_cache_bytes_local_rank"
     ] = 8192
     write(performance_path, performance_result)
@@ -595,10 +611,10 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
         "rotary_storage_matches_preflight"
     ]
     assert not mismatched_storage_report["valid"]
-    performance_result["runs"][0]["storage"]["recurrent_state_storage"][
+    performance_result["runs"][0]["storage"]["recurrent_state_storage_by_rank"][1][
         "rotary_cache_bytes_local_rank"
     ] = 4096
-    performance_result["runs"][0]["storage"]["recurrent_state_storage"][
+    performance_result["runs"][0]["storage"]["recurrent_state_storage_by_rank"][2][
         "total_bytes_local_rank"
     ] = 501
     write(performance_path, performance_result)
@@ -607,7 +623,7 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
         "recurrent_storage_matches_preflight"
     ]
     assert not mismatched_state_report["valid"]
-    performance_result["runs"][0]["storage"]["recurrent_state_storage"][
+    performance_result["runs"][0]["storage"]["recurrent_state_storage_by_rank"][2][
         "total_bytes_local_rank"
     ] = 500
     performance_result["runs"][0]["storage"]["kv_cache_storage"][

@@ -83,6 +83,14 @@ def result(
             "rotary_cache_bytes_local_rank": 512,
             "total_model_state_bytes_local_rank": 2560,
         },
+        "recurrent_state_storage_by_rank": [
+            {
+                "rank": rank,
+                "total_bytes_local_rank": 2048,
+                "rotary_cache_bytes_local_rank": 512,
+            }
+            for rank in range(4)
+        ],
         "recurrent_state_total_all_ranks_bytes": 8192,
     }
 

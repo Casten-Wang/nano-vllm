@@ -680,22 +680,35 @@ def summarize(run_dir: Path, run_id: str) -> dict:
         and local_shards_match_official
     )
     memory_by_tp = summarize_memory_preflight(memory)
+    def rank_storage_matches(row, field, expected):
+        tp_size = row["tensor_parallel_size"]
+        ranks = row.get("storage", {}).get(
+            "recurrent_state_storage_by_rank", []
+        )
+        return (
+            len(ranks) == tp_size
+            and {item.get("rank") for item in ranks} == set(range(tp_size))
+            and all(item.get(field) == expected for item in ranks)
+        )
+
     rotary_storage_matches_preflight = all(
-        row.get("storage", {})
-        .get("recurrent_state_storage", {})
-        .get("rotary_cache_bytes_local_rank")
-        == memory_by_tp.get(f"tp{row['tensor_parallel_size']}", {}).get(
-            "rotary_cache_bytes_per_rank"
+        rank_storage_matches(
+            row,
+            "rotary_cache_bytes_local_rank",
+            memory_by_tp.get(f"tp{row['tensor_parallel_size']}", {}).get(
+                "rotary_cache_bytes_per_rank"
+            ),
         )
         for row in performance["runs"]
     )
     recurrent_storage_matches_preflight = all(
-        row.get("storage", {})
-        .get("recurrent_state_storage", {})
-        .get("total_bytes_local_rank")
-        == memory_by_tp.get(f"tp{row['tensor_parallel_size']}", {})
-        .get("state_bytes_per_rank_by_dtype", {})
-        .get(row["recurrent_state_dtype"])
+        rank_storage_matches(
+            row,
+            "total_bytes_local_rank",
+            memory_by_tp.get(f"tp{row['tensor_parallel_size']}", {})
+            .get("state_bytes_per_rank_by_dtype", {})
+            .get(row["recurrent_state_dtype"]),
+        )
         for row in performance["runs"]
     )
     kv_storage_matches_preflight = all(
