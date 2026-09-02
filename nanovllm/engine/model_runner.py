@@ -7,6 +7,7 @@ from multiprocessing.synchronize import Event
 from multiprocessing.shared_memory import SharedMemory
 
 from nanovllm.config import Config
+from nanovllm.engine.decode_input_batch import DecodeInputBatch
 from nanovllm.engine.execution import (
     ExecutionStats,
     cuda_graph_buckets,
@@ -145,6 +146,7 @@ class ModelRunner:
             if self.rank == 0
             else None
         )
+        self.decode_inputs = DecodeInputBatch(config.max_num_seqs)
         self.allocate_recurrent_state_cache()
         self.warmup_model()
         self.allocate_kv_cache()
@@ -1003,10 +1005,12 @@ class ModelRunner:
             context_lens.append(len(seq))
             slot_mapping.append(seq.block_table[-1] * self.block_size + seq.last_block_num_tokens  - 1)
         max_context_len = max(context_lens) if context_lens else 0
-        input_ids = torch.tensor(input_ids, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
-        positions = torch.tensor(positions, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
-        slot_mapping = torch.tensor(slot_mapping, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
-        context_lens = torch.tensor(context_lens, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
+        input_ids, positions, slot_mapping, context_lens = self.decode_inputs.update(
+            input_ids,
+            positions,
+            slot_mapping,
+            context_lens,
+        )
         block_tables = self.prepare_block_tables(seqs)
         dequant_block_ids = None
         dequant_block_tables = None
