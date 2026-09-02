@@ -105,8 +105,10 @@ def build_shape_manifest(
             "threads_per_program": None,
             "source": "provider_opaque_runtime",
             "note": "FlashAttention provider controls its internal launch.",
-        },
-        {
+        }
+    ]
+    if args.include_packed_dequant_flash:
+        launches.append({
             "name": "dequant_packed_kvcache",
             "role": "baseline_preprocess",
             "grid": [
@@ -123,8 +125,7 @@ def build_shape_manifest(
                 "HEAD_DIM": args.head_dim,
                 "BLOCK_HEAD_DIM": block_head_dim,
             },
-        },
-    ]
+        })
     for variant in parse_str_list(args.variants):
         for block_tokens in parse_int_list(args.block_tokens):
             if block_tokens > args.block_size or args.block_size % block_tokens:
@@ -281,19 +282,31 @@ def build_shape_manifest(
         },
         "tensors": tensors,
         "workspace": {
-            "packed_k_shape": [
-                max_blocks,
-                args.block_size,
-                args.num_kv_heads,
-                args.head_dim,
-            ],
-            "packed_k_dtype": str(q.dtype),
-            "packed_v_shape": [
-                max_blocks,
-                args.block_size,
-                args.num_kv_heads,
-                args.head_dim,
-            ],
+            "packed_k_shape": (
+                [
+                    max_blocks,
+                    args.block_size,
+                    args.num_kv_heads,
+                    args.head_dim,
+                ]
+                if args.include_packed_dequant_flash
+                else None
+            ),
+            "packed_k_dtype": (
+                str(q.dtype)
+                if args.include_packed_dequant_flash
+                else None
+            ),
+            "packed_v_shape": (
+                [
+                    max_blocks,
+                    args.block_size,
+                    args.num_kv_heads,
+                    args.head_dim,
+                ]
+                if args.include_packed_dequant_flash
+                else None
+            ),
             "partitioned": partial_workspace,
         },
         "kernel_launches": launches,
