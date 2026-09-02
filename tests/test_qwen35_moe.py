@@ -257,6 +257,11 @@ def test_batched_multi_token_decode_matches_sorted_backend_in_chunks():
         ),
         patch.object(
             qwen35_moe.torch,
+            "cat",
+            side_effect=AssertionError("decode chunks must write into final storage"),
+        ),
+        patch.object(
+            qwen35_moe.torch,
             "bmm",
             side_effect=record_bmm,
         ),
@@ -270,6 +275,31 @@ def test_batched_multi_token_decode_matches_sorted_backend_in_chunks():
 
     torch.testing.assert_close(actual, expected)
     assert selected_route_counts == [4, 4, 2]
+
+
+def test_batched_decode_preallocated_output_preserves_autograd():
+    torch.manual_seed(59)
+    experts = make_experts(
+        num_experts=4,
+        decode_backend="batched",
+        decode_chunk_size=2,
+    )
+    hidden = torch.randn(5, 2, requires_grad=True)
+    topk_ids = torch.tensor([[3, 0], [1, 2], [0, 3], [2, 1], [3, 2]])
+    topk_weights = torch.rand(5, 2, requires_grad=True)
+
+    output = experts(
+        hidden,
+        topk_ids,
+        topk_weights,
+        is_decode=True,
+    )
+    output.square().sum().backward()
+
+    assert hidden.grad is not None
+    assert topk_weights.grad is not None
+    assert experts.gate_up_proj.grad is not None
+    assert experts.down_proj.grad is not None
 
 
 def test_batched_backend_keeps_prefill_on_grouped_dispatch():

@@ -23,7 +23,7 @@ def batched_expert_dispatch(
     if chunk_size <= 0:
         raise ValueError("decode chunk size must be positive")
     top_k = topk_ids.shape[1]
-    chunks = []
+    output = torch.empty_like(hidden_states)
     for start in range(0, hidden_states.shape[0], chunk_size):
         end = min(start + chunk_size, hidden_states.shape[0])
         expert_ids = topk_ids[start:end].reshape(-1)
@@ -42,10 +42,8 @@ def batched_expert_dispatch(
             selected_down,
             (F.silu(gate) * up).unsqueeze(-1),
         ).squeeze(-1)
-        chunks.append(
-            (
-                expert_output.reshape(end - start, top_k, -1)
-                * topk_weights[start:end].unsqueeze(-1)
-            ).sum(dim=1)
-        )
-    return torch.cat(chunks, dim=0)
+        output[start:end] = (
+            expert_output.reshape(end - start, top_k, -1)
+            * topk_weights[start:end].unsqueeze(-1)
+        ).sum(dim=1)
+    return output
