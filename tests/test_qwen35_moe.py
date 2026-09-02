@@ -488,6 +488,74 @@ def test_batched_dispatch_can_fill_caller_output_buffer():
     torch.testing.assert_close(actual, expected)
 
 
+def test_batched_dispatch_reuses_one_expert_weight_storage():
+    torch.manual_seed(59)
+    hidden = torch.randn(3, 4)
+    topk_ids = torch.tensor([[3, 0], [1, 2], [0, 3]])
+    topk_weights = torch.rand(3, 2)
+    topk_weights /= topk_weights.sum(dim=-1, keepdim=True)
+    gate_up_proj = torch.randn(4, 6, 4)
+    down_proj = torch.randn(4, 4, 3)
+    pool = moe_dispatch.BatchedExpertWeightBufferPool()
+
+    with torch.inference_mode():
+        expected = moe_dispatch.batched_expert_dispatch(
+            hidden,
+            topk_ids,
+            topk_weights,
+            gate_up_proj,
+            down_proj,
+            chunk_size=2,
+        )
+        actual = moe_dispatch.batched_expert_dispatch(
+            hidden,
+            topk_ids,
+            topk_weights,
+            gate_up_proj,
+            down_proj,
+            chunk_size=2,
+            weight_buffer_pool=pool,
+        )
+
+    torch.testing.assert_close(actual, expected)
+    stats = pool.storage_stats()
+    assert stats["allocation_count"] == 1
+    assert stats["reuse_count"] == 3
+    assert stats["storage_bytes"] == 4 * 6 * 4 * gate_up_proj.element_size()
+
+
+def test_batched_expert_layers_can_share_weight_buffer_pool():
+    torch.manual_seed(60)
+    first = make_experts(
+        hidden_size=4,
+        intermediate_size=6,
+        num_experts=4,
+        decode_backend="batched",
+        decode_chunk_size=2,
+    )
+    second = make_experts(
+        hidden_size=4,
+        intermediate_size=6,
+        num_experts=4,
+        decode_backend="batched",
+        decode_chunk_size=2,
+    )
+    pool = moe_dispatch.BatchedExpertWeightBufferPool()
+    first.decode_weight_buffer_pool = pool
+    second.decode_weight_buffer_pool = pool
+    hidden = torch.randn(2, 4)
+    topk_ids = torch.tensor([[3, 0], [1, 2]])
+    topk_weights = torch.full((2, 2), 0.5)
+
+    with torch.inference_mode():
+        first(hidden, topk_ids, topk_weights, is_decode=True)
+        storage = pool.storage.data_ptr()
+        second(hidden, topk_ids, topk_weights, is_decode=True)
+
+    assert pool.storage.data_ptr() == storage
+    assert pool.storage_stats()["allocation_count"] == 1
+
+
 def test_mixed_batched_backend_only_splits_decode_prefix():
     torch.manual_seed(58)
     sorted_experts = make_experts(num_experts=4)

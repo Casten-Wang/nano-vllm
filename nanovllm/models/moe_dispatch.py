@@ -6,6 +6,58 @@ import torch
 import torch.nn.functional as F
 
 
+class BatchedExpertWeightBufferPool:
+    """Single-stream scratch storage for one gathered expert-weight tensor."""
+
+    def __init__(self) -> None:
+        self.storage: torch.Tensor | None = None
+        self.allocation_count = 0
+        self.reuse_count = 0
+
+    def gather(
+        self,
+        weight: torch.Tensor,
+        expert_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        if torch.is_grad_enabled():
+            raise RuntimeError("expert gather buffer is inference-only")
+        if weight.ndim < 2 or expert_ids.ndim != 1:
+            raise ValueError("expert gather expects weights and flat expert ids")
+        required = expert_ids.numel() * weight[0].numel()
+        if (
+            self.storage is None
+            or self.storage.device != weight.device
+            or self.storage.dtype != weight.dtype
+            or self.storage.numel() < required
+        ):
+            self.storage = torch.empty(
+                required,
+                dtype=weight.dtype,
+                device=weight.device,
+            )
+            self.allocation_count += 1
+        else:
+            self.reuse_count += 1
+        output = self.storage[:required].view(
+            expert_ids.numel(),
+            *weight.shape[1:],
+        )
+        torch.index_select(weight, 0, expert_ids, out=output)
+        return output
+
+    def storage_stats(self) -> dict[str, int]:
+        storage_bytes = (
+            0
+            if self.storage is None
+            else self.storage.numel() * self.storage.element_size()
+        )
+        return {
+            "storage_bytes": storage_bytes,
+            "allocation_count": self.allocation_count,
+            "reuse_count": self.reuse_count,
+        }
+
+
 def silu_and_mul(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
     if gate.requires_grad:
         return F.silu(gate) * up
@@ -62,6 +114,7 @@ def batched_expert_dispatch(
     chunk_size: int = 8,
     *,
     output: torch.Tensor | None = None,
+    weight_buffer_pool: BatchedExpertWeightBufferPool | None = None,
 ) -> torch.Tensor:
     """Dispatch decode tokens without device-to-host synchronization.
 
@@ -84,7 +137,11 @@ def batched_expert_dispatch(
         end = min(start + chunk_size, hidden_states.shape[0])
         chunk_tokens = end - start
         expert_ids = topk_ids[start:end].reshape(-1)
-        selected_gate_up = gate_up_proj.index_select(0, expert_ids).view(
+        selected_gate_up = (
+            gate_up_proj.index_select(0, expert_ids)
+            if weight_buffer_pool is None
+            else weight_buffer_pool.gather(gate_up_proj, expert_ids)
+        ).view(
             chunk_tokens,
             top_k,
             gate_up_proj.shape[1],
@@ -99,7 +156,11 @@ def batched_expert_dispatch(
         del selected_gate_up
         gate, up = gate_up.chunk(2, dim=-1)
         activated = silu_and_mul(gate, up)
-        selected_down = down_proj.index_select(0, expert_ids)
+        selected_down = (
+            down_proj.index_select(0, expert_ids)
+            if weight_buffer_pool is None
+            else weight_buffer_pool.gather(down_proj, expert_ids)
+        )
         expert_output = torch.bmm(
             selected_down,
             activated.unsqueeze(-1),

@@ -900,6 +900,16 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
                             "peak_extra_mib": 4.0,
                             "errors_vs_current": {"max_abs_error": 0.01},
                             "reused_weighted_route_mib": 0.25,
+                            "weight_buffer_reuse": {
+                                "reference": {"peak_extra_mib": 8.0},
+                                "speedup": 1.1,
+                                "peak_extra_mib_delta": -4.0,
+                                "errors": {"max_abs_error": 0.0},
+                                "persistent_expert_weight_buffer_mib": 4.0,
+                                "eliminated_weight_allocations_per_chunk": 2,
+                                "candidate_reuses_expert_weight_storage": True,
+                                "measured_on_cuda": True,
+                            },
                             "broadcast_route_input": {
                                 "valid": True,
                                 "measured_on_cuda": True,
@@ -1361,6 +1371,12 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     assert mixed_dispatch["minimum_speedup_vs_grouped"] == 1.1
     assert mixed_dispatch["maximum_peak_extra_mib_delta"] == 4.0
     assert mixed_dispatch["case_count"] == 1
+    weight_reuse = report["graph_safe_moe"]["weight_buffer_reuse_by_tp"][
+        "tp4"
+    ]
+    assert report["evidence"]["moe_weight_buffer_reuse_evidence"]
+    assert weight_reuse["valid"]
+    assert weight_reuse["peak_extra_mib_delta"] == -4.0
     route_input = report["graph_safe_moe"][
         "route_input_broadcast_by_tp"
     ]["tp4"]["1"]

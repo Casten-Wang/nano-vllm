@@ -330,6 +330,7 @@ class ModelRunner:
     def get_runtime_buffer_stats(self):
         pools = {}
         dequant_pools = {}
+        moe_weight_pools = {}
         for module in self.model.modules():
             pool = getattr(module, "int8_partitioned_decode_pool", None)
             if pool is not None:
@@ -337,12 +338,25 @@ class ModelRunner:
             dequant_pool = getattr(module, "int8_dequant_pool", None)
             if dequant_pool is not None:
                 dequant_pools[id(dequant_pool)] = dequant_pool
+            moe_weight_pool = getattr(
+                module,
+                "decode_weight_buffer_pool",
+                None,
+            )
+            if moe_weight_pool is not None:
+                moe_weight_pools[id(moe_weight_pool)] = moe_weight_pool
         stats = [pool.storage_stats() for pool in pools.values()]
         dequant_stats = [
             pool.storage_stats() for pool in dequant_pools.values()
         ]
+        moe_weight_stats = [
+            pool.storage_stats() for pool in moe_weight_pools.values()
+        ]
         partitioned_total = sum(item["total_bytes"] for item in stats)
         dequant_total = sum(item["total_bytes"] for item in dequant_stats)
+        moe_weight_total = sum(
+            item["storage_bytes"] for item in moe_weight_stats
+        )
         sampler_stats = self.sampler.storage_stats()
         sampler_total = sum(sampler_stats.values())
         return {
@@ -355,10 +369,15 @@ class ModelRunner:
             ),
             "int8_dequant_pool_count": len(dequant_stats),
             "int8_dequant_buffer_bytes": dequant_total,
+            "moe_decode_weight_pool_count": len(moe_weight_stats),
+            "moe_decode_weight_buffer_bytes": moe_weight_total,
             "sampling_rank_buffer_bytes": sampler_stats["rank_buffer_bytes"],
             "sampling_noise_buffer_bytes": sampler_stats["noise_buffer_bytes"],
             "total_bytes_local_rank": (
-                partitioned_total + dequant_total + sampler_total
+                partitioned_total
+                + dequant_total
+                + moe_weight_total
+                + sampler_total
             ),
         }
 

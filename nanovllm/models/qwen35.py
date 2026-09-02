@@ -8,7 +8,12 @@ from torch import nn
 from nanovllm.layers.embed_head import ParallelLMHead, VocabParallelEmbedding
 from nanovllm.models.qwen35_attention import Qwen35Attention
 from nanovllm.models.qwen35_gated_delta import Qwen35GatedDeltaNet
-from nanovllm.models.qwen35_moe import Qwen35RMSNorm, Qwen35SparseMoeBlock
+from nanovllm.models.moe_dispatch import BatchedExpertWeightBufferPool
+from nanovllm.models.qwen35_moe import (
+    Qwen35Experts,
+    Qwen35RMSNorm,
+    Qwen35SparseMoeBlock,
+)
 
 
 def _add_residual(
@@ -65,6 +70,12 @@ class Qwen35Model(nn.Module):
             Qwen35DecoderLayer(config, layer_idx)
             for layer_idx in range(int(config.num_hidden_layers))
         )
+        self.moe_decode_weight_buffer_pool = BatchedExpertWeightBufferPool()
+        for layer in self.layers:
+            if isinstance(layer.mlp.experts, Qwen35Experts):
+                layer.mlp.experts.decode_weight_buffer_pool = (
+                    self.moe_decode_weight_buffer_pool
+                )
         self.norm = Qwen35RMSNorm(
             int(config.hidden_size), eps=float(config.rms_norm_eps)
         )

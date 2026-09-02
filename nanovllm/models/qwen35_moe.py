@@ -10,6 +10,7 @@ from torch import nn
 from nanovllm.layers.activation import SiluAndMul
 from nanovllm.layers.linear import MergedColumnParallelLinear, RowParallelLinear, divide
 from nanovllm.models.moe_dispatch import (
+    BatchedExpertWeightBufferPool,
     batched_expert_dispatch,
     weight_expert_output,
 )
@@ -107,6 +108,7 @@ class Qwen35Experts(nn.Module):
         self.num_experts = num_experts
         self.decode_backend = decode_backend
         self.decode_chunk_size = decode_chunk_size
+        self.decode_weight_buffer_pool: BatchedExpertWeightBufferPool | None = None
         self.tp_size = dist.get_world_size()
         self.tp_rank = dist.get_rank()
         self.local_intermediate_size = divide(intermediate_size, self.tp_size)
@@ -239,6 +241,11 @@ class Qwen35Experts(nn.Module):
                 self.gate_up_proj,
                 self.down_proj,
                 self.decode_chunk_size,
+                weight_buffer_pool=(
+                    self.decode_weight_buffer_pool
+                    if not torch.is_grad_enabled()
+                    else None
+                ),
             )
             if reduce_output and self.tp_size > 1:
                 dist.all_reduce(output)
@@ -253,6 +260,11 @@ class Qwen35Experts(nn.Module):
                 self.down_proj,
                 self.decode_chunk_size,
                 output=output[:decode_token_count],
+                weight_buffer_pool=(
+                    self.decode_weight_buffer_pool
+                    if not torch.is_grad_enabled()
+                    else None
+                ),
             )
             self._forward_sorted(
                 hidden_states[decode_token_count:],

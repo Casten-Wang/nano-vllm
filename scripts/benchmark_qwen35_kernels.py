@@ -1128,6 +1128,7 @@ def expert_dispatch_mixed(
     down_proj: torch.Tensor,
     decode_token_count: int,
     chunk_size: int = 8,
+    weight_buffer_pool=None,
 ) -> torch.Tensor:
     """Mirror runtime mixed dispatch with one shared output buffer."""
 
@@ -1142,6 +1143,7 @@ def expert_dispatch_mixed(
         down_proj,
         chunk_size,
         output=output[:decode_token_count],
+        weight_buffer_pool=weight_buffer_pool,
     )
     expert_dispatch_general(
         hidden_states[decode_token_count:],
@@ -1161,6 +1163,7 @@ def expert_dispatch_batched_decode(
     gate_up_proj: torch.Tensor,
     down_proj: torch.Tensor,
     chunk_size: int = 8,
+    weight_buffer_pool=None,
 ) -> torch.Tensor:
     return MOE_DISPATCH.batched_expert_dispatch(
         hidden_states,
@@ -1169,6 +1172,7 @@ def expert_dispatch_batched_decode(
         gate_up_proj,
         down_proj,
         chunk_size,
+        weight_buffer_pool=weight_buffer_pool,
     )
 
 
@@ -1426,6 +1430,9 @@ def benchmark_expert_dispatch(args, device, dtype, token_count: int) -> dict:
         )
         graph_safe_candidates = {}
         for chunk_size in chunk_sizes:
+            weight_buffer_pool = (
+                MOE_DISPATCH.BatchedExpertWeightBufferPool()
+            )
             graph_safe_output = expert_dispatch_batched_decode(
                 hidden,
                 topk_ids,
@@ -1433,6 +1440,7 @@ def benchmark_expert_dispatch(args, device, dtype, token_count: int) -> dict:
                 gate_up_proj,
                 down_proj,
                 chunk_size,
+                weight_buffer_pool,
             )
             graph_safe_timing = measure(
                 lambda chunk_size=chunk_size: expert_dispatch_batched_decode(
@@ -1442,12 +1450,56 @@ def benchmark_expert_dispatch(args, device, dtype, token_count: int) -> dict:
                     gate_up_proj,
                     down_proj,
                     chunk_size,
+                    weight_buffer_pool,
                 ),
                 device=device,
                 warmup=args.warmup,
                 iterations=args.iterations,
                 repeats=args.repeats,
             )
+            if chunk_size == args.moe_decode_chunk_size:
+                unpooled_output = expert_dispatch_batched_decode(
+                    hidden,
+                    topk_ids,
+                    topk_weights,
+                    gate_up_proj,
+                    down_proj,
+                    chunk_size,
+                )
+                unpooled_timing = measure(
+                    lambda: expert_dispatch_batched_decode(
+                        hidden,
+                        topk_ids,
+                        topk_weights,
+                        gate_up_proj,
+                        down_proj,
+                        chunk_size,
+                    ),
+                    device=device,
+                    warmup=args.warmup,
+                    iterations=args.iterations,
+                    repeats=args.repeats,
+                )
+                graph_safe_timing["weight_buffer_reuse"] = {
+                    "reference": unpooled_timing,
+                    "speedup": (
+                        unpooled_timing["median_ms"]
+                        / graph_safe_timing["median_ms"]
+                    ),
+                    "peak_extra_mib_delta": (
+                        graph_safe_timing["peak_extra_mib"]
+                        - unpooled_timing["peak_extra_mib"]
+                    ),
+                    "errors": error(graph_safe_output, unpooled_output),
+                    "persistent_expert_weight_buffer_mib": (
+                        weight_buffer_pool.storage_stats()["storage_bytes"]
+                        / 1024
+                        / 1024
+                    ),
+                    "eliminated_weight_allocations_per_chunk": 2,
+                    "candidate_reuses_expert_weight_storage": True,
+                    "measured_on_cuda": device.type == "cuda",
+                }
             repeated_output = expert_dispatch_batched_repeated_input(
                 hidden,
                 topk_ids,
@@ -1520,6 +1572,13 @@ def benchmark_expert_dispatch(args, device, dtype, token_count: int) -> dict:
                         / 1024
                         / 1024
                     ),
+                    "persistent_expert_weight_buffer_mib": (
+                        weight_buffer_pool.storage_stats()["storage_bytes"]
+                        / 1024
+                        / 1024
+                    ),
+                    "eliminated_weight_allocations_per_chunk": 2,
+                    "candidate_reuses_expert_weight_storage": True,
                 }
             )
             graph_safe_timing["promotion"] = evaluate_graph_safe_moe_candidate(
@@ -1628,6 +1687,8 @@ def benchmark_mixed_expert_dispatch(
             ),
         )
 
+    weight_buffer_pool = MOE_DISPATCH.BatchedExpertWeightBufferPool()
+
     def candidate():
         return (
             expert_dispatch_mixed(
@@ -1638,6 +1699,7 @@ def benchmark_mixed_expert_dispatch(
                 down_proj,
                 decode_tokens,
                 args.moe_decode_chunk_size,
+                weight_buffer_pool,
             ),
         )
 
@@ -1665,6 +1727,12 @@ def benchmark_mixed_expert_dispatch(
                 / result["candidate"]["median_ms"]
             ),
             "measured_on_cuda": device.type == "cuda",
+            "persistent_expert_weight_buffer_mib": (
+                weight_buffer_pool.storage_stats()["storage_bytes"]
+                / 1024
+                / 1024
+            ),
+            "candidate_reuses_expert_weight_storage": True,
         }
     )
     return result

@@ -47,9 +47,18 @@ class FakeNorm(nn.Module):
 class FakeMoe(nn.Module):
     def __init__(self, config):
         super().__init__()
+        self.experts = FakeExperts()
 
     def forward(self, x):
         return torch.zeros_like(x)
+
+
+class FakeExperts(nn.Module):
+    pass
+
+
+class FakeWeightBufferPool:
+    pass
 
 
 def load_qwen35_module():
@@ -57,6 +66,9 @@ def load_qwen35_module():
         "nanovllm": types.ModuleType("nanovllm"),
         "nanovllm.layers": types.ModuleType("nanovllm.layers"),
         "nanovllm.models": types.ModuleType("nanovllm.models"),
+        "nanovllm.models.moe_dispatch": types.ModuleType(
+            "nanovllm.models.moe_dispatch"
+        ),
         "nanovllm.layers.embed_head": types.ModuleType("nanovllm.layers.embed_head"),
         "nanovllm.models.qwen35_attention": types.ModuleType("nanovllm.models.qwen35_attention"),
         "nanovllm.models.qwen35_gated_delta": types.ModuleType("nanovllm.models.qwen35_gated_delta"),
@@ -68,6 +80,10 @@ def load_qwen35_module():
     modules["nanovllm.models.qwen35_gated_delta"].Qwen35GatedDeltaNet = FakeMixer
     modules["nanovllm.models.qwen35_moe"].Qwen35RMSNorm = FakeNorm
     modules["nanovllm.models.qwen35_moe"].Qwen35SparseMoeBlock = FakeMoe
+    modules["nanovllm.models.qwen35_moe"].Qwen35Experts = FakeExperts
+    modules[
+        "nanovllm.models.moe_dispatch"
+    ].BatchedExpertWeightBufferPool = FakeWeightBufferPool
     saved = {name: sys.modules.get(name) for name in modules}
     try:
         sys.modules.update(modules)
@@ -130,6 +146,12 @@ def test_text_model_uses_declared_hybrid_layer_pattern():
     assert hidden.shape == (2, 4)
     assert model.compute_logits(hidden).shape == (2, 17)
     assert model.model.norm.last_inplace_output is True
+    pool = model.model.moe_decode_weight_buffer_pool
+    assert isinstance(pool, FakeWeightBufferPool)
+    assert all(
+        layer.mlp.experts.decode_weight_buffer_pool is pool
+        for layer in model.model.layers
+    )
 
 
 def test_residual_merge_reuses_branch_output_during_inference():

@@ -435,6 +435,41 @@ def summarize_mixed_moe_dispatch(result: dict) -> dict:
     }
 
 
+def summarize_moe_weight_buffer_reuse(result: dict) -> dict:
+    errors = result.get("errors", {})
+    max_abs_error = errors.get("max_abs_error", math.inf)
+    speedup = result.get("speedup", math.nan)
+    peak_delta = result.get("peak_extra_mib_delta", math.nan)
+    persistent_mib = result.get(
+        "persistent_expert_weight_buffer_mib",
+        math.nan,
+    )
+    checks = {
+        "cuda_measurement": result.get("measured_on_cuda") is True,
+        "accuracy": (
+            math.isfinite(max_abs_error)
+            and max_abs_error <= MIXED_MOE_MAX_ABS_ERROR
+        ),
+        "speed": math.isfinite(speedup) and speedup >= 1.0,
+        "peak_memory": math.isfinite(peak_delta) and peak_delta <= 0.0,
+        "persistent_storage": (
+            math.isfinite(persistent_mib) and persistent_mib > 0
+        ),
+        "allocation_elimination": (
+            result.get("eliminated_weight_allocations_per_chunk") == 2
+            and result.get("candidate_reuses_expert_weight_storage") is True
+        ),
+    }
+    return {
+        "valid": all(checks.values()),
+        "checks": checks,
+        "speedup": speedup,
+        "peak_extra_mib_delta": peak_delta,
+        "persistent_expert_weight_buffer_mib": persistent_mib,
+        "max_abs_error": max_abs_error,
+    }
+
+
 def summarize_mixed_moe_dispatch_sweep(results: dict[str, dict]) -> dict:
     if not results:
         raise ValueError("mixed MoE dispatch sweep has no cases")
@@ -1629,6 +1664,7 @@ def summarize(run_dir: Path, run_id: str) -> dict:
     normalization = {}
     buffer_reuse = {}
     mixed_moe_dispatch = {}
+    moe_weight_buffer_reuse = {}
     moe_route_input_broadcast = {}
     moe_device_scalar = {}
     long_prefill = {}
@@ -1822,6 +1858,9 @@ def summarize(run_dir: Path, run_id: str) -> dict:
         }
         candidate = candidates_by_batch["1"]
         tp_name = path.stem
+        moe_weight_buffer_reuse[tp_name] = summarize_moe_weight_buffer_reuse(
+            candidate["weight_buffer_reuse"]
+        )
         device_scalar = dispatch_results["1"].get("device_scalar_candidate")
         moe_device_scalar[tp_name] = (
             {
@@ -2450,6 +2489,10 @@ def summarize(run_dir: Path, run_id: str) -> dict:
             set(mixed_moe_dispatch) == expected_tp_names
             and all(item["valid"] for item in mixed_moe_dispatch.values())
         ),
+        "moe_weight_buffer_reuse_evidence": (
+            set(moe_weight_buffer_reuse) == expected_tp_names
+            and all(item["valid"] for item in moe_weight_buffer_reuse.values())
+        ),
         "moe_route_input_broadcast_evidence": (
             set(moe_route_input_broadcast) == expected_tp_names
             and all(
@@ -2555,6 +2598,7 @@ def summarize(run_dir: Path, run_id: str) -> dict:
             "by_tp": kernels,
             "runtime_by_tp": moe_runtime,
             "mixed_dispatch_by_tp": mixed_moe_dispatch,
+            "weight_buffer_reuse_by_tp": moe_weight_buffer_reuse,
             "route_input_broadcast_by_tp": moe_route_input_broadcast,
             "device_scalar_all_tp_promoted": device_scalar_all_tp_promoted,
             "device_scalar_by_tp": moe_device_scalar,

@@ -733,19 +733,29 @@ class HybridStateContextTest(unittest.TestCase):
         dequant_pool = SimpleNamespace(
             storage_stats=lambda: {"total_bytes": 24}
         )
+        moe_weight_pool = SimpleNamespace(
+            storage_stats=lambda: {
+                "storage_bytes": 16,
+                "allocation_count": 1,
+                "reuse_count": 3,
+            }
+        )
         runner.model = SimpleNamespace(
             modules=lambda: [
                 SimpleNamespace(
                     int8_partitioned_decode_pool=pool,
                     int8_dequant_pool=dequant_pool,
+                    decode_weight_buffer_pool=moe_weight_pool,
                 ),
                 SimpleNamespace(
                     int8_partitioned_decode_pool=pool,
                     int8_dequant_pool=dequant_pool,
+                    decode_weight_buffer_pool=moe_weight_pool,
                 ),
                 SimpleNamespace(
                     int8_partitioned_decode_pool=None,
                     int8_dequant_pool=None,
+                    decode_weight_buffer_pool=None,
                 ),
             ]
         )
@@ -763,9 +773,11 @@ class HybridStateContextTest(unittest.TestCase):
         self.assertEqual(stats["int8_partitioned_output_bytes"], 8)
         self.assertEqual(stats["int8_dequant_pool_count"], 1)
         self.assertEqual(stats["int8_dequant_buffer_bytes"], 24)
+        self.assertEqual(stats["moe_decode_weight_pool_count"], 1)
+        self.assertEqual(stats["moe_decode_weight_buffer_bytes"], 16)
         self.assertEqual(stats["sampling_rank_buffer_bytes"], 4)
         self.assertEqual(stats["sampling_noise_buffer_bytes"], 8)
-        self.assertEqual(stats["total_bytes_local_rank"], 76)
+        self.assertEqual(stats["total_bytes_local_rank"], 92)
 
     def test_multi_rank_kv_cache_stats_are_gathered(self):
         runner = object.__new__(ModelRunner)
