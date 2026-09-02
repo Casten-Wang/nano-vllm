@@ -2,6 +2,8 @@ from importlib.util import module_from_spec, spec_from_file_location
 import json
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).parents[1]
 SPEC = spec_from_file_location(
@@ -64,7 +66,25 @@ def write_attention_case(
 def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     run_id = "rental-a"
     write(tmp_path / "preflight/checkpoint_mapping_audit.json", {"valid": True, "complete": True})
-    write(tmp_path / "preflight/memory_preflight.json", {"valid": True})
+    write(
+        tmp_path / "preflight/memory_preflight.json",
+        {
+            "valid": True,
+            "results": {
+                "tp4": {
+                    "local_parameter_bytes": 16_000,
+                    "max_state_bytes_per_rank": 1_000,
+                    "minimum_workload_kv_bytes_per_rank": 2_000,
+                    "kv_bytes_per_token_by_dtype": {
+                        "auto": 10_240,
+                        "int8": 5_160,
+                    },
+                    "required_free_bytes_per_rank": 20_000,
+                    "available_budget_bytes_by_rank": [25_000] * 4,
+                }
+            },
+        },
+    )
     rows = [
         {
             "label": "sorted",
@@ -195,6 +215,9 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     assert attention["long"]["best_partitioned"]["backend"] == (
         "int8_partitioned_ps256"
     )
+    memory = report["memory"]["by_tp"]["tp4"]
+    assert memory["int8_kv_reduction_ratio"] == 0.49609375
+    assert memory["minimum_budget_margin_bytes"] == 5_000
 
 
 def test_summary_rejects_inaccurate_attention_kernel(tmp_path):
@@ -231,3 +254,19 @@ def test_runtime_promotion_rejects_unstable_or_regressing_candidate():
     assert not result["promote_to_default"]
     assert not result["checks"]["throughput_non_regression"]
     assert not result["checks"]["stable_repeats"]
+
+
+def test_memory_summary_rejects_non_saving_int8_cache():
+    report = {
+        "results": {
+            "tp4": {
+                "kv_bytes_per_token_by_dtype": {
+                    "auto": 100,
+                    "int8": 100,
+                }
+            }
+        }
+    }
+
+    with pytest.raises(ValueError, match="does not reduce memory"):
+        MODULE.summarize_memory_preflight(report)

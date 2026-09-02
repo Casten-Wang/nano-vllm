@@ -198,6 +198,43 @@ def summarize_attention_case(result: dict, *, partitioned: bool) -> dict:
     }
 
 
+def summarize_memory_preflight(report: dict) -> dict[str, dict]:
+    summaries = {}
+    for tp_name, item in sorted(report.get("results", {}).items()):
+        kv_sizes = item.get("kv_bytes_per_token_by_dtype", {})
+        if set(kv_sizes) != {"auto", "int8"} or not all(
+            isinstance(value, int) and value > 0
+            for value in kv_sizes.values()
+        ):
+            raise ValueError(
+                f"memory preflight has no complete KV dtype sizes for {tp_name}"
+            )
+        auto_bytes = kv_sizes["auto"]
+        int8_bytes = kv_sizes["int8"]
+        if int8_bytes >= auto_bytes:
+            raise ValueError(f"INT8 KV cache does not reduce memory for {tp_name}")
+        budgets = item.get("available_budget_bytes_by_rank", [])
+        if not budgets:
+            raise ValueError(f"memory preflight has no rank budgets for {tp_name}")
+        required = item["required_free_bytes_per_rank"]
+        minimum_budget = min(budgets)
+        summaries[tp_name] = {
+            "local_parameter_bytes": item["local_parameter_bytes"],
+            "max_state_bytes_per_rank": item["max_state_bytes_per_rank"],
+            "minimum_workload_kv_bytes_per_rank": item[
+                "minimum_workload_kv_bytes_per_rank"
+            ],
+            "kv_bytes_per_token_by_dtype": kv_sizes,
+            "int8_kv_reduction_ratio": 1.0 - int8_bytes / auto_bytes,
+            "required_free_bytes_per_rank": required,
+            "minimum_available_budget_bytes_per_rank": minimum_budget,
+            "minimum_budget_margin_bytes": minimum_budget - required,
+        }
+    if not summaries:
+        raise ValueError("memory preflight contains no TP results")
+    return summaries
+
+
 def summarize(run_dir: Path, run_id: str) -> dict:
     audit = load_json(run_dir / "preflight" / "checkpoint_mapping_audit.json")
     memory = load_json(run_dir / "preflight" / "memory_preflight.json")
@@ -244,6 +281,7 @@ def summarize(run_dir: Path, run_id: str) -> dict:
     expected_tp_names = {
         f"tp{row['tensor_parallel_size']}" for row in performance["runs"]
     }
+    memory_by_tp = summarize_memory_preflight(memory)
     attention = {}
     attention_valid = True
     for tp_name in sorted(expected_tp_names):
@@ -372,7 +410,9 @@ def summarize(run_dir: Path, run_id: str) -> dict:
 
     evidence = {
         "checkpoint_mapping_valid": audit["valid"] and audit["complete"],
-        "memory_preflight_valid": memory["valid"],
+        "memory_preflight_valid": (
+            memory["valid"] and set(memory_by_tp) == expected_tp_names
+        ),
         "performance_paths_valid": performance["all_execution_paths_valid"],
         "performance_generation_valid": performance["all_generation_valid"],
         "performance_output_parity": performance["all_output_digests_match"],
@@ -416,6 +456,9 @@ def summarize(run_dir: Path, run_id: str) -> dict:
         "performance": {
             "best_throughput": best_throughput,
             "lowest_peak_memory": lowest_memory,
+        },
+        "memory": {
+            "by_tp": memory_by_tp,
         },
         "quality": {
             "scope": quality["quality_scope"],
