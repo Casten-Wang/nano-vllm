@@ -127,6 +127,7 @@ def set_context(
     decode_max_context_len=0,
     state_slots=None,
     state_reset_mask=None,
+    state_reset_slots=None,
     state_token_ranges=(),
     decode_state_span=None,
 ):
@@ -136,10 +137,11 @@ def set_context(
         state_slots,
         decode_token_count,
     )
-    state_reset_slots = build_state_reset_slots(
-        state_slots,
-        state_reset_mask,
-    )
+    if state_reset_slots is None:
+        state_reset_slots = build_state_reset_slots(
+            state_slots,
+            state_reset_mask,
+        )
     _CONTEXT = Context(
         is_prefill=is_prefill,
         cu_seqlens_q=cu_seqlens_q,

@@ -765,13 +765,27 @@ class ModelRunner:
             return start, len(slots)
         return None
 
-    def prepare_state_reset_mask(self, seqs: list[Sequence]):
+    def prepare_state_reset_slots(self, seqs: list[Sequence]):
         model_spec = self.config.model_spec
         if model_spec is None or not model_spec.is_hybrid:
             return None
+        reset_slots = []
+        for warmup_slot, seq in enumerate(seqs):
+            if seq.num_cached_tokens != 0:
+                continue
+            if seq.state_slot is None:
+                if seq.block_table:
+                    raise RuntimeError(
+                        "scheduled hybrid sequence has no recurrent state slot"
+                    )
+                reset_slots.append(warmup_slot)
+            else:
+                reset_slots.append(seq.state_slot)
+        if not reset_slots:
+            return None
         return torch.tensor(
-            [seq.num_cached_tokens == 0 for seq in seqs],
-            dtype=torch.bool,
+            reset_slots,
+            dtype=torch.int64,
             pin_memory=True,
         ).cuda(non_blocking=True)
 
@@ -842,7 +856,7 @@ class ModelRunner:
             dequant_block_tables,
             self.config.sliding_window_size,
             state_slots=self.prepare_state_slots(seqs),
-            state_reset_mask=self.prepare_state_reset_mask(seqs),
+            state_reset_slots=self.prepare_state_reset_slots(seqs),
             state_token_ranges=state_token_ranges,
         )
         return input_ids, positions
@@ -916,8 +930,8 @@ class ModelRunner:
                 if prepare_state_metadata
                 else None
             ),
-            state_reset_mask=(
-                self.prepare_state_reset_mask(seqs)
+            state_reset_slots=(
+                self.prepare_state_reset_slots(seqs)
                 if prepare_state_metadata
                 else None
             ),
@@ -963,8 +977,8 @@ class ModelRunner:
                 if prepare_state_metadata
                 else None
             ),
-            state_reset_mask=(
-                self.prepare_state_reset_mask(seqs)
+            state_reset_slots=(
+                self.prepare_state_reset_slots(seqs)
                 if prepare_state_metadata
                 else None
             ),
@@ -1007,7 +1021,7 @@ class ModelRunner:
             sliding_window_size=self.config.sliding_window_size,
             max_context_len=max_context_len,
             state_slots=self.prepare_state_slots(seqs),
-            state_reset_mask=self.prepare_state_reset_mask(seqs),
+            state_reset_slots=self.prepare_state_reset_slots(seqs),
             state_token_ranges=(),
             decode_state_span=self.contiguous_state_span(seqs),
         )
@@ -1054,7 +1068,7 @@ class ModelRunner:
             prefill_dequant_block_ids=prefill["dequant_block_ids"],
             prefill_dequant_block_tables=prefill["dequant_block_tables"],
             state_slots=self.prepare_state_slots(mixed_seqs),
-            state_reset_mask=self.prepare_state_reset_mask(mixed_seqs),
+            state_reset_slots=self.prepare_state_reset_slots(mixed_seqs),
             state_token_ranges=tuple(
                 (
                     len(decode_seqs) + start,

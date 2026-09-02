@@ -64,3 +64,18 @@ def test_state_reset_slots_preserves_empty_selection():
     assert reset_slots is not None
     assert reset_slots.dtype == torch.int64
     assert reset_slots.numel() == 0
+
+
+def test_set_context_prefers_precomputed_reset_slots():
+    explicit = torch.tensor([7], dtype=torch.int64)
+    try:
+        set_context(
+            False,
+            state_slots=torch.tensor([3, 7], dtype=torch.int64),
+            state_reset_mask=torch.tensor([True, False]),
+            state_reset_slots=explicit,
+        )
+
+        assert get_context().state_reset_slots is explicit
+    finally:
+        reset_context()

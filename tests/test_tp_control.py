@@ -445,6 +445,53 @@ class HybridStateContextTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "no recurrent state slot"):
             runner.prepare_state_slots([seq])
 
+    def test_state_reset_slots_upload_only_new_sequences(self):
+        runner = self.make_hybrid_runner()
+        seqs = [
+            SimpleNamespace(
+                state_slot=7,
+                block_table=[1],
+                num_cached_tokens=3,
+            ),
+            SimpleNamespace(
+                state_slot=2,
+                block_table=[2],
+                num_cached_tokens=0,
+            ),
+        ]
+        captured = {}
+        original = model_runner_module.torch.tensor
+        model_runner_module.torch.tensor = lambda values, **kwargs: (
+            captured.update(kwargs) or FakeTensor(values)
+        )
+
+        try:
+            reset_slots = runner.prepare_state_reset_slots(seqs)
+        finally:
+            model_runner_module.torch.tensor = original
+
+        self.assertEqual(reset_slots.values, [2])
+        self.assertIs(captured["dtype"], model_runner_module.torch.int64)
+
+    def test_state_reset_slots_skip_upload_when_no_reset_is_needed(self):
+        runner = self.make_hybrid_runner()
+        seq = SimpleNamespace(
+            state_slot=7,
+            block_table=[1],
+            num_cached_tokens=3,
+        )
+        original = model_runner_module.torch.tensor
+        model_runner_module.torch.tensor = lambda *args, **kwargs: self.fail(
+            "no reset tensor should be allocated"
+        )
+
+        try:
+            reset_slots = runner.prepare_state_reset_slots([seq])
+        finally:
+            model_runner_module.torch.tensor = original
+
+        self.assertIsNone(reset_slots)
+
     def test_mixed_context_orders_decode_before_prefill_slots(self):
         runner = self.make_hybrid_runner()
         runner.block_size = 256
@@ -488,9 +535,9 @@ class HybridStateContextTest(unittest.TestCase):
             state_metadata_calls.append(("slots", seqs))
             or FakeTensor([8, 9, 3])
         )
-        runner.prepare_state_reset_mask = lambda seqs: (
+        runner.prepare_state_reset_slots = lambda seqs: (
             state_metadata_calls.append(("reset", seqs))
-            or FakeTensor([False, False, True])
+            or FakeTensor([3])
         )
         captured = {}
         original = model_runner_module.set_context
@@ -502,8 +549,8 @@ class HybridStateContextTest(unittest.TestCase):
 
         self.assertEqual(captured["state_slots"].values, [8, 9, 3])
         self.assertEqual(
-            captured["state_reset_mask"].values,
-            [False, False, True],
+            captured["state_reset_slots"].values,
+            [3],
         )
         self.assertEqual(captured["state_token_ranges"], ((2, 4),))
         self.assertEqual(
