@@ -60,6 +60,7 @@ def result(
         "qwen35_moe_decode_backend": "sorted",
         "qwen35_moe_decode_chunk_size": 8,
         "quantization_format": "bf16",
+        "requested_weight_quant_backend": "auto",
         "weight_quant_backend": "auto",
         "kv_cache_dtype": "auto",
         "kv_dequant_backend": "fused",

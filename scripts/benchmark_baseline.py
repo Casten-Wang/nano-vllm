@@ -60,6 +60,7 @@ def write_markdown(path: Path, result: dict) -> None:
         f"- qwen35_moe_decode_backend: `{result['qwen35_moe_decode_backend']}`",
         f"- qwen35_moe_decode_chunk_size: `{result['qwen35_moe_decode_chunk_size']}`",
         f"- quantization_format: `{result['quantization_format']}`",
+        f"- requested_weight_quant_backend: `{result['requested_weight_quant_backend']}`",
         f"- weight_quant_backend: `{result['weight_quant_backend']}`",
         f"- kv_cache_dtype: `{result['kv_cache_dtype']}`",
         f"- kv_dequant_backend: `{result['kv_dequant_backend']}`",
@@ -180,6 +181,7 @@ def default_result_prefix(args: argparse.Namespace) -> str:
 
 def main() -> None:
     args = parse_args()
+    requested_weight_quant_backend = args.weight_quant_backend
     result_dir = Path(args.result_dir)
     result_dir.mkdir(parents=True, exist_ok=True)
 
@@ -209,6 +211,10 @@ def main() -> None:
         sliding_window_size=args.sliding_window_size,
         enable_dynamic_chunked_prefill=args.enable_dynamic_chunked_prefill,
     )
+    # Use the effective backend in result names and comparison metadata.  For
+    # GPTQ checkpoints, Config resolves the user-facing ``auto`` choice to the
+    # CUDA Triton backend before workers construct the model.
+    args.weight_quant_backend = llm.model_runner.config.weight_quant_backend
 
     if args.warmup:
         llm.generate([[0]], SamplingParams(max_tokens=1, ignore_eos=True), use_tqdm=False)
@@ -289,6 +295,7 @@ def main() -> None:
         "qwen35_moe_decode_backend": args.qwen35_moe_decode_backend,
         "qwen35_moe_decode_chunk_size": args.qwen35_moe_decode_chunk_size,
         "quantization_format": llm.model_runner.config.model_spec.quantization.format,
+        "requested_weight_quant_backend": requested_weight_quant_backend,
         "weight_quant_backend": args.weight_quant_backend,
         "kv_cache_dtype": args.kv_cache_dtype,
         "kv_dequant_backend": args.kv_dequant_backend,

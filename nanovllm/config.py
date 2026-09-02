@@ -122,10 +122,12 @@ class Config:
         self.model_spec = resolve_model_spec(self.hf_config)
         self.model_config = self.model_spec.text_config
         quantization = self.model_spec.quantization
-        if quantization.format == "gptq_int4" and self.weight_quant_backend in (
-            "reference",
-            "triton",
-        ):
+        if quantization.format == "gptq_int4":
+            if self.weight_quant_backend == "auto":
+                # ModelRunner is CUDA-only. Prefer the fused executor by
+                # default while retaining the explicit reference backend for
+                # correctness checks and diagnostics.
+                self.weight_quant_backend = "triton"
             if self.qwen35_moe_decode_backend != "sorted":
                 raise ValueError(
                     "the current GPTQ expert backend requires "
@@ -133,9 +135,10 @@ class Config:
                 )
             self.model_config.nanovllm_quantization_spec = quantization
             self.model_config.nanovllm_weight_quant_backend = self.weight_quant_backend
-        elif not quantization.is_quantized and self.weight_quant_backend == "reference":
+        elif not quantization.is_quantized and self.weight_quant_backend != "auto":
             raise ValueError(
-                "weight_quant_backend='reference' requires a GPTQ-Int4 checkpoint"
+                f"weight_quant_backend={self.weight_quant_backend!r} requires "
+                "a GPTQ-Int4 checkpoint"
             )
         else:
             quantization.require_runtime_support()

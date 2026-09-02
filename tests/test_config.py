@@ -97,7 +97,7 @@ def test_negative_prefill_starvation_threshold_is_rejected(monkeypatch, tmp_path
         )
 
 
-def test_quantized_checkpoint_is_rejected_before_runtime_setup(monkeypatch, tmp_path):
+def test_gptq_auto_selects_triton_backend(monkeypatch, tmp_path):
     text_config = SimpleNamespace(max_position_embeddings=32768)
     monkeypatch.setattr(
         config_module.AutoConfig,
@@ -110,6 +110,28 @@ def test_quantized_checkpoint_is_rejected_before_runtime_setup(monkeypatch, tmp_
         lambda _config: SimpleNamespace(
             text_config=text_config,
             quantization=QuantizationSpec(format="gptq_int4", weight_bits=4),
+        ),
+    )
+
+    config = config_module.Config(str(tmp_path))
+
+    assert config.weight_quant_backend == "triton"
+    assert text_config.nanovllm_weight_quant_backend == "triton"
+
+
+def test_fp8_checkpoint_is_rejected_before_runtime_setup(monkeypatch, tmp_path):
+    text_config = SimpleNamespace(max_position_embeddings=32768)
+    monkeypatch.setattr(
+        config_module.AutoConfig,
+        "from_pretrained",
+        lambda _model: SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        config_module,
+        "resolve_model_spec",
+        lambda _config: SimpleNamespace(
+            text_config=text_config,
+            quantization=QuantizationSpec(format="fp8_block", weight_bits=8),
         ),
     )
 
@@ -146,6 +168,11 @@ def test_gptq_reference_backend_is_explicitly_admitted(monkeypatch, tmp_path):
     )
 
     assert config.model_config.nanovllm_quantization_spec is quantization
+
+
+def test_bf16_rejects_gptq_backend(monkeypatch, tmp_path):
+    with pytest.raises(ValueError, match="requires a GPTQ-Int4 checkpoint"):
+        make_config(monkeypatch, tmp_path, weight_quant_backend="triton")
 
 
 def test_gptq_triton_backend_is_forwarded(monkeypatch, tmp_path):
