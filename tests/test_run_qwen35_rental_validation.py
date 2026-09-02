@@ -38,14 +38,18 @@ def test_commands_are_fail_fast_and_cover_complete_validation_suite():
     assert [name for name, _ in stages] == [
         "preflight",
         "kernels-tp4",
-        "mixed-tp4",
+        "mixed-tp4-r1",
+        "mixed-tp4-r2",
+        "mixed-tp4-r3",
         "kernels-long-prefill-tp4",
         "attention-short-tp4",
         "attention-long-tp4",
         "cudagraph-short-tp4",
         "cudagraph-long-tp4",
         "kernels-tp8",
-        "mixed-tp8",
+        "mixed-tp8-r1",
+        "mixed-tp8-r2",
+        "mixed-tp8-r3",
         "kernels-long-prefill-tp8",
         "attention-short-tp8",
         "attention-long-tp8",
@@ -59,7 +63,7 @@ def test_commands_are_fail_fast_and_cover_complete_validation_suite():
     assert stages[0][1][stages[0][1].index("--max-model-len") + 1] == "16384"
     assert stages[1][1][stages[1][1].index("--tp-size") + 1] == "4"
     commands = dict(stages)
-    mixed = commands["mixed-tp4"]
+    mixed = commands["mixed-tp4-r1"]
     assert mixed[mixed.index("--tensor-parallel-size") + 1] == "4"
     assert mixed[mixed.index("--qwen35-moe-decode-backend") + 1] == "batched"
     assert mixed[mixed.index("--temperature") + 1] == "0"
@@ -122,6 +126,21 @@ def test_manifest_resumes_only_identical_run(tmp_path):
     resumed = MODULE.prepare_manifest(path, plan, resume=True)
 
     assert resumed["completed_stages"] == ["preflight"]
+
+
+def test_mixed_stage_collects_only_its_repeat(tmp_path):
+    arguments = args()
+    arguments.result_dir = str(tmp_path)
+    mixed_dir = tmp_path / arguments.run_id / "mixed" / "tp4"
+    mixed_dir.mkdir(parents=True)
+    first = mixed_dir / "r1.json"
+    second = mixed_dir / "r2.json"
+    first.write_text('{"repeat": 1}\n')
+    second.write_text('{"repeat": 2}\n')
+
+    artifacts = MODULE.collect_stage_artifacts(arguments, "mixed-tp4-r2")
+
+    assert artifacts == [second]
 
 
 def test_manifest_rejects_changed_completed_artifact(tmp_path):

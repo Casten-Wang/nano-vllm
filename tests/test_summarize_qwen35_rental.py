@@ -148,26 +148,27 @@ def write_long_prefill_case(root, *, max_abs_error=0.01):
 
 
 def write_mixed_case(root):
-    write(
-        root / "mixed/tp4.json",
-        {
-            "commit": "abc",
-            "git_dirty": False,
-            "cuda_available": True,
-            "tensor_parallel_size": 4,
-            "qwen35_moe_decode_backend": "batched",
-            "enable_dynamic_chunked_prefill": True,
-            "injected": True,
-            "initial_p95_decode_gap_s": 0.02,
-            "peak_torch_allocated_mib": 12_000.0,
-            "generated_token_ids": {"digest": "mixed-tokens"},
-            "execution_stats": {
-                "model_path_counts": {"mixed_eager": 3},
+    for repeat, p95 in enumerate((0.019, 0.020, 0.021), start=1):
+        write(
+            root / f"mixed/tp4/r{repeat}.json",
+            {
+                "commit": "abc",
+                "git_dirty": False,
+                "cuda_available": True,
+                "tensor_parallel_size": 4,
+                "qwen35_moe_decode_backend": "batched",
+                "enable_dynamic_chunked_prefill": True,
+                "injected": True,
+                "initial_p95_decode_gap_s": p95,
+                "peak_torch_allocated_mib": 12_000.0,
+                "generated_token_ids": {"digest": "mixed-tokens"},
+                "execution_stats": {
+                    "model_path_counts": {"mixed_eager": 3},
+                },
+                "execution_validation": {"valid": True},
+                "generation_validation": {"valid": True},
             },
-            "execution_validation": {"valid": True},
-            "generation_validation": {"valid": True},
-        },
-    )
+        )
 
 
 def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
@@ -340,7 +341,10 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     chunk_sweep = report["long_prefill"]["by_tp"]["tp4"]["chunk_sweep"]
     assert chunk_sweep["fastest_chunk_size"] == 64
     assert chunk_sweep["lowest_memory_chunk_size"] == 32
-    assert report["mixed_workload"]["by_tp"]["tp4"]["mixed_steps"] == 3
+    mixed = report["mixed_workload"]["by_tp"]["tp4"]
+    assert mixed["repeat_count"] == 3
+    assert mixed["median_mixed_steps"] == 3
+    assert mixed["initial_p95_decode_gap_cv"] < 0.1
     assert report["mixed_workload"]["cross_tp_output_parity"]
     assert report["graph_safe_moe"]["by_tp"]["tp4"]["promotion"][
         "selected_decode_batches"
@@ -369,8 +373,17 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
         "memory_limited_context_tokens_per_sequence"
     ] == 3_072
 
-    mixed_path = tmp_path / "mixed/tp4.json"
+    mixed_path = tmp_path / "mixed/tp4/r1.json"
     mixed_result = json.loads(mixed_path.read_text())
+    mixed_result["initial_p95_decode_gap_s"] = 0.2
+    write(mixed_path, mixed_result)
+    unstable_report = MODULE.summarize(tmp_path, run_id)
+    unstable_mixed = unstable_report["mixed_workload"]["by_tp"]["tp4"]
+    assert unstable_mixed["initial_p95_decode_gap_cv"] > 0.1
+    assert not unstable_mixed["valid"]
+    assert not unstable_report["evidence"]["mixed_workload_evidence"]
+
+    mixed_result["initial_p95_decode_gap_s"] = 0.019
     mixed_result.pop("generated_token_ids")
     write(mixed_path, mixed_result)
     invalid_report = MODULE.summarize(tmp_path, run_id)

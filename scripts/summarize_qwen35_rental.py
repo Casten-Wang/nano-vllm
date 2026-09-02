@@ -6,6 +6,7 @@ import argparse
 import json
 import math
 from pathlib import Path
+import statistics
 
 
 MOE_RUNTIME_MIN_THROUGHPUT_RATIO = 0.99
@@ -21,6 +22,7 @@ ATTENTION_MAX_ABS_ERROR = 0.05
 PRODUCTION_PARTITION_SIZE = 512
 LONG_PREFILL_TOKENS = 8192
 LONG_PREFILL_MAX_ABS_ERROR = 0.05
+MIXED_MAX_COEFFICIENT_OF_VARIATION = 0.10
 
 
 def load_json(path: Path) -> dict:
@@ -455,7 +457,7 @@ def summarize(run_dir: Path, run_id: str) -> dict:
     long_prefill_paths = sorted((run_dir / "kernels_long").glob("tp*.json"))
     if not long_prefill_paths:
         raise ValueError("no long-prefill kernel artifacts were found")
-    mixed_paths = sorted((run_dir / "mixed").glob("tp*.json"))
+    mixed_paths = sorted((run_dir / "mixed").glob("tp*/r*.json"))
     if not mixed_paths:
         raise ValueError("no mixed-workload benchmark artifacts were found")
     cudagraph_paths = sorted(
@@ -485,7 +487,7 @@ def summarize(run_dir: Path, run_id: str) -> dict:
 
     kernels = {}
     long_prefill = {}
-    mixed_workload = {}
+    mixed_runs = {}
     configured_max_decode_batch = performance["workload"]["max_num_seqs"]
     commits = {
         row["commit"]
@@ -598,7 +600,7 @@ def summarize(run_dir: Path, run_id: str) -> dict:
 
     for path in mixed_paths:
         result = load_json(path)
-        tp_name = path.stem
+        tp_name = path.parent.name
         tp_size = int(tp_name.removeprefix("tp"))
         model_paths = result.get("execution_stats", {}).get(
             "model_path_counts",
@@ -614,7 +616,7 @@ def summarize(run_dir: Path, run_id: str) -> dict:
             and model_paths.get("mixed_eager", 0) > 0
             and result.get("cuda_available") is True
         )
-        mixed_workload[tp_name] = {
+        mixed_runs.setdefault(tp_name, []).append({
             "valid": valid,
             "mixed_steps": model_paths.get("mixed_eager", 0),
             "initial_p95_decode_gap_s": result.get(
@@ -627,10 +629,45 @@ def summarize(run_dir: Path, run_id: str) -> dict:
                 "generated_token_ids",
                 {},
             ).get("digest"),
-        }
+        })
         commits.add(result["commit"])
         clean_worktrees = clean_worktrees and not result["git_dirty"]
         cuda_measurements = cuda_measurements and result["cuda_available"]
+
+    mixed_workload = {}
+    for tp_name, rows in sorted(mixed_runs.items()):
+        p95_samples = [row["initial_p95_decode_gap_s"] for row in rows]
+        digests = {row["generated_token_ids_digest"] for row in rows}
+        mean_p95 = statistics.mean(p95_samples)
+        p95_cv = (
+            statistics.pstdev(p95_samples) / mean_p95
+            if mean_p95 > 0
+            else math.inf
+        )
+        output_parity = None not in digests and len(digests) == 1
+        mixed_workload[tp_name] = {
+            "valid": (
+                len(rows) >= 2
+                and all(row["valid"] for row in rows)
+                and output_parity
+                and p95_cv <= MIXED_MAX_COEFFICIENT_OF_VARIATION
+            ),
+            "repeat_count": len(rows),
+            "output_parity": output_parity,
+            "generated_token_ids_digest": (
+                next(iter(digests)) if output_parity else None
+            ),
+            "median_mixed_steps": statistics.median(
+                row["mixed_steps"] for row in rows
+            ),
+            "median_initial_p95_decode_gap_s": statistics.median(p95_samples),
+            "initial_p95_decode_gap_cv": p95_cv,
+            "max_allowed_cv": MIXED_MAX_COEFFICIENT_OF_VARIATION,
+            "max_peak_torch_allocated_mib": max(
+                row["peak_torch_allocated_mib"] for row in rows
+            ),
+            "runs": rows,
+        }
 
     cudagraph = {}
     for path in cudagraph_paths:
