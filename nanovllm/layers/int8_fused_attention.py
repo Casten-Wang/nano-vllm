@@ -730,6 +730,33 @@ def _partitioned_int8_decode_attention_reduce_kernel(
     tl.store(o_ptr + o_offsets, out, mask=dim_mask)
 
 
+def allocate_partitioned_workspace(
+    q: torch.Tensor,
+    num_partitions: int,
+    block_head_dim: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    if num_partitions <= 0 or block_head_dim <= 0:
+        raise ValueError("partitioned workspace dimensions must be positive")
+    partial_shape = (q.size(0), q.size(1), num_partitions)
+    partial_items = q.size(0) * q.size(1) * num_partitions
+    workspace = torch.empty(
+        partial_items * (block_head_dim + 2),
+        dtype=torch.float32,
+        device=q.device,
+    )
+    partial_acc = workspace[: partial_items * block_head_dim].view(
+        *partial_shape,
+        block_head_dim,
+    )
+    partial_m = workspace[
+        partial_items * block_head_dim : partial_items * (block_head_dim + 1)
+    ].view(partial_shape)
+    partial_l = workspace[
+        partial_items * (block_head_dim + 1) :
+    ].view(partial_shape)
+    return partial_acc, partial_m, partial_l
+
+
 def partitioned_fused_int8_decode_attention(
     q: torch.Tensor,
     k_cache: torch.Tensor,
@@ -792,13 +819,11 @@ def partitioned_fused_int8_decode_attention(
     flat_v_cache = v_cache.view(-1, num_kv_heads, head_dim)
     flat_k_scale = k_scale.view(-1, num_kv_heads)
     flat_v_scale = v_scale.view(-1, num_kv_heads)
-    partial_acc = torch.empty(
-        (num_seqs, num_heads, num_partitions, block_head_dim),
-        dtype=torch.float32,
-        device=q.device,
+    partial_acc, partial_m, partial_l = allocate_partitioned_workspace(
+        q,
+        num_partitions,
+        block_head_dim,
     )
-    partial_m = torch.empty((num_seqs, num_heads, num_partitions), dtype=torch.float32, device=q.device)
-    partial_l = torch.empty_like(partial_m)
     o = torch.empty_like(q)
 
     _partitioned_int8_decode_attention_kernel[(num_seqs, num_heads, num_partitions)](

@@ -67,6 +67,18 @@ def write_attention_case(
             "num_kv_heads": 1,
             "head_dim": 256,
             "results": results,
+            "shape_manifest": {
+                "workspace": {
+                    "partitioned": {
+                        str(MODULE.PRODUCTION_PARTITION_SIZE): {
+                            "allocation_count": 1,
+                            "shared_storage": True,
+                        }
+                    }
+                    if partitioned
+                    else {}
+                }
+            },
         },
     )
 
@@ -798,6 +810,7 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     assert attention["long"]["production_partitioned"]["backend"] == (
         "int8_partitioned_ps512"
     )
+    assert attention["long"]["partitioned_workspace_valid"]
     memory = report["memory"]["by_tp"]["tp4"]
     assert memory["int8_kv_reduction_ratio"] == 0.49609375
     assert memory["minimum_budget_margin_bytes"] == 5_000
@@ -908,6 +921,33 @@ def test_summary_rejects_inaccurate_attention_kernel(tmp_path):
 
     assert not summary["fused_correctness_valid"]
     assert summary["best_fused"] is None
+
+
+def test_partitioned_attention_requires_shared_workspace_evidence():
+    result = {
+        "results": {
+            "flash_reference": {"status": "ok", "median_ms": 2.0},
+            "int8_v3_bt256_w8_s2": {
+                "status": "ok",
+                "median_ms": 1.0,
+                "max_abs_diff_vs_flash_reference": 0.01,
+                "peak_extra_mib": 2.0,
+            },
+            "int8_partitioned_ps512": {
+                "status": "ok",
+                "median_ms": 0.9,
+                "max_abs_diff_vs_flash_reference": 0.01,
+                "peak_extra_mib": 3.0,
+            },
+        },
+        "context_len": MODULE.ATTENTION_LONG_CONTEXT,
+        "batch_size": 4,
+    }
+
+    summary = MODULE.summarize_attention_case(result, partitioned=True)
+
+    assert summary["partitioned_correctness_valid"]
+    assert not summary["partitioned_workspace_valid"]
     assert summary["max_allowed_abs_error"] == 0.05
 
 

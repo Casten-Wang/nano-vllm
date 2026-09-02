@@ -479,6 +479,19 @@ def summarize_attention_case(result: dict, *, partitioned: bool) -> dict:
         if production_accurate
         else None
     )
+    production_workspace = (
+        result.get("shape_manifest", {})
+        .get("workspace", {})
+        .get("partitioned", {})
+        .get(str(PRODUCTION_PARTITION_SIZE), {})
+    )
+    partitioned_workspace_valid = (
+        not partitioned
+        or (
+            production_workspace.get("allocation_count") == 1
+            and production_workspace.get("shared_storage") is True
+        )
+    )
     return {
         "context_len": result["context_len"],
         "batch_size": result["batch_size"],
@@ -491,6 +504,7 @@ def summarize_attention_case(result: dict, *, partitioned: bool) -> dict:
                 and production_accurate
             )
         ),
+        "partitioned_workspace_valid": partitioned_workspace_valid,
         "best_fused": best_accurate(fused),
         "best_partitioned": best_accurate(partitioned_results),
         "production_partition_size": PRODUCTION_PARTITION_SIZE,
@@ -921,6 +935,7 @@ def summarize(run_dir: Path, run_id: str) -> dict:
                 attention_valid
                 and cases[case_name]["fused_correctness_valid"]
                 and cases[case_name]["partitioned_correctness_valid"]
+                and cases[case_name]["partitioned_workspace_valid"]
             )
             commits.add(result["commit"])
             clean_worktrees = clean_worktrees and not result["git_dirty"]

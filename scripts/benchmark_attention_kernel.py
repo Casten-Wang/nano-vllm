@@ -213,10 +213,20 @@ def build_shape_manifest(
     if args.include_partitioned:
         for partition_size in parse_int_list(args.partition_sizes):
             num_partitions = max(
-                math.ceil(args.context_len / partition_size),
+                math.ceil(
+                    min(
+                        args.context_len,
+                        args.sliding_window_size
+                        if args.sliding_window_size is not None
+                        else args.context_len,
+                    )
+                    / partition_size
+                ),
                 1,
             )
             partial_workspace[str(partition_size)] = {
+                "allocation_count": 1,
+                "shared_storage": True,
                 "partial_acc_shape": [
                     args.batch_size,
                     args.num_heads,

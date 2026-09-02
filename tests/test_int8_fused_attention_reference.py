@@ -65,6 +65,35 @@ else:
         IMPORT_ERROR = exc
 
 
+@unittest.skipIf(torch is None or IMPORT_ERROR is not None, "torch/triton unavailable")
+class PartitionedWorkspaceTest(unittest.TestCase):
+    def test_partial_workspace_views_share_one_allocation(self):
+        q = torch.empty(2, 3, 4)
+        num_partitions = 5
+        block_head_dim = 8
+        partial_acc, partial_m, partial_l = (
+            int8_fused_attention.allocate_partitioned_workspace(
+                q,
+                num_partitions,
+                block_head_dim,
+            )
+        )
+
+        storage = partial_acc.untyped_storage().data_ptr()
+        self.assertEqual(partial_acc.untyped_storage().data_ptr(), storage)
+        self.assertEqual(partial_m.untyped_storage().data_ptr(), storage)
+        self.assertEqual(partial_l.untyped_storage().data_ptr(), storage)
+        self.assertEqual(
+            partial_acc.untyped_storage().nbytes(),
+            (
+                partial_acc.numel()
+                + partial_m.numel()
+                + partial_l.numel()
+            )
+            * partial_acc.element_size(),
+        )
+
+
 def reference_int8_decode_attention(
     q,
     k_cache,
