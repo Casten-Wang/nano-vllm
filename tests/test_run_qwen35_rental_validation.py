@@ -62,6 +62,7 @@ def test_commands_are_fail_fast_and_cover_complete_validation_suite():
     mixed = commands["mixed-tp4"]
     assert mixed[mixed.index("--tensor-parallel-size") + 1] == "4"
     assert mixed[mixed.index("--qwen35-moe-decode-backend") + 1] == "batched"
+    assert mixed[mixed.index("--temperature") + 1] == "0"
     assert "--enable-dynamic-chunked-prefill" in mixed
     assert mixed[mixed.index("--require-paths") + 1] == "mixed_eager"
     long_prefill = commands["kernels-long-prefill-tp4"]

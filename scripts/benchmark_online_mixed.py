@@ -19,6 +19,7 @@ from nanovllm.benchmark_metadata import (
     collect_benchmark_metadata,
     kv_cache_storage_metadata,
     model_config_metadata,
+    token_ids_digest,
     validate_execution_stats,
     validate_generation_completion,
 )
@@ -53,6 +54,7 @@ def parse_args() -> argparse.Namespace:
         default="sorted",
     )
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--temperature", type=float, default=0.6)
     parser.add_argument("--vocab-size", type=int, default=10000)
     parser.add_argument("--enforce-eager", action="store_true")
     parser.add_argument("--kv-cache-dtype", choices=("auto", "int8"), default="auto")
@@ -93,7 +95,11 @@ def main() -> None:
         args.vocab_size,
         args.seed + 1,
     )
-    sampling_params = SamplingParams(temperature=0.6, ignore_eos=True, max_tokens=args.output_len)
+    sampling_params = SamplingParams(
+        temperature=args.temperature,
+        ignore_eos=True,
+        max_tokens=args.output_len,
+    )
 
     llm = LLM(
         args.model,
@@ -114,6 +120,8 @@ def main() -> None:
     llm.model_runner.call("reset_shape_trace")
     llm.metrics.reset()
     llm.scheduler.block_manager.reset_cache_stats()
+    torch.manual_seed(args.seed)
+    torch.cuda.manual_seed_all(args.seed)
 
     for prompt in initial_prompts:
         llm.add_request(prompt, sampling_params)
@@ -124,6 +132,7 @@ def main() -> None:
     token_times: dict[int, list[float]] = {}
     finished_request_ids: set[int] = set()
     finished_output_lengths: dict[int, int] = {}
+    finished_token_ids: dict[int, list[int]] = {}
     groups: dict[int, str] = {seq_id: "initial" for seq_id in initial_ids}
     torch.cuda.synchronize()
     llm.model_runner.call("reset_cuda_peak_memory_stats")
@@ -159,6 +168,7 @@ def main() -> None:
         for seq_id, token_ids in output:
             finished_request_ids.add(seq_id)
             finished_output_lengths[seq_id] = len(token_ids)
+            finished_token_ids[seq_id] = token_ids
             # step() returns complete outputs only when a request finishes. For
             # gap metrics we need per-token timestamps, so collect them from
             # live sequence objects below as well.
@@ -258,6 +268,14 @@ def main() -> None:
         "max_num_seqs": args.max_num_seqs,
         "tensor_parallel_size": args.tensor_parallel_size,
         "qwen35_moe_decode_backend": args.qwen35_moe_decode_backend,
+        "seed": args.seed,
+        "temperature": args.temperature,
+        "generated_token_ids": token_ids_digest(
+            [
+                {"token_ids": finished_token_ids[seq_id]}
+                for seq_id in sorted(finished_token_ids)
+            ]
+        ),
         "enforce_eager": args.enforce_eager,
         "kv_cache_dtype": args.kv_cache_dtype,
         "kv_dequant_backend": args.kv_dequant_backend,

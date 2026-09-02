@@ -116,6 +116,8 @@ def commands(args: argparse.Namespace) -> list[tuple[str, list[str]]]:
                     "1024",
                     "--output-len",
                     "64",
+                    "--temperature",
+                    "0",
                     "--inject-after-decode-steps",
                     "8",
                     "--max-model-len",

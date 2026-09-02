@@ -623,6 +623,10 @@ def summarize(run_dir: Path, run_id: str) -> dict:
             "peak_torch_allocated_mib": result.get(
                 "peak_torch_allocated_mib"
             ),
+            "generated_token_ids_digest": result.get(
+                "generated_token_ids",
+                {},
+            ).get("digest"),
         }
         commits.add(result["commit"])
         clean_worktrees = clean_worktrees and not result["git_dirty"]
@@ -689,6 +693,15 @@ def summarize(run_dir: Path, run_id: str) -> dict:
         clean_worktrees = clean_worktrees and not result["git_dirty"]
         checkpoint_digests.add(result["checkpoint_manifest"]["digest"])
 
+    mixed_digests = {
+        item["generated_token_ids_digest"]
+        for item in mixed_workload.values()
+        if item["generated_token_ids_digest"]
+    }
+    mixed_cross_tp_parity = (
+        len(mixed_workload) == len(expected_tp_names)
+        and len(mixed_digests) == 1
+    )
     cudagraph_valid = (
         set(cudagraph) == set(kernels)
         and all(set(cases) == {"short", "long"} for cases in cudagraph.values())
@@ -725,6 +738,7 @@ def summarize(run_dir: Path, run_id: str) -> dict:
         "mixed_workload_evidence": (
             set(mixed_workload) == expected_tp_names
             and all(item["valid"] for item in mixed_workload.values())
+            and mixed_cross_tp_parity
         ),
         "quality_reads_stored_kv": all(
             row["kv_sensitive_token_rows"] > 0 for row in quality["cases"]
@@ -797,6 +811,7 @@ def summarize(run_dir: Path, run_id: str) -> dict:
             "by_tp": long_prefill,
         },
         "mixed_workload": {
+            "cross_tp_output_parity": mixed_cross_tp_parity,
             "by_tp": mixed_workload,
         },
     }

@@ -160,6 +160,7 @@ def write_mixed_case(root):
             "injected": True,
             "initial_p95_decode_gap_s": 0.02,
             "peak_torch_allocated_mib": 12_000.0,
+            "generated_token_ids": {"digest": "mixed-tokens"},
             "execution_stats": {
                 "model_path_counts": {"mixed_eager": 3},
             },
@@ -340,6 +341,7 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     assert chunk_sweep["fastest_chunk_size"] == 64
     assert chunk_sweep["lowest_memory_chunk_size"] == 32
     assert report["mixed_workload"]["by_tp"]["tp4"]["mixed_steps"] == 3
+    assert report["mixed_workload"]["cross_tp_output_parity"]
     assert report["graph_safe_moe"]["by_tp"]["tp4"]["promotion"][
         "selected_decode_batches"
     ] == [1, 64]
@@ -366,6 +368,14 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     assert memory["kv_capacity_by_dtype"]["int8"][
         "memory_limited_context_tokens_per_sequence"
     ] == 3_072
+
+    mixed_path = tmp_path / "mixed/tp4.json"
+    mixed_result = json.loads(mixed_path.read_text())
+    mixed_result.pop("generated_token_ids")
+    write(mixed_path, mixed_result)
+    invalid_report = MODULE.summarize(tmp_path, run_id)
+    assert not invalid_report["evidence"]["mixed_workload_evidence"]
+    assert not invalid_report["valid"]
 
 
 def test_summary_rejects_inaccurate_attention_kernel(tmp_path):
