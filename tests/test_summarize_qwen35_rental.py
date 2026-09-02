@@ -349,6 +349,16 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
             "git_dirty": False,
             "cuda_available": True,
             "results": {
+                "sampling_filter_fast_paths": {
+                    name: {
+                        "reference": {"peak_extra_mib": 128.0},
+                        "candidate": {"peak_extra_mib": 32.0},
+                        "speedup": 2.0,
+                        "errors": [{"max_abs_error": 0.0}],
+                        "avoided_full_sort_workspace_mib": 128.0,
+                    }
+                    for name in ("unfiltered", "top_k")
+                },
                 "router_topk_first": {
                     "reference": {"peak_extra_mib": 2.0},
                     "candidate": {"peak_extra_mib": 1.0},

@@ -44,6 +44,10 @@ KV_QUANT = load_source_module(
     "qwen35_kv_quant_benchmark",
     "nanovllm/layers/kv_cache_quant.py",
 )
+SAMPLER = load_source_module(
+    "qwen35_sampler_benchmark",
+    "nanovllm/layers/sampler.py",
+)
 
 
 def synchronize(device: torch.device) -> None:
@@ -97,8 +101,22 @@ def measure(
 
 
 def error(actual: torch.Tensor, expected: torch.Tensor) -> dict[str, float]:
-    difference = actual.float() - expected.float()
-    denominator = expected.float().abs().clamp_min(1e-6)
+    actual_float = actual.float()
+    expected_float = expected.float()
+    matching_nonfinite = (~torch.isfinite(actual_float)) & (
+        actual_float == expected_float
+    )
+    difference = torch.where(
+        matching_nonfinite,
+        torch.zeros_like(actual_float),
+        actual_float - expected_float,
+    )
+    denominator = expected_float.abs().clamp_min(1e-6)
+    denominator = torch.where(
+        matching_nonfinite,
+        torch.ones_like(denominator),
+        denominator,
+    )
     return {
         "max_abs_error": difference.abs().max().item(),
         "max_relative_error": (difference.abs() / denominator).max().item(),
@@ -192,6 +210,74 @@ def benchmark_router(args, device, dtype) -> dict:
     )
     result["reused_selected_logits_mib"] = result["selected_probability_mib"]
     return result
+
+
+def _full_sort_sampling_filter(logits, top_ks, top_ps):
+    sorted_logits, sorted_indices = torch.sort(logits, descending=True, dim=-1)
+    vocab_size = logits.size(1)
+    full_vocab = torch.full_like(top_ks, vocab_size)
+    effective_top_ks = torch.where(
+        top_ks > 0,
+        torch.minimum(top_ks, full_vocab),
+        full_vocab,
+    )
+    ranks = torch.arange(vocab_size, device=logits.device).unsqueeze(0)
+    top_k_keep = ranks < effective_top_ks.unsqueeze(1)
+    top_k_logits = sorted_logits.masked_fill(~top_k_keep, float("-inf"))
+    sorted_probs = torch.softmax(top_k_logits, dim=-1)
+    cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
+    sorted_remove = cumulative_probs > top_ps.unsqueeze(1)
+    sorted_remove[:, 1:] = sorted_remove[:, :-1].clone()
+    sorted_remove[:, 0] = False
+    filtered = torch.empty_like(logits)
+    filtered.scatter_(
+        -1,
+        sorted_indices,
+        sorted_logits.masked_fill(~(top_k_keep & ~sorted_remove), float("-inf")),
+    )
+    return filtered
+
+
+def benchmark_sampling_filter(args, device, dtype) -> dict:
+    logits = torch.randn(
+        args.sampling_batch,
+        args.vocab_size,
+        device=device,
+        dtype=dtype,
+    )
+    top_ps = torch.ones(args.sampling_batch, device=device)
+    full_sort_workspace_mib = (
+        logits.numel()
+        * (logits.element_size() + 8)
+        / 1024
+        / 1024
+    )
+    results = {}
+    for name, top_k in (("unfiltered", -1), ("top_k", args.sampling_top_k)):
+        top_ks = torch.full(
+            (args.sampling_batch,),
+            top_k,
+            device=device,
+            dtype=torch.int32,
+        )
+
+        def reference():
+            return (_full_sort_sampling_filter(logits, top_ks, top_ps),)
+
+        def candidate():
+            return (SAMPLER.apply_top_k_top_p(logits, top_ks, top_ps),)
+
+        result = compare(
+            reference,
+            candidate,
+            device=device,
+            warmup=args.warmup,
+            iterations=args.iterations,
+            repeats=args.repeats,
+        )
+        result["avoided_full_sort_workspace_mib"] = full_sort_workspace_mib
+        results[name] = result
+    return results
 
 
 def benchmark_moe_output_merge(args, device, dtype) -> dict:
@@ -1390,6 +1476,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-experts", type=int, default=256)
     parser.add_argument("--top-k", type=int, default=8)
     parser.add_argument("--hidden-size", type=int, default=2048)
+    parser.add_argument("--vocab-size", type=int, default=248320)
+    parser.add_argument("--sampling-batch", type=int, default=64)
+    parser.add_argument("--sampling-top-k", type=int, default=50)
     parser.add_argument("--moe-intermediate-size", type=int, default=512)
     parser.add_argument("--num-hidden-layers", type=int, default=40)
     parser.add_argument(
@@ -1458,6 +1547,9 @@ def main() -> None:
         "num_experts": args.num_experts,
         "top_k": args.top_k,
         "hidden_size": args.hidden_size,
+        "vocab_size": args.vocab_size,
+        "sampling_batch": args.sampling_batch,
+        "sampling_top_k": args.sampling_top_k,
         "moe_intermediate_size": args.moe_intermediate_size,
         "num_hidden_layers": args.num_hidden_layers,
         "prefill_batch": args.prefill_batch,
@@ -1486,6 +1578,8 @@ def main() -> None:
         raise ValueError("MoE graph-safe error limit must be non-negative")
     if args.top_k > args.num_experts:
         raise ValueError("top_k cannot exceed num_experts")
+    if args.sampling_top_k > args.vocab_size:
+        raise ValueError("sampling_top_k cannot exceed vocab_size")
     if args.moe_intermediate_size % args.tp_size:
         raise ValueError("Qwen3.5 MoE intermediate size must divide TP size")
     if args.device == "auto":
@@ -1534,6 +1628,11 @@ def main() -> None:
         expert_dispatch = benchmark_expert_dispatch_sweep(args, device, dtype)
         benchmark_results = {
             "router_topk_first": benchmark_router(args, device, dtype),
+            "sampling_filter_fast_paths": benchmark_sampling_filter(
+                args,
+                device,
+                dtype,
+            ),
             "moe_output_buffer_reuse": benchmark_moe_output_merge(
                 args,
                 device,

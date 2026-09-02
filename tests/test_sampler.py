@@ -55,7 +55,25 @@ class SamplerTest(unittest.TestCase):
 
         filtered = apply_top_k_top_p(logits, top_ks, top_ps)
 
-        self.assertTrue(torch.equal(filtered, logits))
+        self.assertIs(filtered, logits)
+
+    def test_top_k_only_path_does_not_sort_full_vocabulary(self):
+        logits = torch.tensor(
+            [[4.0, 3.0, 2.0, 1.0], [1.0, 4.0, 3.0, 2.0]]
+        )
+        top_ks = torch.tensor([2, -1], dtype=torch.int32)
+        top_ps = torch.ones(2)
+
+        with unittest.mock.patch.object(
+            torch,
+            "sort",
+            side_effect=AssertionError("full sort should not run"),
+        ):
+            filtered = apply_top_k_top_p(logits, top_ks, top_ps)
+
+        self.assertTrue(torch.isfinite(filtered[0, :2]).all())
+        self.assertTrue(torch.isneginf(filtered[0, 2:]).all())
+        self.assertTrue(torch.equal(filtered[1], logits[1]))
 
     def test_top_p_keeps_minimum_probability_prefix(self):
         logits = torch.log(torch.tensor([[0.50, 0.25, 0.15, 0.10]]))

@@ -34,6 +34,36 @@ def apply_top_k_top_p(
         raise ValueError("top_p must be finite and in (0, 1]")
 
     vocab_size = logits.size(1)
+    top_k_enabled = (top_ks > 0) & (top_ks < vocab_size)
+    top_p_enabled = top_ps < 1.0
+    if not bool(top_p_enabled.any()):
+        if not bool(top_k_enabled.any()):
+            return logits
+        max_top_k = int(top_ks[top_k_enabled].max().item())
+        selected_logits, selected_indices = torch.topk(
+            logits,
+            max_top_k,
+            dim=-1,
+        )
+        effective_top_ks = torch.where(
+            top_k_enabled,
+            top_ks,
+            torch.full_like(top_ks, max_top_k),
+        )
+        ranks = torch.arange(max_top_k, device=logits.device).unsqueeze(0)
+        selected_logits.masked_fill_(
+            ranks >= effective_top_ks.unsqueeze(1),
+            float("-inf"),
+        )
+        filtered_logits = torch.full_like(logits, float("-inf"))
+        filtered_logits.scatter_(
+            dim=-1,
+            index=selected_indices,
+            src=selected_logits,
+        )
+        if bool((~top_k_enabled).any()):
+            filtered_logits[~top_k_enabled] = logits[~top_k_enabled]
+        return filtered_logits
 
     # Sort each request's vocabulary distribution from high logit to low logit.
     # Top-p needs this ordering to compute the cumulative probability mass.

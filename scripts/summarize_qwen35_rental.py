@@ -742,6 +742,14 @@ def summarize(run_dir: Path, run_id: str) -> dict:
             ),
         }
         buffer_reuse[tp_name] = {
+            "sampling_unfiltered": summarize_buffer_reuse_candidate(
+                result["results"]["sampling_filter_fast_paths"]["unfiltered"],
+                ("avoided_full_sort_workspace_mib",),
+            ),
+            "sampling_top_k": summarize_buffer_reuse_candidate(
+                result["results"]["sampling_filter_fast_paths"]["top_k"],
+                ("avoided_full_sort_workspace_mib",),
+            ),
             "router_softmax": summarize_buffer_reuse_candidate(
                 result["results"]["router_topk_first"],
                 ("reused_selected_logits_mib",),

@@ -29,6 +29,39 @@ def test_measure_preserves_every_raw_repeat():
     assert result["median_ms"] == sorted(result["samples_ms"])[1]
 
 
+def test_error_treats_matching_negative_infinity_as_equal():
+    result = MODULE.error(
+        torch.tensor([1.0, float("-inf")]),
+        torch.tensor([1.0, float("-inf")]),
+    )
+
+    assert result == {"max_abs_error": 0.0, "max_relative_error": 0.0, "rmse": 0.0}
+
+
+def test_sampling_filter_benchmark_covers_unfiltered_and_top_k_paths():
+    args = SimpleNamespace(
+        sampling_batch=4,
+        vocab_size=16,
+        sampling_top_k=3,
+        warmup=0,
+        iterations=1,
+        repeats=1,
+    )
+
+    result = MODULE.benchmark_sampling_filter(
+        args,
+        torch.device("cpu"),
+        torch.bfloat16,
+    )
+
+    assert set(result) == {"unfiltered", "top_k"}
+    assert all(
+        item["avoided_full_sort_workspace_mib"] == 4 * 16 * 10 / 1024 / 1024
+        for item in result.values()
+    )
+    assert all(item["errors"][0]["max_abs_error"] == 0 for item in result.values())
+
+
 def test_router_benchmark_reuses_selected_logits_for_probabilities():
     args = SimpleNamespace(
         router_tokens=8,
