@@ -348,6 +348,10 @@ class BlockManagerLifecycleTest(unittest.TestCase):
         self.assertEqual(seq.block_table, [])
         self.assertIs(scheduler.waiting[0], seq)
         self.assertEqual(scheduler.block_manager.num_used_blocks, 0)
+        self.assertEqual(scheduler.preemption_count, 1)
+        self.assertEqual(scheduler.preempted_token_progress, 4)
+        self.assertEqual(scheduler.max_preempted_token_progress, 4)
+        self.assertEqual(scheduler.reclaimed_kv_blocks, 1)
         assert_block_conservation(self, scheduler.block_manager)
 
     def test_legacy_scheduler_does_not_admit_prefill_past_sequence_limit(self):

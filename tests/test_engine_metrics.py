@@ -86,16 +86,28 @@ class EngineMetricsTest(unittest.TestCase):
             total_kvcache_blocks=20,
             prefill_starved_steps=7,
             max_prefill_starvation_steps=4,
+            preemption_count=2,
+            preempted_token_progress=96,
+            max_preempted_token_progress=64,
+            reclaimed_kv_blocks=5,
         )
         result = metrics.to_dict()
 
         self.assertEqual(result["prefill_starved_steps"], 7)
         self.assertEqual(result["max_prefill_starvation_steps"], 4)
+        self.assertEqual(result["preemption_count"], 2)
+        self.assertEqual(result["preempted_token_progress"], 96)
+        self.assertEqual(result["max_preempted_token_progress"], 64)
+        self.assertEqual(result["reclaimed_kv_blocks"], 5)
 
         metrics.reset()
         result = metrics.to_dict()
         self.assertEqual(result["prefill_starved_steps"], 0)
         self.assertEqual(result["max_prefill_starvation_steps"], 0)
+        self.assertEqual(result["preemption_count"], 0)
+        self.assertEqual(result["preempted_token_progress"], 0)
+        self.assertEqual(result["max_preempted_token_progress"], 0)
+        self.assertEqual(result["reclaimed_kv_blocks"], 0)
 
 
 if __name__ == "__main__":

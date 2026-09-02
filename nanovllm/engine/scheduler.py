@@ -69,6 +69,10 @@ class Scheduler:
         self.prefill_starved_steps = 0
         self.current_prefill_starvation_steps = 0
         self.max_prefill_starvation_steps = 0
+        self.preemption_count = 0
+        self.preempted_token_progress = 0
+        self.max_preempted_token_progress = 0
+        self.reclaimed_kv_blocks = 0
 
     def is_finished(self):
         return not self.waiting and not self.running
@@ -356,13 +360,23 @@ class Scheduler:
         return scheduled_seqs
 
     def preempt(self, seq: Sequence):
+        discarded_tokens = seq.num_cached_tokens
+        used_blocks_before = self.block_manager.num_used_blocks
         seq.status = SequenceStatus.WAITING
         seq.is_prefill = True
         self.block_manager.deallocate(seq)
+        reclaimed_blocks = used_blocks_before - self.block_manager.num_used_blocks
         if self.state_manager is not None:
             self.state_manager.release(seq.seq_id)
             seq.state_slot = None
         self.waiting.appendleft(seq)
+        self.preemption_count += 1
+        self.preempted_token_progress += discarded_tokens
+        self.max_preempted_token_progress = max(
+            self.max_preempted_token_progress,
+            discarded_tokens,
+        )
+        self.reclaimed_kv_blocks += reclaimed_blocks
 
     def postprocess(self, seqs: list[Sequence], token_ids: list[int], is_prefill: bool):
         self._validate_sample_count(seqs, token_ids)

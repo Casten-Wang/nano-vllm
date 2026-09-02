@@ -30,6 +30,10 @@ class EngineMetrics:
     peak_kv_block_usage: float = 0.0
     prefill_starved_steps: int = 0
     max_prefill_starvation_steps: int = 0
+    preemption_count: int = 0
+    preempted_token_progress: int = 0
+    max_preempted_token_progress: int = 0
+    reclaimed_kv_blocks: int = 0
     request_ttfts: list[float] | None = None
     request_tpots: list[float] | None = None
     request_latencies: list[float] | None = None
@@ -58,6 +62,10 @@ class EngineMetrics:
         self.peak_kv_block_usage = 0.0
         self.prefill_starved_steps = 0
         self.max_prefill_starvation_steps = 0
+        self.preemption_count = 0
+        self.preempted_token_progress = 0
+        self.max_preempted_token_progress = 0
+        self.reclaimed_kv_blocks = 0
         self.request_ttfts.clear()
         self.request_tpots.clear()
         self.request_latencies.clear()
@@ -113,6 +121,10 @@ class EngineMetrics:
         total_kvcache_blocks: int,
         prefill_starved_steps: int = 0,
         max_prefill_starvation_steps: int = 0,
+        preemption_count: int = 0,
+        preempted_token_progress: int = 0,
+        max_preempted_token_progress: int = 0,
+        reclaimed_kv_blocks: int = 0,
     ):
         """Record queue and KV block high-water marks.
 
@@ -131,6 +143,10 @@ class EngineMetrics:
             )
         self.prefill_starved_steps = prefill_starved_steps
         self.max_prefill_starvation_steps = max_prefill_starvation_steps
+        self.preemption_count = preemption_count
+        self.preempted_token_progress = preempted_token_progress
+        self.max_preempted_token_progress = max_preempted_token_progress
+        self.reclaimed_kv_blocks = reclaimed_kv_blocks
 
     def record_finished_sequences(self, seqs):
         """Record request-level latency metrics for finished sequences.
@@ -211,6 +227,10 @@ class EngineMetrics:
             "peak_kv_block_usage": self.peak_kv_block_usage,
             "prefill_starved_steps": self.prefill_starved_steps,
             "max_prefill_starvation_steps": self.max_prefill_starvation_steps,
+            "preemption_count": self.preemption_count,
+            "preempted_token_progress": self.preempted_token_progress,
+            "max_preempted_token_progress": self.max_preempted_token_progress,
+            "reclaimed_kv_blocks": self.reclaimed_kv_blocks,
             "num_finished_requests": len(self.request_latencies),
             "avg_ttft_s": self._avg(self.request_ttfts),
             "max_ttft_s": self._max(self.request_ttfts),
