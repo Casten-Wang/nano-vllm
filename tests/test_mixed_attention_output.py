@@ -43,6 +43,7 @@ def load_attention_module():
         sys.modules[execution.__name__] = execution
         kv_quant = types.ModuleType("nanovllm.layers.kv_cache_quant")
         for name in (
+            "dequant_selected_kvcache_torch",
             "dequant_packed_kvcache",
             "store_kvcache",
             "store_kvcache_int8",

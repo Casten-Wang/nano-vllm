@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from importlib.util import module_from_spec, spec_from_file_location
 import json
+import math
 from pathlib import Path
 import statistics
 import sys
@@ -38,6 +39,10 @@ METADATA = load_source_module(
 MOE_DISPATCH = load_source_module(
     "qwen35_moe_dispatch_benchmark",
     "nanovllm/models/moe_dispatch.py",
+)
+KV_QUANT = load_source_module(
+    "qwen35_kv_quant_benchmark",
+    "nanovllm/layers/kv_cache_quant.py",
 )
 
 
@@ -269,6 +274,60 @@ def benchmark_residual_merge(args, device, dtype) -> dict:
         / 1024
     )
     result["residual_merges_per_decoder_layer"] = 2
+    return result
+
+
+def benchmark_torch_kv_dequant(args, device, dtype, num_kv_heads: int) -> dict:
+    block_size = 256
+    num_blocks = max(
+        1,
+        (args.prefill_tokens + block_size - 1) // block_size,
+    )
+    cache_shape = (
+        num_blocks,
+        block_size,
+        num_kv_heads,
+        args.key_head_dim,
+    )
+    k_cache = torch.randint(-127, 128, cache_shape, device=device, dtype=torch.int8)
+    v_cache = torch.randint(-127, 128, cache_shape, device=device, dtype=torch.int8)
+    scale_shape = cache_shape[:-1]
+    k_scale = torch.rand(scale_shape, device=device, dtype=torch.float16)
+    v_scale = torch.rand(scale_shape, device=device, dtype=torch.float16)
+    block_ids = torch.arange(num_blocks, device=device, dtype=torch.int32)
+
+    def reference():
+        ids = block_ids.long()
+        k = k_cache.index_select(0, ids).to(dtype)
+        v = v_cache.index_select(0, ids).to(dtype)
+        return (
+            k * k_scale.index_select(0, ids).unsqueeze(-1).to(dtype),
+            v * v_scale.index_select(0, ids).unsqueeze(-1).to(dtype),
+        )
+
+    def candidate():
+        return KV_QUANT.dequant_selected_kvcache_torch(
+            k_cache,
+            v_cache,
+            k_scale,
+            v_scale,
+            block_ids,
+            dtype,
+        )
+
+    result = compare(
+        reference,
+        candidate,
+        device=device,
+        warmup=args.warmup,
+        iterations=args.iterations,
+        repeats=args.repeats,
+    )
+    output_bytes = math.prod(cache_shape) * torch.empty(
+        (), dtype=dtype
+    ).element_size()
+    result["avoided_output_workspace_mib"] = 2 * output_bytes / 1024 / 1024
+    result["selected_blocks"] = num_blocks
     return result
 
 
@@ -1373,6 +1432,12 @@ def main() -> None:
                 args,
                 device,
                 dtype,
+            ),
+            "torch_kv_dequant_buffer_reuse": benchmark_torch_kv_dequant(
+                args,
+                device,
+                dtype,
+                local_key_heads,
             ),
             "expert_dispatch_torch": expert_dispatch,
             "moe_decode_chunk_recommendation": recommend_moe_decode_chunk_size(

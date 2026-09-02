@@ -3,6 +3,24 @@ import triton
 import triton.language as tl
 
 
+def dequant_selected_kvcache_torch(
+    k_cache: torch.Tensor,
+    v_cache: torch.Tensor,
+    k_scale: torch.Tensor,
+    v_scale: torch.Tensor,
+    selected_block_ids: torch.Tensor,
+    dtype: torch.dtype,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Gather selected INT8 blocks and dequantize in their output buffers."""
+
+    block_ids = selected_block_ids.to(device=k_cache.device, dtype=torch.long)
+    packed_k = k_cache.index_select(0, block_ids).to(dtype)
+    packed_v = v_cache.index_select(0, block_ids).to(dtype)
+    packed_k.mul_(k_scale.index_select(0, block_ids).unsqueeze(-1).to(dtype))
+    packed_v.mul_(v_scale.index_select(0, block_ids).unsqueeze(-1).to(dtype))
+    return packed_k, packed_v
+
+
 def _next_power_of_two(x: int) -> int:
     return 1 << (x - 1).bit_length()
 

@@ -115,6 +115,29 @@ def test_residual_merge_benchmark_measures_branch_reuse():
     assert result["errors"][0]["max_abs_error"] == 0
 
 
+def test_torch_kv_dequant_benchmark_measures_output_reuse():
+    args = SimpleNamespace(
+        prefill_tokens=256,
+        key_head_dim=8,
+        warmup=0,
+        iterations=1,
+        repeats=1,
+    )
+
+    result = MODULE.benchmark_torch_kv_dequant(
+        args,
+        torch.device("cpu"),
+        torch.bfloat16,
+        2,
+    )
+
+    assert result["selected_blocks"] == 1
+    assert result["avoided_output_workspace_mib"] == (
+        2 * 256 * 2 * 8 * 2 / 1024 / 1024
+    )
+    assert all(item["max_abs_error"] == 0 for item in result["errors"])
+
+
 def test_expert_dispatch_matches_naive_route_accumulation():
     torch.manual_seed(101)
     hidden = torch.randn(4, 3)

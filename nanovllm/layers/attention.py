@@ -4,6 +4,7 @@ from torch import nn
 from flash_attn import flash_attn_varlen_func, flash_attn_with_kvcache
 from nanovllm.engine.execution import select_int8_decode_attention_path
 from nanovllm.layers.kv_cache_quant import (
+    dequant_selected_kvcache_torch,
     dequant_packed_kvcache,
     store_kvcache,
     store_kvcache_int8,
@@ -124,12 +125,14 @@ class Attention(nn.Module):
             return self.k_cache, self.v_cache
 
         if self.kv_dequant_backend == "torch":
-            block_ids = dequant_block_ids.to(device=self.k_cache.device, dtype=torch.long)
-            k_cache = self.k_cache.index_select(0, block_ids).to(dtype)
-            v_cache = self.v_cache.index_select(0, block_ids).to(dtype)
-            k_scale = self.k_scale.index_select(0, block_ids).unsqueeze(-1).to(dtype)
-            v_scale = self.v_scale.index_select(0, block_ids).unsqueeze(-1).to(dtype)
-            return k_cache * k_scale, v_cache * v_scale
+            return dequant_selected_kvcache_torch(
+                self.k_cache,
+                self.v_cache,
+                self.k_scale,
+                self.v_scale,
+                dequant_block_ids,
+                dtype,
+            )
 
         packed_shape = (
             num_selected_blocks,

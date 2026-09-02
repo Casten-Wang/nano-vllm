@@ -1,5 +1,6 @@
 import importlib.util
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 
@@ -21,9 +22,13 @@ else:
         assert spec.loader is not None
         spec.loader.exec_module(module)
         store_kvcache_int8 = module.store_kvcache_int8
+        dequant_selected_kvcache_torch = (
+            module.dequant_selected_kvcache_torch
+        )
         IMPORT_ERROR = None
     except ModuleNotFoundError as exc:
         store_kvcache_int8 = None
+        dequant_selected_kvcache_torch = None
         IMPORT_ERROR = exc
 
 
@@ -39,6 +44,57 @@ def quantize_reference(tensor):
     )
     quantized = rounded.clamp(-127, 127).to(torch.int8)
     return quantized, scale
+
+
+@unittest.skipIf(
+    torch is None or IMPORT_ERROR is not None,
+    f"missing dependency: {IMPORT_ERROR}",
+)
+class TorchKVCacheDequantTest(unittest.TestCase):
+    def test_selected_dequant_reuses_gathered_output_storage(self):
+        k_cache = torch.tensor(
+            [[[[1, -2]]], [[[3, -4]]], [[[5, -6]]]],
+            dtype=torch.int8,
+        )
+        v_cache = -k_cache
+        k_scale = torch.tensor([[[0.5]], [[0.25]], [[2.0]]])
+        v_scale = torch.tensor([[[0.125]], [[1.5]], [[0.75]]])
+        selected = torch.tensor([2, 0], dtype=torch.int32)
+        original_k = k_cache.clone()
+        original_v = v_cache.clone()
+        scaled_ptrs = []
+        original_mul = torch.Tensor.mul_
+
+        def tracked_mul(tensor, other):
+            scaled_ptrs.append(tensor.data_ptr())
+            return original_mul(tensor, other)
+
+        with patch.object(
+            torch.Tensor,
+            "mul_",
+            tracked_mul,
+        ):
+            actual_k, actual_v = dequant_selected_kvcache_torch(
+                k_cache,
+                v_cache,
+                k_scale,
+                v_scale,
+                selected,
+                torch.float32,
+            )
+
+        expected_k = original_k[selected.long()].float() * k_scale[
+            selected.long()
+        ].unsqueeze(-1)
+        expected_v = original_v[selected.long()].float() * v_scale[
+            selected.long()
+        ].unsqueeze(-1)
+        torch.testing.assert_close(actual_k, expected_k)
+        torch.testing.assert_close(actual_v, expected_v)
+        self.assertIn(actual_k.data_ptr(), scaled_ptrs)
+        self.assertIn(actual_v.data_ptr(), scaled_ptrs)
+        self.assertTrue(torch.equal(k_cache, original_k))
+        self.assertTrue(torch.equal(v_cache, original_v))
 
 
 @unittest.skipIf(
