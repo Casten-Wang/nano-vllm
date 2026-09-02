@@ -43,7 +43,8 @@ class Scheduler:
     def __init__(self, config: Config):
         self.max_num_seqs = config.max_num_seqs
         self.max_num_batched_tokens = config.max_num_batched_tokens
-        self.eos = config.eos
+        eos = config.eos if isinstance(config.eos, tuple) else (config.eos,)
+        self.eos_token_ids = frozenset(eos)
         self.block_size = config.kvcache_block_size
         self.enable_dynamic_chunked_prefill = config.enable_dynamic_chunked_prefill
         self.block_manager = BlockManager(config.num_kvcache_blocks, config.kvcache_block_size)
@@ -319,7 +320,9 @@ class Scheduler:
         if seq.num_completion_tokens == 0:
             seq.first_token_time = perf_counter()
         seq.append_token(token_id)
-        if (not seq.ignore_eos and token_id == self.eos) or seq.num_completion_tokens == seq.max_tokens:
+        if (
+            not seq.ignore_eos and token_id in self.eos_token_ids
+        ) or seq.num_completion_tokens == seq.max_tokens:
             seq.finish_time = perf_counter()
             seq.status = SequenceStatus.FINISHED
             self.block_manager.deallocate(seq)

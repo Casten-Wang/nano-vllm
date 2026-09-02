@@ -8,7 +8,7 @@ from tqdm.auto import tqdm
 from transformers import AutoTokenizer
 import torch.multiprocessing as mp
 
-from nanovllm.config import Config
+from nanovllm.config import Config, resolve_eos_token_ids
 from nanovllm.sampling_params import SamplingParams
 from nanovllm.engine.sequence import Sequence
 from nanovllm.engine.scheduler import ScheduleResult, Scheduler
@@ -64,7 +64,10 @@ class LLMEngine:
             self.events.append((command_event, ack_event, status_buffer))
         self.model_runner = ModelRunner(config, 0, self.events)
         self.tokenizer = AutoTokenizer.from_pretrained(config.model, use_fast=True)
-        config.eos = self.tokenizer.eos_token_id
+        config.eos = resolve_eos_token_ids(
+            config.model,
+            self.tokenizer.eos_token_id,
+        )
         self.scheduler = Scheduler(config)
         self.metrics = EngineMetrics()
         atexit.register(self.exit)

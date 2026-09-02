@@ -1,9 +1,38 @@
+import json
 import os
 from dataclasses import dataclass
+from pathlib import Path
 import torch
 from transformers import AutoConfig
 
 from nanovllm.models.model_spec import ModelSpec, resolve_model_spec
+
+
+def resolve_eos_token_ids(
+    model: str,
+    fallback: int | list[int] | tuple[int, ...],
+) -> tuple[int, ...]:
+    """Resolve every generation EOS token from a local model directory."""
+
+    path = Path(model) / "generation_config.json"
+    value = fallback
+    if path.is_file():
+        with path.open(encoding="utf-8") as handle:
+            value = json.load(handle).get("eos_token_id", fallback)
+    if isinstance(value, bool):
+        raise ValueError("eos_token_id must contain integer token ids")
+    if isinstance(value, int):
+        values = (value,)
+    elif isinstance(value, (list, tuple)) and value:
+        values = tuple(value)
+    else:
+        raise ValueError("eos_token_id must be an integer or non-empty list")
+    if any(
+        isinstance(token_id, bool) or not isinstance(token_id, int)
+        for token_id in values
+    ):
+        raise ValueError("eos_token_id must contain integer token ids")
+    return tuple(dict.fromkeys(values))
 
 
 @dataclass(slots=True)
@@ -18,7 +47,7 @@ class Config:
     hf_config: AutoConfig | None = None
     model_config: object | None = None
     model_spec: ModelSpec | None = None
-    eos: int = -1
+    eos: int | tuple[int, ...] = -1
     kvcache_block_size: int = 256
     num_kvcache_blocks: int = -1
     kv_cache_dtype: str = "auto"

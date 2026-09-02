@@ -34,7 +34,7 @@ class FakeSamplingParams:
 class FakeConfig:
     max_num_seqs: int = 8
     max_num_batched_tokens: int = 8
-    eos: int = -1
+    eos: int | tuple[int, ...] = -1
     kvcache_block_size: int = 4
     num_kvcache_blocks: int = 8
     enable_dynamic_chunked_prefill: bool = True
@@ -156,6 +156,30 @@ class BlockManagerLifecycleTest(unittest.TestCase):
         self.assertEqual(seq.block_table, [])
         self.assertEqual(manager.num_used_blocks, 0)
         assert_block_conservation(self, manager)
+
+    def test_scheduler_stops_on_any_configured_eos_token(self):
+        for eos_token in (248046, 248044):
+            with self.subTest(eos_token=eos_token):
+                scheduler = Scheduler(FakeConfig(eos=(248046, 248044)))
+                params = types.SimpleNamespace(
+                    temperature=0.0,
+                    top_k=-1,
+                    top_p=1.0,
+                    max_tokens=8,
+                    ignore_eos=False,
+                )
+                seq = Sequence([1], params)
+                scheduler.block_manager.allocate(seq, num_cached_blocks=0)
+                seq.status = SequenceStatus.RUNNING
+                seq.is_prefill = False
+                seq.num_scheduled_tokens = 1
+                scheduler.running.append(seq)
+
+                scheduler.postprocess_one(seq, eos_token, is_prefill=False)
+
+                self.assertTrue(seq.is_finished)
+                self.assertEqual(seq.completion_token_ids, [eos_token])
+                self.assertNotIn(seq, scheduler.running)
 
     def test_hybrid_scheduler_disables_kv_only_prefix_reuse(self):
         config = FakeConfig(

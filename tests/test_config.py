@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+import json
 
 import pytest
 
@@ -68,3 +69,19 @@ def test_invalid_qwen35_moe_decode_chunk_size_is_rejected(monkeypatch, tmp_path)
             tmp_path,
             qwen35_moe_decode_chunk_size=0,
         )
+
+
+def test_generation_config_resolves_all_eos_tokens(tmp_path):
+    (tmp_path / "generation_config.json").write_text(
+        json.dumps({"eos_token_id": [248046, 248044, 248046]}),
+        encoding="utf-8",
+    )
+
+    assert config_module.resolve_eos_token_ids(str(tmp_path), 7) == (
+        248046,
+        248044,
+    )
+
+
+def test_generation_config_falls_back_to_tokenizer_eos(tmp_path):
+    assert config_module.resolve_eos_token_ids(str(tmp_path), 7) == (7,)
