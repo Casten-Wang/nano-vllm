@@ -203,6 +203,7 @@ def test_torch_kv_dequant_benchmark_measures_output_reuse():
     assert result["avoided_output_workspace_mib"] == (
         2 * 256 * 2 * 8 * 2 / 1024 / 1024
     )
+    assert result["avoided_block_id_cast_mib"] == 8 / 1024 / 1024
     assert all(item["max_abs_error"] == 0 for item in result["errors"])
 
 

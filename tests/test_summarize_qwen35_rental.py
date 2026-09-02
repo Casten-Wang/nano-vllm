@@ -426,6 +426,7 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
                     "speedup": 1.1,
                     "errors": [{"max_abs_error": 0.0}],
                     "avoided_output_workspace_mib": 16.0,
+                    "avoided_block_id_cast_mib": 0.01,
                 },
                 "specialized_delta_decode": {
                     "reference": {"peak_extra_mib": 24.0},

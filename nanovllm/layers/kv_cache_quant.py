@@ -13,7 +13,12 @@ def dequant_selected_kvcache_torch(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Gather selected INT8 blocks and dequantize in their output buffers."""
 
-    block_ids = selected_block_ids.to(device=k_cache.device, dtype=torch.long)
+    if selected_block_ids.device != k_cache.device:
+        block_ids = selected_block_ids.to(device=k_cache.device)
+    else:
+        block_ids = selected_block_ids
+    if block_ids.dtype not in (torch.int32, torch.int64):
+        raise ValueError("selected block ids must use int32 or int64")
     packed_k = k_cache.index_select(0, block_ids).to(dtype)
     packed_v = v_cache.index_select(0, block_ids).to(dtype)
     packed_k.mul_(k_scale.index_select(0, block_ids).unsqueeze(-1).to(dtype))

@@ -330,6 +330,9 @@ def benchmark_torch_kv_dequant(args, device, dtype, num_kv_heads: int) -> dict:
         (), dtype=dtype
     ).element_size()
     result["avoided_output_workspace_mib"] = 2 * output_bytes / 1024 / 1024
+    result["avoided_block_id_cast_mib"] = (
+        block_ids.numel() * 8 / 1024 / 1024
+    )
     result["selected_blocks"] = num_blocks
     return result
 

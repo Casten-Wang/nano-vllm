@@ -761,7 +761,10 @@ def summarize(run_dir: Path, run_id: str) -> dict:
             ),
             "torch_kv_dequant": summarize_buffer_reuse_candidate(
                 result["results"]["torch_kv_dequant_buffer_reuse"],
-                ("avoided_output_workspace_mib",),
+                (
+                    "avoided_output_workspace_mib",
+                    "avoided_block_id_cast_mib",
+                ),
             ),
             "recurrent_decode": summarize_buffer_reuse_candidate(
                 result["results"]["specialized_delta_decode"],

@@ -63,16 +63,25 @@ class TorchKVCacheDequantTest(unittest.TestCase):
         original_k = k_cache.clone()
         original_v = v_cache.clone()
         scaled_ptrs = []
+        observed_indices = []
         original_mul = torch.Tensor.mul_
+        original_index_select = torch.Tensor.index_select
 
         def tracked_mul(tensor, other):
             scaled_ptrs.append(tensor.data_ptr())
             return original_mul(tensor, other)
 
-        with patch.object(
-            torch.Tensor,
-            "mul_",
-            tracked_mul,
+        def tracked_index_select(tensor, dim, index):
+            observed_indices.append(index)
+            return original_index_select(tensor, dim, index)
+
+        with (
+            patch.object(torch.Tensor, "mul_", tracked_mul),
+            patch.object(
+                torch.Tensor,
+                "index_select",
+                tracked_index_select,
+            ),
         ):
             actual_k, actual_v = dequant_selected_kvcache_torch(
                 k_cache,
@@ -93,6 +102,8 @@ class TorchKVCacheDequantTest(unittest.TestCase):
         torch.testing.assert_close(actual_v, expected_v)
         self.assertIn(actual_k.data_ptr(), scaled_ptrs)
         self.assertIn(actual_v.data_ptr(), scaled_ptrs)
+        self.assertTrue(observed_indices)
+        self.assertTrue(all(index is selected for index in observed_indices))
         self.assertTrue(torch.equal(k_cache, original_k))
         self.assertTrue(torch.equal(v_cache, original_v))
 
