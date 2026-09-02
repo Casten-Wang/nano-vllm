@@ -4,6 +4,10 @@ import sys
 
 import pytest
 import torch
+from transformers import Qwen3_5MoeTextConfig
+from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import (
+    Qwen3_5MoeTextRotaryEmbedding,
+)
 
 
 MODULE_PATH = (
@@ -89,3 +93,36 @@ def test_inplace_rotary_request_preserves_autograd_input():
 def test_invalid_rotary_dimension_is_rejected(rotary_dim):
     with pytest.raises(ValueError, match="rotary_dim"):
         rotary.RotaryEmbedding(8, rotary_dim, 32, 10_000)
+
+
+def test_qwen35_text_rope_matches_interleaved_mrope_at_long_positions():
+    config = Qwen3_5MoeTextConfig(
+        hidden_size=2048,
+        num_attention_heads=16,
+        head_dim=256,
+        max_position_embeddings=262_144,
+        rope_parameters={
+            "rope_type": "default",
+            "rope_theta": 10_000_000.0,
+            "partial_rotary_factor": 0.25,
+            "mrope_section": [11, 11, 10],
+            "mrope_interleaved": True,
+        },
+    )
+    positions = torch.tensor([[0, 1, 4095, 65_535, 262_143]])
+    reference = Qwen3_5MoeTextRotaryEmbedding(config)
+    reference_cos, reference_sin = reference(
+        torch.zeros(1, positions.shape[1], 1, config.head_dim),
+        positions,
+    )
+    local = rotary.RotaryEmbedding(
+        config.head_dim,
+        rotary_dim=64,
+        max_position_embeddings=config.max_position_embeddings,
+        base=10_000_000.0,
+    )
+    cached = local.cos_sin_cache[positions[0]].squeeze(1)
+    actual_cos, actual_sin = cached.chunk(2, dim=-1)
+
+    torch.testing.assert_close(actual_cos, reference_cos[0, :, :32])
+    torch.testing.assert_close(actual_sin, reference_sin[0, :, :32])
