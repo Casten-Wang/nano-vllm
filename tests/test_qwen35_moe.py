@@ -92,6 +92,66 @@ def test_router_topk_first_matches_full_softmax_reference():
     )
 
 
+def _official_router_reference(logits, top_k):
+    probabilities = torch.softmax(logits, dtype=torch.float, dim=-1)
+    weights, ids = torch.topk(probabilities, top_k, dim=-1)
+    weights = weights / weights.sum(dim=-1, keepdim=True)
+    return weights.to(logits.dtype), ids
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_router_topk_first_matches_official_weights_and_gradients(dtype):
+    torch.manual_seed(37)
+    router = qwen35_moe.Qwen35TopKRouter(8, 32, 4).to(dtype)
+    router.weight.data.normal_(mean=0.0, std=0.15)
+    hidden = torch.randn(7, 8, dtype=dtype, requires_grad=True)
+
+    weights, ids = router(hidden)
+    actual_loss = (weights.float() ** 2).sum()
+    actual_grad = torch.autograd.grad(actual_loss, hidden)[0]
+
+    reference_hidden = hidden.detach().clone().requires_grad_(True)
+    logits = torch.nn.functional.linear(reference_hidden, router.weight)
+    expected_weights, expected_ids = _official_router_reference(logits, 4)
+    expected_loss = (expected_weights.float() ** 2).sum()
+    expected_grad = torch.autograd.grad(expected_loss, reference_hidden)[0]
+
+    assert torch.equal(ids, expected_ids)
+    torch.testing.assert_close(weights, expected_weights, rtol=4e-3, atol=4e-3)
+    torch.testing.assert_close(actual_grad, expected_grad, rtol=8e-3, atol=8e-3)
+
+
+def test_router_extreme_logits_preserve_official_nonzero_routes():
+    router = qwen35_moe.Qwen35TopKRouter(1, 4, 3)
+    router.weight.data.copy_(torch.tensor([[1000.0], [600.0], [800.0], [700.0]]))
+    hidden = torch.ones(1, 1)
+
+    weights, ids = router(hidden)
+    logits = torch.nn.functional.linear(hidden, router.weight)
+    expected_weights, expected_ids = _official_router_reference(logits, 3)
+    actual_by_expert = torch.zeros_like(logits).scatter(1, ids, weights)
+    expected_by_expert = torch.zeros_like(logits).scatter(
+        1, expected_ids, expected_weights
+    )
+
+    # Full softmax may choose different experts among probabilities that
+    # underflowed to zero. Their contribution is zero in either formulation.
+    torch.testing.assert_close(actual_by_expert, expected_by_expert)
+
+
+def test_router_tied_logits_match_official_selection():
+    router = qwen35_moe.Qwen35TopKRouter(1, 4, 2)
+    router.weight.data.copy_(torch.tensor([[2.0], [2.0], [1.0], [0.0]]))
+    hidden = torch.ones(1, 1)
+
+    weights, ids = router(hidden)
+    logits = torch.nn.functional.linear(hidden, router.weight)
+    expected_weights, expected_ids = _official_router_reference(logits, 2)
+
+    assert torch.equal(ids, expected_ids)
+    torch.testing.assert_close(weights, expected_weights)
+
+
 def test_router_softmax_only_materializes_selected_experts():
     router = qwen35_moe.Qwen35TopKRouter(4, 256, 8)
     hidden = torch.randn(11, 4)
