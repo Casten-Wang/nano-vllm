@@ -1,6 +1,7 @@
 import importlib.util
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -108,6 +109,40 @@ class EngineMetricsTest(unittest.TestCase):
         self.assertEqual(result["preempted_token_progress"], 0)
         self.assertEqual(result["max_preempted_token_progress"], 0)
         self.assertEqual(result["reclaimed_kv_blocks"], 0)
+
+    def test_request_latency_percentiles_capture_tail_distribution(self):
+        metrics = EngineMetrics()
+        sequences = []
+        for latency in (1.0, 2.0, 3.0, 10.0):
+            sequences.append(
+                SimpleNamespace(
+                    arrival_time=0.0,
+                    first_token_time=latency / 2,
+                    finish_time=latency,
+                    num_completion_tokens=2,
+                )
+            )
+
+        metrics.record_finished_sequences(sequences)
+        result = metrics.to_dict()
+
+        self.assertEqual(result["num_finished_requests"], 4)
+        self.assertEqual(result["p50_ttft_s"], 1.25)
+        self.assertAlmostEqual(result["p95_ttft_s"], 4.475)
+        self.assertAlmostEqual(result["p99_ttft_s"], 4.895)
+        self.assertEqual(result["p50_tpot_s"], 1.25)
+        self.assertAlmostEqual(result["p95_tpot_s"], 4.475)
+        self.assertAlmostEqual(result["p99_tpot_s"], 4.895)
+        self.assertEqual(result["p50_request_latency_s"], 2.5)
+        self.assertAlmostEqual(result["p95_request_latency_s"], 8.95)
+        self.assertAlmostEqual(result["p99_request_latency_s"], 9.79)
+
+    def test_empty_request_latency_percentiles_are_zero(self):
+        result = EngineMetrics().to_dict()
+
+        for metric in ("ttft", "tpot", "request_latency"):
+            for percentile in ("p50", "p95", "p99"):
+                self.assertEqual(result[f"{percentile}_{metric}_s"], 0.0)
 
 
 if __name__ == "__main__":

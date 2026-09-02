@@ -642,11 +642,32 @@ def summarize_kv_pressure_case(
         and result.get("execution_validation", {}).get("valid") is True
         and result.get("generation_validation", {}).get("valid") is True
     )
+    latency_metric_names = (
+        "p50_ttft_s",
+        "p95_ttft_s",
+        "p99_ttft_s",
+        "p50_tpot_s",
+        "p95_tpot_s",
+        "p99_tpot_s",
+        "p50_request_latency_s",
+        "p95_request_latency_s",
+        "p99_request_latency_s",
+    )
+    latency_metrics_valid = all(
+        isinstance(metrics.get(name), (int, float)) and metrics[name] >= 0
+        for name in latency_metric_names
+    )
     return {
-        "valid": configuration_valid and preemption_observed and completion_valid,
+        "valid": (
+            configuration_valid
+            and preemption_observed
+            and completion_valid
+            and latency_metrics_valid
+        ),
         "configuration_valid": configuration_valid,
         "preemption_observed": preemption_observed,
         "completion_valid": completion_valid,
+        "latency_metrics_valid": latency_metrics_valid,
         "preemption_count": metrics.get("preemption_count"),
         "preempted_token_progress": metrics.get("preempted_token_progress"),
         "max_preempted_token_progress": metrics.get(
@@ -660,8 +681,19 @@ def summarize_kv_pressure_case(
             "digest"
         ),
         "avg_ttft_s": metrics.get("avg_ttft_s"),
+        "p50_ttft_s": metrics.get("p50_ttft_s"),
+        "p95_ttft_s": metrics.get("p95_ttft_s"),
+        "p99_ttft_s": metrics.get("p99_ttft_s"),
         "max_ttft_s": metrics.get("max_ttft_s"),
+        "avg_tpot_s": metrics.get("avg_tpot_s"),
+        "p50_tpot_s": metrics.get("p50_tpot_s"),
+        "p95_tpot_s": metrics.get("p95_tpot_s"),
+        "p99_tpot_s": metrics.get("p99_tpot_s"),
+        "max_tpot_s": metrics.get("max_tpot_s"),
         "avg_request_latency_s": metrics.get("avg_request_latency_s"),
+        "p50_request_latency_s": metrics.get("p50_request_latency_s"),
+        "p95_request_latency_s": metrics.get("p95_request_latency_s"),
+        "p99_request_latency_s": metrics.get("p99_request_latency_s"),
         "max_request_latency_s": metrics.get("max_request_latency_s"),
     }
 
@@ -1399,6 +1431,24 @@ def summarize(run_dir: Path, run_id: str) -> dict:
         )
         baseline_progress = baseline["preempted_token_progress"]
         candidate_progress = candidate["preempted_token_progress"]
+        latency_ratios = {
+            name: (
+                candidate[name] / baseline[name]
+                if baseline[name]
+                else None
+            )
+            for name in (
+                "p50_ttft_s",
+                "p95_ttft_s",
+                "p99_ttft_s",
+                "p50_tpot_s",
+                "p95_tpot_s",
+                "p99_tpot_s",
+                "p50_request_latency_s",
+                "p95_request_latency_s",
+                "p99_request_latency_s",
+            )
+        }
         kv_pressure_comparisons[tp_name] = {
             "valid": (
                 baseline["valid"]
@@ -1415,6 +1465,19 @@ def summarize(run_dir: Path, run_id: str) -> dict:
                 baseline["total_time_s"] / candidate["total_time_s"]
                 if baseline["total_time_s"] and candidate["total_time_s"]
                 else None
+            ),
+            "candidate_latency_vs_fcfs": latency_ratios,
+            "tail_latency_non_regressing": all(
+                latency_ratios[name] is not None
+                and latency_ratios[name] <= 1.0
+                for name in (
+                    "p95_ttft_s",
+                    "p99_ttft_s",
+                    "p95_tpot_s",
+                    "p99_tpot_s",
+                    "p95_request_latency_s",
+                    "p99_request_latency_s",
+                )
             ),
         }
     for path in mixed_paths:

@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import math
 
 
 @dataclass(slots=True)
@@ -181,6 +182,23 @@ class EngineMetrics:
             return 0.0
         return max(values)
 
+    @staticmethod
+    def _percentile(values: list[float], percentile: float) -> float:
+        """Return a linearly interpolated percentile over observed requests."""
+
+        if not values:
+            return 0.0
+        if not 0.0 <= percentile <= 1.0:
+            raise ValueError("percentile must be between 0 and 1")
+        ordered = sorted(values)
+        index = (len(ordered) - 1) * percentile
+        lower = math.floor(index)
+        upper = math.ceil(index)
+        if lower == upper:
+            return ordered[lower]
+        fraction = index - lower
+        return ordered[lower] + (ordered[upper] - ordered[lower]) * fraction
+
     @property
     def pure_prefill_throughput(self) -> float:
         if self.pure_prefill_time == 0.0:
@@ -233,9 +251,27 @@ class EngineMetrics:
             "reclaimed_kv_blocks": self.reclaimed_kv_blocks,
             "num_finished_requests": len(self.request_latencies),
             "avg_ttft_s": self._avg(self.request_ttfts),
+            "p50_ttft_s": self._percentile(self.request_ttfts, 0.50),
+            "p95_ttft_s": self._percentile(self.request_ttfts, 0.95),
+            "p99_ttft_s": self._percentile(self.request_ttfts, 0.99),
             "max_ttft_s": self._max(self.request_ttfts),
             "avg_tpot_s": self._avg(self.request_tpots),
+            "p50_tpot_s": self._percentile(self.request_tpots, 0.50),
+            "p95_tpot_s": self._percentile(self.request_tpots, 0.95),
+            "p99_tpot_s": self._percentile(self.request_tpots, 0.99),
             "max_tpot_s": self._max(self.request_tpots),
             "avg_request_latency_s": self._avg(self.request_latencies),
+            "p50_request_latency_s": self._percentile(
+                self.request_latencies,
+                0.50,
+            ),
+            "p95_request_latency_s": self._percentile(
+                self.request_latencies,
+                0.95,
+            ),
+            "p99_request_latency_s": self._percentile(
+                self.request_latencies,
+                0.99,
+            ),
             "max_request_latency_s": self._max(self.request_latencies),
         }

@@ -232,8 +232,19 @@ def write_pressure_case(root):
                 "max_preempted_token_progress": max_progress,
                 "reclaimed_kv_blocks": reclaimed,
                 "avg_ttft_s": 1.0,
+                "p50_ttft_s": 0.8,
+                "p95_ttft_s": 1.8 if policy == "fcfs" else 1.5,
+                "p99_ttft_s": 1.95 if policy == "fcfs" else 1.7,
                 "max_ttft_s": 2.0,
+                "avg_tpot_s": 0.2,
+                "p50_tpot_s": 0.18,
+                "p95_tpot_s": 0.3 if policy == "fcfs" else 0.25,
+                "p99_tpot_s": 0.35 if policy == "fcfs" else 0.3,
+                "max_tpot_s": 0.4,
                 "avg_request_latency_s": 5.0,
+                "p50_request_latency_s": 4.0,
+                "p95_request_latency_s": 9.0 if policy == "fcfs" else 8.0,
+                "p99_request_latency_s": 9.8 if policy == "fcfs" else 9.0,
                 "max_request_latency_s": 10.0,
             },
             "execution_validation": {"valid": True},
@@ -983,6 +994,10 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     assert comparison["valid"]
     assert comparison["recomputed_token_reduction"] == 1280
     assert comparison["elapsed_speedup"] == 1.25
+    assert comparison["tail_latency_non_regressing"]
+    assert comparison["candidate_latency_vs_fcfs"]["p95_ttft_s"] == (
+        1.5 / 1.8
+    )
     candidate_pressure_path = tmp_path / "pressure/tp4/min_recompute.json"
     candidate_pressure = json.loads(candidate_pressure_path.read_text())
     candidate_pressure["generated_token_ids"]["digest"] = "different"
