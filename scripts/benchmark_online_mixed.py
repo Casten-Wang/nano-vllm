@@ -43,6 +43,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-num-batched-tokens", type=int, default=256)
     parser.add_argument("--max-num-seqs", type=int, default=16)
     parser.add_argument(
+        "--num-kvcache-blocks-override",
+        type=int,
+        default=None,
+        help="Cap KV blocks to create a reproducible memory-pressure workload.",
+    )
+    parser.add_argument(
         "--tensor-parallel-size",
         type=int,
         choices=(1, 2, 4, 8),
@@ -116,6 +122,7 @@ def main() -> None:
         max_model_len=args.max_model_len,
         max_num_batched_tokens=args.max_num_batched_tokens,
         max_num_seqs=args.max_num_seqs,
+        num_kvcache_blocks_override=args.num_kvcache_blocks_override,
         tensor_parallel_size=args.tensor_parallel_size,
         qwen35_moe_decode_backend=args.qwen35_moe_decode_backend,
         kv_cache_dtype=args.kv_cache_dtype,
@@ -277,6 +284,7 @@ def main() -> None:
         "max_model_len": args.max_model_len,
         "max_num_batched_tokens": args.max_num_batched_tokens,
         "max_num_seqs": args.max_num_seqs,
+        "num_kvcache_blocks_override": args.num_kvcache_blocks_override,
         "tensor_parallel_size": args.tensor_parallel_size,
         "qwen35_moe_decode_backend": args.qwen35_moe_decode_backend,
         "seed": args.seed,

@@ -560,6 +560,9 @@ class ModelRunner:
                 "no KV cache blocks are available on all tensor-parallel ranks "
                 f"(local rank {self.rank} computed {local_num_blocks})"
             )
+        override = self.config.num_kvcache_blocks_override
+        if override is not None:
+            shared_num_blocks = min(shared_num_blocks, override)
         return shared_num_blocks
 
     def warmup_model(self):

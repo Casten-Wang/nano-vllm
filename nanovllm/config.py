@@ -50,6 +50,7 @@ class Config:
     eos: int | tuple[int, ...] = -1
     kvcache_block_size: int = 256
     num_kvcache_blocks: int = -1
+    num_kvcache_blocks_override: int | None = None
     kv_cache_dtype: str = "auto"
     kv_dequant_backend: str = "fused"
     sliding_window_size: int | None = None
@@ -77,6 +78,11 @@ class Config:
             raise ValueError("gpu_memory_utilization must be in (0, 1]")
         if self.kvcache_block_size <= 0 or self.kvcache_block_size % 256 != 0:
             raise ValueError("kvcache_block_size must be a positive multiple of 256")
+        if (
+            self.num_kvcache_blocks_override is not None
+            and self.num_kvcache_blocks_override <= 0
+        ):
+            raise ValueError("num_kvcache_blocks_override must be positive")
         if not 1 <= self.tensor_parallel_size <= 8:
             raise ValueError("tensor_parallel_size must be in [1, 8]")
         if self.kv_cache_dtype not in ("auto", "int8"):

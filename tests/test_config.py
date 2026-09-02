@@ -78,6 +78,11 @@ def test_invalid_qwen35_moe_decode_chunk_size_is_rejected(monkeypatch, tmp_path)
         )
 
 
+def test_invalid_kv_block_override_is_rejected(monkeypatch, tmp_path):
+    with pytest.raises(ValueError, match="num_kvcache_blocks_override"):
+        make_config(monkeypatch, tmp_path, num_kvcache_blocks_override=0)
+
+
 def test_negative_prefill_starvation_threshold_is_rejected(monkeypatch, tmp_path):
     with pytest.raises(ValueError, match="prefill_starvation_threshold"):
         make_config(

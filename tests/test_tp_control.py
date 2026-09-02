@@ -183,6 +183,38 @@ def make_runner(rank: int, events):
 
 
 class TPControlTest(unittest.TestCase):
+    def test_kv_block_override_caps_synchronized_capacity(self):
+        runner = object.__new__(ModelRunner)
+        runner.rank = 0
+        runner.world_size = 1
+        runner.config = SimpleNamespace(num_kvcache_blocks_override=7)
+
+        class FakeCount:
+            def __init__(self, values, **_kwargs):
+                self.value = values[0]
+
+            def item(self):
+                return self.value
+
+        original_tensor = model_runner_module.torch.tensor
+        original_cuda = getattr(model_runner_module.torch, "cuda", None)
+        original_device = getattr(model_runner_module.torch, "device", None)
+        model_runner_module.torch.tensor = FakeCount
+        model_runner_module.torch.cuda = SimpleNamespace(current_device=lambda: 0)
+        model_runner_module.torch.device = lambda *_args: "cuda:0"
+        try:
+            self.assertEqual(runner._synchronize_kv_block_count(12), 7)
+        finally:
+            model_runner_module.torch.tensor = original_tensor
+            if original_cuda is None:
+                del model_runner_module.torch.cuda
+            else:
+                model_runner_module.torch.cuda = original_cuda
+            if original_device is None:
+                del model_runner_module.torch.device
+            else:
+                model_runner_module.torch.device = original_device
+
     def test_initial_cache_capacity_reserves_state_and_one_kv_block(self):
         remaining = validate_initial_cache_capacity(
             free_bytes=900,
