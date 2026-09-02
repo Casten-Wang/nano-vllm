@@ -298,6 +298,34 @@ def test_memory_preflight_respects_runtime_utilization_limit():
         )
 
 
+def test_memory_preflight_clamps_rope_cache_to_model_limit():
+    report = {
+        "results": {
+            "tp1": {
+                "local_parameter_bytes": 1,
+                "model_max_position_embeddings": 1024,
+                "rotary_cache_bytes_per_position": 8,
+                "kv_bytes_per_token": 1,
+                "state_bytes_per_sequence": {"float32": 0, "model": 0},
+            }
+        }
+    }
+
+    result = MODULE.validate_memory_capacity(
+        report,
+        (1,),
+        [{"free": 1_000_000, "total": 1_000_000}],
+        0,
+        1,
+        1,
+        1,
+        1.0,
+        configured_max_model_len=4096,
+    )["results"]["tp1"]
+
+    assert result["rotary_cache_bytes_per_rank"] == 1024 * 8
+
+
 def test_memory_preflight_reports_fixed_memory_shortfall():
     report = {
         "results": {

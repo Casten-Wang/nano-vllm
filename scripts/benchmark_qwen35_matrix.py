@@ -288,10 +288,11 @@ def validate_memory_capacity(
             raise ValueError(
                 f"checkpoint audit has no TP={tp_size} model context limit"
             )
-        runtime_limit = (
+        runtime_limit = min(
             configured_max_model_len
             if configured_max_model_len is not None
-            else model_max_position_embeddings
+            else model_max_position_embeddings,
+            model_max_position_embeddings,
         )
         rotary_bytes = audit.get("rotary_cache_bytes_per_position", 0) * runtime_limit
         kv_sizes = audit.get("kv_bytes_per_token_by_dtype")
