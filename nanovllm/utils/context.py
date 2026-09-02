@@ -31,15 +31,32 @@ def build_state_prefill_groups(
         )
     result = []
     for sequence_length, ranges in grouped.items():
-        slot_indices = state_slots.new_tensor(
-            [slot_index for _, _, slot_index in ranges],
-            dtype=torch.long,
+        slot_positions = [slot_index for _, _, slot_index in ranges]
+        first_slot_position = slot_positions[0]
+        positions_are_contiguous = all(
+            position == first_slot_position + index
+            for index, position in enumerate(slot_positions)
         )
+        if positions_are_contiguous:
+            grouped_slots = state_slots.narrow(
+                0,
+                first_slot_position,
+                len(slot_positions),
+            ).to(torch.long)
+        else:
+            slot_indices = state_slots.new_tensor(
+                slot_positions,
+                dtype=torch.long,
+            )
+            grouped_slots = state_slots.index_select(
+                0,
+                slot_indices,
+            ).to(torch.long)
         result.append(
             (
                 sequence_length,
                 tuple(ranges),
-                state_slots.index_select(0, slot_indices).to(torch.long),
+                grouped_slots,
             )
         )
     return tuple(result)

@@ -24,6 +24,37 @@ def test_state_prefill_groups_reuse_slots_for_equal_length_sequences():
     assert torch.equal(groups[1][2], torch.tensor([7]))
 
 
+def test_contiguous_state_prefill_group_reuses_slot_storage():
+    slots = torch.tensor([9, 4, 7], dtype=torch.int64)
+    ranges = ((1, 4), (4, 7))
+
+    groups = build_state_prefill_groups(
+        ranges,
+        slots,
+        decode_token_count=1,
+    )
+
+    assert len(groups) == 1
+    assert torch.equal(groups[0][2], torch.tensor([4, 7]))
+    assert groups[0][2].data_ptr() == slots[1:].data_ptr()
+
+
+def test_interleaved_state_prefill_group_keeps_indexed_fallback():
+    slots = torch.tensor([9, 4, 7, 2], dtype=torch.int64)
+    ranges = ((1, 4), (4, 5), (5, 8))
+
+    groups = build_state_prefill_groups(
+        ranges,
+        slots,
+        decode_token_count=1,
+    )
+
+    assert torch.equal(groups[0][2], torch.tensor([4, 2]))
+    assert groups[0][2].untyped_storage().data_ptr() != (
+        slots.untyped_storage().data_ptr()
+    )
+
+
 def test_set_context_precomputes_recurrent_prefill_groups():
     try:
         set_context(
