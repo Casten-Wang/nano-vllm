@@ -159,8 +159,8 @@ def test_remote_prefill_reserves_resources_until_all_ranks_commit():
     assert seq.state_slot is not None
     assert scheduler.block_manager.num_used_blocks == 2
     assert not scheduler.is_finished()
-    with pytest.raises(RuntimeError, match="still pending"):
-        scheduler.schedule()
+    idle = scheduler.schedule()
+    assert idle == ScheduleResult(prefill_seqs=[], decode_seqs=[])
 
     session.acknowledge(0, now=11.0)
     session.acknowledge(1, now=11.0)
@@ -177,6 +177,22 @@ def test_remote_prefill_reserves_resources_until_all_ranks_commit():
     assert list(scheduler.running) == [seq]
     assert scheduler.block_manager.num_used_blocks == 2
     assert scheduler.state_manager.num_used_slots == 1
+
+
+def test_legacy_scheduler_can_idle_while_remote_prefill_is_pending():
+    scheduler = make_scheduler(
+        max_tokens=8,
+        max_seqs=1,
+        block_size=4,
+        num_blocks=2,
+        hybrid=True,
+    )
+    scheduler.enable_dynamic_chunked_prefill = False
+    seq = Sequence([1, 2, 3, 4])
+    scheduler.add(seq)
+    scheduler.reserve_remote_prefill(seq, make_transfer(tp_size=1))
+
+    assert scheduler.schedule() == ([], False)
 
 
 def test_failed_remote_prefill_releases_resources_and_requeues_locally():

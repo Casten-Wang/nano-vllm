@@ -195,8 +195,6 @@ class Scheduler:
         return seq
 
     def schedule(self) -> tuple[list[Sequence], bool] | ScheduleResult:
-        if not self.waiting and not self.running and self.remote_prefills:
-            raise RuntimeError("remote prefill transfer is still pending")
         waiting_before = len(self.waiting)
         if self.enable_dynamic_chunked_prefill:
             result = self.schedule_dynamic_chunked_prefill()
@@ -285,7 +283,10 @@ class Scheduler:
                 seq.is_prefill = False
                 self.block_manager.may_append(seq)
                 scheduled_seqs.append(seq)
-        assert scheduled_seqs
+        if not scheduled_seqs:
+            if self.remote_prefills:
+                return [], False
+            raise RuntimeError("scheduler has no runnable sequence")
         self.running.extendleft(reversed(scheduled_seqs))
         return scheduled_seqs, False
 
@@ -339,6 +340,8 @@ class Scheduler:
             self.running.extend(decode_seqs)
             self.running.extend(newly_admitted)
         if not decode_seqs and not prefill_seqs:
+            if self.remote_prefills:
+                return ScheduleResult(prefill_seqs=[], decode_seqs=[])
             if self.waiting:
                 seq = self.waiting[0]
                 raise RuntimeError(

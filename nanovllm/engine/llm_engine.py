@@ -130,6 +130,7 @@ class LLMEngine:
         self.scheduler.add(seq)
 
     def step(self):
+        self.scheduler.poll_remote_prefills(now=perf_counter())
         schedule_result = self.scheduler.schedule()
         if isinstance(schedule_result, ScheduleResult):
             seqs = schedule_result.seqs
@@ -154,6 +155,8 @@ class LLMEngine:
             self.scheduler.max_preempted_token_progress,
             self.scheduler.reclaimed_kv_blocks,
         )
+        if not seqs:
+            return [], 0, 0, 0
         if isinstance(schedule_result, ScheduleResult) and schedule_result.is_mixed:
             token_ids = self.model_runner.call("run_mixed", schedule_result.prefill_seqs, schedule_result.decode_seqs)
             self.scheduler.postprocess_mixed(schedule_result, token_ids)
