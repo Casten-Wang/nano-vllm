@@ -16,6 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 MATRIX_SCRIPT = ROOT / "scripts" / "benchmark_qwen35_matrix.py"
 KERNEL_SCRIPT = ROOT / "scripts" / "benchmark_qwen35_kernels.py"
 ATTENTION_KERNEL_SCRIPT = ROOT / "scripts" / "benchmark_attention_kernel.py"
+CACHE_TRANSFER_SCRIPT = ROOT / "scripts" / "benchmark_cache_transfer.py"
 QUALITY_SCRIPT = ROOT / "scripts" / "benchmark_qwen35_quality_matrix.py"
 ONLINE_MIXED_SCRIPT = ROOT / "scripts" / "benchmark_online_mixed.py"
 SUMMARY_SCRIPT = ROOT / "scripts" / "summarize_qwen35_rental.py"
@@ -170,6 +171,39 @@ def commands(args: argparse.Namespace) -> list[tuple[str, list[str]]]:
         )
     ]
     for tp_size in args.tp_sizes:
+        for kv_dtype, state_dtype in (
+            ("auto", "float32"),
+            ("int8", "model"),
+        ):
+            profile_name = f"{kv_dtype}-{state_dtype}"
+            result.append(
+                (
+                    f"pd-transfer-{profile_name}-tp{tp_size}",
+                    [
+                        sys.executable,
+                        str(CACHE_TRANSFER_SCRIPT),
+                        "--memory-preflight",
+                        str(root / "preflight" / "memory_preflight.json"),
+                        "--tp-size",
+                        str(tp_size),
+                        "--kv-dtype",
+                        kv_dtype,
+                        "--state-dtype",
+                        state_dtype,
+                        "--warmup",
+                        "2",
+                        "--repeats",
+                        "10",
+                        "--output",
+                        str(
+                            root
+                            / "pd_transfer"
+                            / f"tp{tp_size}"
+                            / f"{profile_name}.json"
+                        ),
+                    ],
+                )
+            )
         local_query_heads = 16 // tp_size
         result.append(
             (
@@ -545,6 +579,12 @@ def collect_stage_artifacts(
     elif stage_name.startswith("kernels-tp"):
         required = [root / "kernels" / f"{stage_name.removeprefix('kernels-')}.json"]
         search_root = root / "kernels"
+    elif stage_name.startswith("pd-transfer-"):
+        profile_name, tp_name = stage_name.removeprefix("pd-transfer-").rsplit(
+            "-", 1
+        )
+        search_root = root / "pd_transfer" / tp_name
+        required = [search_root / f"{profile_name}.json"]
     elif stage_name.startswith("attention-"):
         _, context_name, tp_name = stage_name.split("-")
         search_root = root / "attention" / tp_name
@@ -595,6 +635,7 @@ def collect_stage_artifacts(
             "final-summary",
         )
         or stage_name.startswith("kernels-")
+        or stage_name.startswith("pd-transfer-")
         or stage_name.startswith("attention-")
         or stage_name.startswith("mixed-")
         or stage_name.startswith("pressure-")

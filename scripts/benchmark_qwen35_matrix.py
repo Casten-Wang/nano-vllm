@@ -250,6 +250,7 @@ def validate_memory_capacity(
     gpu_memory_utilization: float,
     recurrent_padding_slots: int = 0,
     configured_max_model_len: int | None = None,
+    transfer_context_length: int | None = None,
 ) -> dict:
     if headroom_bytes < 0:
         raise ValueError("memory headroom must be non-negative")
@@ -263,6 +264,12 @@ def validate_memory_capacity(
         raise ValueError("gpu_memory_utilization must be in (0, 1]")
     if configured_max_model_len is not None and configured_max_model_len <= 0:
         raise ValueError("configured_max_model_len must be positive")
+    if transfer_context_length is None:
+        transfer_context_length = sequence_length
+    if transfer_context_length <= 0 or transfer_context_length > sequence_length:
+        raise ValueError(
+            "transfer_context_length must be positive and no greater than sequence_length"
+        )
     results = {}
     for tp_size in tp_sizes:
         if len(memory_by_device) < tp_size:
@@ -314,9 +321,48 @@ def validate_memory_capacity(
         ):
             raise ValueError(f"checkpoint audit has no TP={tp_size} KV size")
         kv_bytes_per_token = max(kv_sizes.values())
+        kv_data_sizes = audit.get("kv_data_bytes_per_token_by_dtype", kv_sizes)
+        kv_scale_sizes = audit.get(
+            "kv_scale_bytes_per_token_by_dtype",
+            {dtype: 0 for dtype in kv_sizes},
+        )
+        if (
+            set(kv_data_sizes) != set(kv_sizes)
+            or set(kv_scale_sizes) != set(kv_sizes)
+            or any(
+                not isinstance(kv_data_sizes[dtype], int)
+                or kv_data_sizes[dtype] <= 0
+                or not isinstance(kv_scale_sizes[dtype], int)
+                or kv_scale_sizes[dtype] < 0
+                or kv_data_sizes[dtype] + kv_scale_sizes[dtype]
+                != kv_sizes[dtype]
+                for dtype in kv_sizes
+            )
+        ):
+            raise ValueError(
+                f"checkpoint audit has invalid TP={tp_size} KV components"
+            )
+        convolution_bytes_per_sequence = state_sizes.get("convolution", 0)
+        if (
+            not isinstance(convolution_bytes_per_sequence, int)
+            or convolution_bytes_per_sequence < 0
+            or any(
+                convolution_bytes_per_sequence > state_sizes[dtype]
+                for dtype in ("float32", "model")
+            )
+        ):
+            raise ValueError(
+                f"checkpoint audit has invalid TP={tp_size} state components"
+            )
         blocks_per_sequence = (
             sequence_length + KVCACHE_BLOCK_SIZE - 1
         ) // KVCACHE_BLOCK_SIZE
+        transfer_blocks_per_sequence = (
+            transfer_context_length + KVCACHE_BLOCK_SIZE - 1
+        ) // KVCACHE_BLOCK_SIZE
+        aligned_transfer_tokens = (
+            transfer_blocks_per_sequence * KVCACHE_BLOCK_SIZE
+        )
         concurrent_sequences = min(num_seqs, max_num_seqs)
         kv_bytes = (
             concurrent_sequences
@@ -327,14 +373,30 @@ def validate_memory_capacity(
         pd_transfer_bytes_per_sequence_by_dtype = {
             kv_dtype: {
                 state_dtype: (
-                    blocks_per_sequence
-                    * KVCACHE_BLOCK_SIZE
-                    * bytes_per_token
+                    aligned_transfer_tokens * bytes_per_token
                     + state_sizes[state_dtype]
                 )
                 for state_dtype in ("float32", "model")
             }
             for kv_dtype, bytes_per_token in kv_sizes.items()
+        }
+        pd_transfer_components_per_sequence_by_dtype = {
+            kv_dtype: {
+                state_dtype: {
+                    "kv": aligned_transfer_tokens
+                    * kv_data_sizes[kv_dtype],
+                    "kv_scales": aligned_transfer_tokens
+                    * kv_scale_sizes[kv_dtype],
+                    "recurrent": state_sizes[state_dtype]
+                    - convolution_bytes_per_sequence,
+                    "convolution": convolution_bytes_per_sequence,
+                    "total": pd_transfer_bytes_per_sequence_by_dtype[kv_dtype][
+                        state_dtype
+                    ],
+                }
+                for state_dtype in ("float32", "model")
+            }
+            for kv_dtype in kv_sizes
         }
         pd_transfer_bytes_all_tp_ranks_by_dtype = {
             kv_dtype: {
@@ -421,6 +483,11 @@ def validate_memory_capacity(
             "pd_transfer_bytes_all_tp_ranks_by_dtype": (
                 pd_transfer_bytes_all_tp_ranks_by_dtype
             ),
+            "pd_transfer_components_per_sequence_by_dtype": (
+                pd_transfer_components_per_sequence_by_dtype
+            ),
+            "pd_transfer_context_tokens": transfer_context_length,
+            "pd_transfer_allocated_tokens": aligned_transfer_tokens,
             "kv_capacity_by_dtype": kv_capacity_by_dtype,
             "capacity_concurrent_sequences": concurrent_sequences,
             "model_max_position_embeddings": model_max_position_embeddings,
@@ -589,6 +656,7 @@ def main() -> None:
                     args.gpu_memory_utilization,
                     int(args.include_moe_candidate),
                     args.max_model_len,
+                    args.input_len,
                 )
                 memory_path = Path(args.result_dir) / "memory_preflight.json"
                 memory_path.write_text(json.dumps(memory_report, indent=2) + "\n")

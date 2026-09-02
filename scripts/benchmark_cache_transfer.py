@@ -107,6 +107,59 @@ def payload_bytes(payload: RankCacheTransfer) -> dict[str, int]:
     return components
 
 
+def payload_from_memory_preflight(
+    path: Path,
+    *,
+    tp_size: int,
+    kv_dtype: str,
+    state_dtype: str,
+) -> tuple[RankCacheTransfer, dict]:
+    if kv_dtype not in ("auto", "int8"):
+        raise ValueError("preflight KV dtype must be auto or int8")
+    if state_dtype not in ("float32", "model"):
+        raise ValueError("preflight state dtype must be float32 or model")
+    report = json.loads(path.read_text(encoding="utf-8"))
+    try:
+        components = report["results"][f"tp{tp_size}"][
+            "pd_transfer_components_per_sequence_by_dtype"
+        ][kv_dtype][state_dtype]
+    except (KeyError, TypeError) as exc:
+        raise ValueError(
+            "memory preflight has no matching PD transfer component profile"
+        ) from exc
+    required = ("kv", "kv_scales", "recurrent", "convolution", "total")
+    if any(
+        isinstance(components.get(name), bool)
+        or not isinstance(components.get(name), int)
+        or components[name] < 0
+        for name in required
+    ):
+        raise ValueError("memory preflight PD transfer components are invalid")
+    if (
+        components["kv"] <= 0
+        or sum(components[name] for name in required[:-1])
+        != components["total"]
+    ):
+        raise ValueError("memory preflight PD transfer component total is invalid")
+    payload = make_payload(
+        kv_bytes=components["kv"],
+        scale_bytes=components["kv_scales"],
+        recurrent_bytes=components["recurrent"],
+        convolution_bytes=components["convolution"],
+        kv_dtype=torch.int8 if kv_dtype == "int8" else torch.bfloat16,
+    )
+    if payload_bytes(payload) != components:
+        raise ValueError(
+            "memory preflight component bytes do not map exactly to tensor storage"
+        )
+    return payload, {
+        "memory_preflight": str(path),
+        "tp_size": tp_size,
+        "kv_dtype": kv_dtype,
+        "state_dtype": state_dtype,
+    }
+
+
 def _percentile(samples: list[float], percentile: float) -> float:
     ordered = sorted(samples)
     if not ordered:
@@ -219,7 +272,18 @@ def main() -> None:
     parser.add_argument("--scale-mib", type=float, default=0.0)
     parser.add_argument("--recurrent-mib", type=float, default=4.0)
     parser.add_argument("--convolution-mib", type=float, default=1.0)
-    parser.add_argument("--kv-dtype", choices=("float16", "bfloat16", "int8"), default="bfloat16")
+    parser.add_argument(
+        "--kv-dtype",
+        choices=("auto", "float16", "bfloat16", "int8"),
+        default="bfloat16",
+    )
+    parser.add_argument("--memory-preflight", type=Path)
+    parser.add_argument("--tp-size", type=int)
+    parser.add_argument(
+        "--state-dtype",
+        choices=("float32", "model"),
+        default="float32",
+    )
     parser.add_argument("--warmup", type=int, default=2)
     parser.add_argument("--repeats", type=int, default=10)
     parser.add_argument("--timeout-s", type=float, default=30.0)
@@ -230,23 +294,40 @@ def main() -> None:
     )
     args = parser.parse_args()
     dtype = {
+        "auto": torch.bfloat16,
         "float16": torch.float16,
         "bfloat16": torch.bfloat16,
         "int8": torch.int8,
     }[args.kv_dtype]
-    payload = make_payload(
-        kv_bytes=round(args.kv_mib * MIB),
-        scale_bytes=round(args.scale_mib * MIB),
-        recurrent_bytes=round(args.recurrent_mib * MIB),
-        convolution_bytes=round(args.convolution_mib * MIB),
-        kv_dtype=dtype,
-    )
+    profile = None
+    if args.memory_preflight is not None:
+        if args.tp_size is None:
+            parser.error("--tp-size is required with --memory-preflight")
+        if args.kv_dtype not in ("auto", "int8"):
+            parser.error(
+                "preflight profiles use --kv-dtype auto or int8"
+            )
+        payload, profile = payload_from_memory_preflight(
+            args.memory_preflight,
+            tp_size=args.tp_size,
+            kv_dtype=args.kv_dtype,
+            state_dtype=args.state_dtype,
+        )
+    else:
+        payload = make_payload(
+            kv_bytes=round(args.kv_mib * MIB),
+            scale_bytes=round(args.scale_mib * MIB),
+            recurrent_bytes=round(args.recurrent_mib * MIB),
+            convolution_bytes=round(args.convolution_mib * MIB),
+            kv_dtype=dtype,
+        )
     result = run_benchmark(
         payload,
         warmup=args.warmup,
         repeats=args.repeats,
         timeout_s=args.timeout_s,
     )
+    result["profile"] = profile or {"source": "manual byte sizes"}
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(result, indent=2))

@@ -63,6 +63,14 @@ def test_cache_storage_metadata_uses_tp_and_model_dtype():
             "auto": 32,
             "int8": 20,
         },
+        "kv_data_bytes_per_token_by_dtype": {
+            "auto": 32,
+            "int8": 16,
+        },
+        "kv_scale_bytes_per_token_by_dtype": {
+            "auto": 0,
+            "int8": 4,
+        },
         "state_bytes_per_sequence": {
             "float32": 384,
             "model": 256,

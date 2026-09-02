@@ -152,7 +152,13 @@ def test_memory_preflight_covers_each_tp_rank():
                 "rotary_cache_bytes_per_position": 256,
                 "kv_bytes_per_token": 1024,
                 "kv_bytes_per_token_by_dtype": {"auto": 1024, "int8": 520},
-                "state_bytes_per_sequence": {"float32": 8, "model": 4},
+                "kv_data_bytes_per_token_by_dtype": {"auto": 1024, "int8": 512},
+                "kv_scale_bytes_per_token_by_dtype": {"auto": 0, "int8": 8},
+                "state_bytes_per_sequence": {
+                    "float32": 8,
+                    "model": 4,
+                    "convolution": 2,
+                },
             },
             "tp8": {
                 "local_parameter_bytes": 8 * gib,
@@ -174,6 +180,7 @@ def test_memory_preflight_covers_each_tp_rank():
         1.0,
         1,
         4096,
+        512,
     )
 
     assert result["valid"]
@@ -192,14 +199,25 @@ def test_memory_preflight_covers_each_tp_rank():
         "int8": 520,
     }
     assert result["results"]["tp4"][
+        "pd_transfer_components_per_sequence_by_dtype"
+    ]["int8"]["model"] == {
+        "kv": 2 * 256 * 512,
+        "kv_scales": 2 * 256 * 8,
+        "recurrent": 2,
+        "convolution": 2,
+        "total": 2 * 256 * 520 + 4,
+    }
+    assert result["results"]["tp4"][
         "pd_transfer_bytes_per_sequence_by_dtype"
     ] == {
-        "auto": {"float32": 3 * 256 * 1024 + 8, "model": 3 * 256 * 1024 + 4},
-        "int8": {"float32": 3 * 256 * 520 + 8, "model": 3 * 256 * 520 + 4},
+        "auto": {"float32": 2 * 256 * 1024 + 8, "model": 2 * 256 * 1024 + 4},
+        "int8": {"float32": 2 * 256 * 520 + 8, "model": 2 * 256 * 520 + 4},
     }
     assert result["results"]["tp4"][
         "pd_transfer_bytes_all_tp_ranks_by_dtype"
-    ]["int8"]["model"] == 4 * (3 * 256 * 520 + 4)
+    ]["int8"]["model"] == 4 * (2 * 256 * 520 + 4)
+    assert result["results"]["tp4"]["pd_transfer_context_tokens"] == 512
+    assert result["results"]["tp4"]["pd_transfer_allocated_tokens"] == 512
     rotary_bytes = 4096 * 256
     available_kv_bytes = 2 * gib - 8 * 65 - rotary_bytes
     auto_blocks = available_kv_bytes // (256 * 1024)

@@ -46,6 +46,8 @@ def test_commands_are_fail_fast_and_cover_complete_validation_suite():
     assert [name for name, _ in stages] == [
         "official-checkpoint-audit",
         "preflight",
+        "pd-transfer-auto-float32-tp4",
+        "pd-transfer-int8-model-tp4",
         "kernels-tp4",
         "mixed-tp4-r1",
         "mixed-tp4-r2",
@@ -62,6 +64,8 @@ def test_commands_are_fail_fast_and_cover_complete_validation_suite():
         "attention-max-tp4",
         "cudagraph-short-tp4",
         "cudagraph-long-tp4",
+        "pd-transfer-auto-float32-tp8",
+        "pd-transfer-int8-model-tp8",
         "kernels-tp8",
         "mixed-tp8-r1",
         "mixed-tp8-r2",
@@ -92,6 +96,9 @@ def test_commands_are_fail_fast_and_cover_complete_validation_suite():
     assert "--verify-checkpoint-shards" in stages[1][1]
     assert stages[1][1][stages[1][1].index("--max-model-len") + 1] == "16384"
     assert stages[2][1][stages[2][1].index("--tp-size") + 1] == "4"
+    assert stages[2][1][stages[2][1].index("--kv-dtype") + 1] == "auto"
+    assert stages[3][1][stages[3][1].index("--state-dtype") + 1] == "model"
+    assert stages[4][1][stages[4][1].index("--tp-size") + 1] == "4"
     commands = dict(stages)
     mixed = commands["mixed-tp4-r1"]
     assert mixed[mixed.index("--tensor-parallel-size") + 1] == "4"
@@ -295,6 +302,23 @@ def test_pressure_stage_collects_only_its_policy_repeat(tmp_path):
     artifacts = MODULE.collect_stage_artifacts(
         arguments,
         "pressure-fcfs-tp4-r2",
+    )
+
+    assert artifacts == [artifact]
+
+
+def test_pd_transfer_stage_collects_its_exact_profile(tmp_path):
+    arguments = args()
+    arguments.result_dir = str(tmp_path)
+    transfer_dir = tmp_path / arguments.run_id / "pd_transfer" / "tp4"
+    transfer_dir.mkdir(parents=True)
+    artifact = transfer_dir / "int8-model.json"
+    artifact.write_text('{"valid": true}\n')
+    (transfer_dir / "auto-float32.json").write_text('{"valid": true}\n')
+
+    artifacts = MODULE.collect_stage_artifacts(
+        arguments,
+        "pd-transfer-int8-model-tp4",
     )
 
     assert artifacts == [artifact]
