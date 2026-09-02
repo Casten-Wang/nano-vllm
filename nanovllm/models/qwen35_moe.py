@@ -63,7 +63,12 @@ class Qwen35TopKRouter(nn.Module):
         # are renormalized. Select first so FP32 softmax only materializes
         # ``top_k`` values per token instead of ``num_experts`` values.
         topk_logits, topk_ids = torch.topk(router_logits, self.top_k, dim=-1)
-        topk_weights = torch.softmax(topk_logits.float(), dim=-1)
+        topk_logits = topk_logits.float()
+        if topk_logits.requires_grad:
+            topk_weights = torch.softmax(topk_logits, dim=-1)
+        else:
+            torch.softmax(topk_logits, dim=-1, out=topk_logits)
+            topk_weights = topk_logits
         return topk_weights.to(hidden_states.dtype), topk_ids
 
 

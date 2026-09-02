@@ -172,7 +172,9 @@ def benchmark_router(args, device, dtype) -> dict:
 
     def candidate():
         values, ids = torch.topk(logits, args.top_k, dim=-1)
-        return torch.softmax(values.float(), dim=-1), ids
+        values = values.float()
+        torch.softmax(values, dim=-1, out=values)
+        return values, ids
 
     result = compare(
         reference,
@@ -188,6 +190,7 @@ def benchmark_router(args, device, dtype) -> dict:
     result["selected_probability_mib"] = (
         args.router_tokens * args.top_k * 4 / 1024 / 1024
     )
+    result["reused_selected_logits_mib"] = result["selected_probability_mib"]
     return result
 
 

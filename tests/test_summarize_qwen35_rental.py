@@ -349,6 +349,13 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
             "git_dirty": False,
             "cuda_available": True,
             "results": {
+                "router_topk_first": {
+                    "reference": {"peak_extra_mib": 2.0},
+                    "candidate": {"peak_extra_mib": 1.0},
+                    "speedup": 1.1,
+                    "errors": [{"max_abs_error": 0.0}],
+                    "reused_selected_logits_mib": 0.1,
+                },
                 "expert_dispatch_torch": {
                     batch: {"graph_safe_batched_candidate": {
                         "promotion": {"promote_to_runtime": True},

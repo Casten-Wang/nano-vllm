@@ -106,6 +106,27 @@ def test_router_softmax_only_materializes_selected_experts():
     assert softmax_shapes == [(11, 8)]
 
 
+def test_router_inference_softmax_reuses_selected_logits():
+    router = qwen35_moe.Qwen35TopKRouter(4, 8, 2)
+    hidden = torch.randn(3, 4)
+    original_softmax = qwen35_moe.torch.softmax
+    reused = []
+
+    def record_storage(tensor, *args, **kwargs):
+        result = original_softmax(tensor, *args, **kwargs)
+        reused.append(result.data_ptr() == tensor.data_ptr())
+        return result
+
+    with (
+        torch.inference_mode(),
+        patch.object(qwen35_moe.torch, "softmax", side_effect=record_storage),
+    ):
+        weights, _ = router(hidden)
+
+    assert reused == [True]
+    torch.testing.assert_close(weights.sum(dim=-1), torch.ones(3))
+
+
 def test_expert_reference_path_matches_manual_mixture():
     experts = make_experts()
     experts.gate_up_proj.data.fill_(1.0)

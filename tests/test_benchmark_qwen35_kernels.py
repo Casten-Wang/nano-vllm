@@ -29,6 +29,26 @@ def test_measure_preserves_every_raw_repeat():
     assert result["median_ms"] == sorted(result["samples_ms"])[1]
 
 
+def test_router_benchmark_reuses_selected_logits_for_probabilities():
+    args = SimpleNamespace(
+        router_tokens=8,
+        num_experts=16,
+        top_k=2,
+        warmup=0,
+        iterations=1,
+        repeats=1,
+    )
+
+    result = MODULE.benchmark_router(
+        args,
+        torch.device("cpu"),
+        torch.bfloat16,
+    )
+
+    assert result["reused_selected_logits_mib"] == 8 * 2 * 4 / 1024 / 1024
+    assert result["errors"][0]["max_abs_error"] <= 1e-6
+
+
 def test_rmsnorm_benchmark_compares_workspace_reuse_to_baseline():
     args = SimpleNamespace(
         router_tokens=8,

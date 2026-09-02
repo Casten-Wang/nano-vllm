@@ -716,6 +716,10 @@ def summarize(run_dir: Path, run_id: str) -> dict:
             ),
         }
         buffer_reuse[tp_name] = {
+            "router_softmax": summarize_buffer_reuse_candidate(
+                result["results"]["router_topk_first"],
+                ("reused_selected_logits_mib",),
+            ),
             "moe_output_merge": summarize_buffer_reuse_candidate(
                 result["results"]["moe_output_buffer_reuse"],
                 (
