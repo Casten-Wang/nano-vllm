@@ -742,6 +742,7 @@ def benchmark_delta_prefill_head_groups(
     dtype,
     local_key_heads,
     local_value_heads,
+    chunk_size=64,
 ) -> dict:
     query = torch.randn(
         args.prefill_batch,
@@ -791,6 +792,7 @@ def benchmark_delta_prefill_head_groups(
             decay,
             beta,
             state,
+            chunk_size=chunk_size,
         )
 
     def candidate():
@@ -801,6 +803,7 @@ def benchmark_delta_prefill_head_groups(
             decay,
             beta,
             state,
+            chunk_size=chunk_size,
         )
 
     result = compare(
@@ -824,7 +827,31 @@ def benchmark_delta_prefill_head_groups(
         / 1024
         / 1024
     )
+    result["chunk_size"] = chunk_size
     return result
+
+
+def benchmark_delta_prefill_chunk_sweep(
+    args,
+    device,
+    dtype,
+    local_key_heads,
+    local_value_heads,
+) -> dict:
+    candidates = {}
+    for chunk_size in sorted(set(args.delta_prefill_chunk_sizes)):
+        # Re-seeding makes each candidate use the same input distribution, so
+        # latency and peak-memory comparisons do not depend on sweep order.
+        torch.manual_seed(args.seed)
+        candidates[str(chunk_size)] = benchmark_delta_prefill_head_groups(
+            args,
+            device,
+            dtype,
+            local_key_heads,
+            local_value_heads,
+            chunk_size=chunk_size,
+        )
+    return {"candidates": candidates}
 
 
 def evaluate_recurrent_storage_drift(
@@ -956,6 +983,12 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Measure only convolution and grouped DeltaNet prefill paths.",
     )
+    parser.add_argument(
+        "--delta-prefill-chunk-sizes",
+        type=int,
+        nargs="+",
+        default=(32, 64, 128),
+    )
     parser.add_argument("--decode-batch", type=int, default=32)
     parser.add_argument("--total-key-heads", type=int, default=16)
     parser.add_argument("--total-value-heads", type=int, default=32)
@@ -1019,6 +1052,8 @@ def main() -> None:
         invalid.append("expert_token_counts")
     if any(value <= 0 for value in args.moe_decode_chunk_sizes):
         invalid.append("moe_decode_chunk_sizes")
+    if any(value <= 0 for value in args.delta_prefill_chunk_sizes):
+        invalid.append("delta_prefill_chunk_sizes")
     if invalid:
         raise ValueError(f"benchmark values must be positive: {', '.join(invalid)}")
     if args.moe_graph_safe_max_peak_extra_mib < 0:
@@ -1060,6 +1095,15 @@ def main() -> None:
                 dtype,
                 local_key_heads,
                 local_value_heads,
+            ),
+            "grouped_delta_prefill_chunk_sweep": (
+                benchmark_delta_prefill_chunk_sweep(
+                    args,
+                    device,
+                    dtype,
+                    local_key_heads,
+                    local_value_heads,
+                )
             ),
         }
     else:

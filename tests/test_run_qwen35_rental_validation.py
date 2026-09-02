@@ -61,6 +61,8 @@ def test_commands_are_fail_fast_and_cover_complete_validation_suite():
     assert "--prefill-only" in long_prefill
     assert long_prefill[long_prefill.index("--prefill-tokens") + 1] == "8192"
     assert long_prefill[long_prefill.index("--prefill-batch") + 1] == "1"
+    chunk_index = long_prefill.index("--delta-prefill-chunk-sizes")
+    assert long_prefill[chunk_index + 1:chunk_index + 4] == ["32", "64", "128"]
     short_attention = commands["attention-short-tp4"]
     long_attention = commands["attention-long-tp4"]
     assert short_attention[short_attention.index("--context-len") + 1] == "4096"

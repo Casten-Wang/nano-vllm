@@ -211,6 +211,32 @@ def test_chunk_recommendation_uses_worst_decode_batch_speedup():
     assert not recommendation["candidates"]["16"]["all_batches_promoted"]
 
 
+def test_delta_prefill_chunk_sweep_sorts_and_deduplicates(monkeypatch):
+    calls = []
+
+    def fake_benchmark(args, device, dtype, key_heads, value_heads, chunk_size):
+        calls.append(chunk_size)
+        return {"chunk_size": chunk_size}
+
+    monkeypatch.setattr(
+        MODULE,
+        "benchmark_delta_prefill_head_groups",
+        fake_benchmark,
+    )
+    args = SimpleNamespace(delta_prefill_chunk_sizes=(128, 32, 64, 32), seed=7)
+
+    result = MODULE.benchmark_delta_prefill_chunk_sweep(
+        args,
+        torch.device("cpu"),
+        torch.float32,
+        2,
+        4,
+    )
+
+    assert calls == [32, 64, 128]
+    assert list(result["candidates"]) == ["32", "64", "128"]
+
+
 def test_graph_safe_candidate_requires_every_promotion_gate():
     promoted = MODULE.evaluate_graph_safe_moe_candidate(
         device_type="cuda",

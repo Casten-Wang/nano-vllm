@@ -114,10 +114,28 @@ def write_long_prefill_case(root, *, max_abs_error=0.01):
                 "prefill_tokens": 8192,
                 "tp_size": 4,
                 "resolved_device": "cuda",
+                "delta_prefill_chunk_sizes": [32, 64, 128],
             },
             "results": {
                 "vectorized_prefill_convolution": measurement,
                 "grouped_delta_prefill": deepcopy(measurement),
+                "grouped_delta_prefill_chunk_sweep": {
+                    "candidates": {
+                        str(chunk_size): {
+                            **deepcopy(measurement),
+                            "chunk_size": chunk_size,
+                            "candidate": {
+                                "median_ms": latency,
+                                "peak_extra_mib": memory,
+                            },
+                        }
+                        for chunk_size, latency, memory in (
+                            (32, 5.0, 64.0),
+                            (64, 4.0, 96.0),
+                            (128, 6.0, 160.0),
+                        )
+                    }
+                },
             },
         },
     )
@@ -288,6 +306,9 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     assert report["hybrid_cudagraph"]["all_tp_passed"]
     assert report["evidence"]["long_prefill_kernel_evidence"]
     assert report["long_prefill"]["by_tp"]["tp4"]["valid"]
+    chunk_sweep = report["long_prefill"]["by_tp"]["tp4"]["chunk_sweep"]
+    assert chunk_sweep["fastest_chunk_size"] == 64
+    assert chunk_sweep["lowest_memory_chunk_size"] == 32
     assert report["graph_safe_moe"]["by_tp"]["tp4"]["promotion"][
         "selected_decode_batches"
     ] == [1, 64]
@@ -387,6 +408,7 @@ def test_long_prefill_rejects_inaccurate_kernel():
             "prefill_tokens": 8192,
             "tp_size": 4,
             "resolved_device": "cuda:0",
+            "delta_prefill_chunk_sizes": [32],
         },
         "results": {
             name: {
@@ -397,6 +419,19 @@ def test_long_prefill_rejects_inaccurate_kernel():
                 ("vectorized_prefill_convolution", 0.01),
                 ("grouped_delta_prefill", 0.051),
             )
+        } | {
+            "grouped_delta_prefill_chunk_sweep": {
+                "candidates": {
+                    "32": {
+                        "chunk_size": 32,
+                        "candidate": {
+                            "median_ms": 1.0,
+                            "peak_extra_mib": 2.0,
+                        },
+                        "errors": [{"max_abs_error": 0.01}],
+                    }
+                }
+            }
         },
     }
 

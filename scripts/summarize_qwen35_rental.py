@@ -346,14 +346,75 @@ def summarize_long_prefill(result: dict, *, expected_tp_size: int) -> dict:
             "peak_extra_mib": peak_extra_mib,
             "max_abs_error": max_abs_error,
         }
+    configured_chunk_sizes = configuration.get("delta_prefill_chunk_sizes", [])
+    sweep = result.get("results", {}).get(
+        "grouped_delta_prefill_chunk_sweep",
+        {},
+    ).get("candidates", {})
+    expected_chunk_names = {str(size) for size in configured_chunk_sizes}
+    if not expected_chunk_names or set(sweep) != expected_chunk_names:
+        raise ValueError("long-prefill chunk sweep coverage is incomplete")
+    chunk_candidates = {}
+    for chunk_name, item in sweep.items():
+        candidate = item.get("candidate", {})
+        errors = item.get("errors", [])
+        max_abs_error = max(
+            (error.get("max_abs_error", math.inf) for error in errors),
+            default=math.inf,
+        )
+        median_ms = candidate.get("median_ms", math.nan)
+        peak_extra_mib = candidate.get("peak_extra_mib", math.nan)
+        valid = (
+            item.get("chunk_size") == int(chunk_name)
+            and bool(errors)
+            and math.isfinite(max_abs_error)
+            and max_abs_error <= LONG_PREFILL_MAX_ABS_ERROR
+            and math.isfinite(median_ms)
+            and median_ms > 0
+            and math.isfinite(peak_extra_mib)
+            and peak_extra_mib >= 0
+        )
+        chunk_candidates[chunk_name] = {
+            "valid": valid,
+            "median_ms": median_ms,
+            "peak_extra_mib": peak_extra_mib,
+            "max_abs_error": max_abs_error,
+        }
+    valid_chunks = {
+        name: item for name, item in chunk_candidates.items() if item["valid"]
+    }
+    fastest = (
+        min(valid_chunks, key=lambda name: valid_chunks[name]["median_ms"])
+        if valid_chunks
+        else None
+    )
+    lowest_memory = (
+        min(
+            valid_chunks,
+            key=lambda name: valid_chunks[name]["peak_extra_mib"],
+        )
+        if valid_chunks
+        else None
+    )
+    sweep_valid = len(valid_chunks) == len(chunk_candidates)
     return {
-        "valid": configuration_valid and all(
-            item["valid"] for item in cases.values()
+        "valid": (
+            configuration_valid
+            and all(item["valid"] for item in cases.values())
+            and sweep_valid
         ),
         "configuration_valid": configuration_valid,
         "prefill_tokens": configuration.get("prefill_tokens"),
         "max_allowed_abs_error": LONG_PREFILL_MAX_ABS_ERROR,
         "cases": cases,
+        "chunk_sweep": {
+            "valid": sweep_valid,
+            "fastest_chunk_size": int(fastest) if fastest is not None else None,
+            "lowest_memory_chunk_size": (
+                int(lowest_memory) if lowest_memory is not None else None
+            ),
+            "candidates": chunk_candidates,
+        },
     }
 
 
