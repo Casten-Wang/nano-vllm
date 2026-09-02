@@ -95,6 +95,34 @@ def write_cudagraph_case(root, context_name, attention_path, batch_sizes):
     )
 
 
+def write_long_prefill_case(root, *, max_abs_error=0.01):
+    measurement = {
+        "reference": None,
+        "candidate": {"median_ms": 4.0, "peak_extra_mib": 128.0},
+        "speedup": None,
+        "errors": [{"max_abs_error": max_abs_error}],
+    }
+    write(
+        root / "kernels_long/tp4.json",
+        {
+            "commit": "abc",
+            "git_dirty": False,
+            "cuda_available": True,
+            "configuration": {
+                "prefill_only": True,
+                "prefill_batch": 1,
+                "prefill_tokens": 8192,
+                "tp_size": 4,
+                "resolved_device": "cuda",
+            },
+            "results": {
+                "vectorized_prefill_convolution": measurement,
+                "grouped_delta_prefill": deepcopy(measurement),
+            },
+        },
+    )
+
+
 def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     run_id = "rental-a"
     write(tmp_path / "preflight/checkpoint_mapping_audit.json", {"valid": True, "complete": True})
@@ -249,6 +277,7 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     )
     write_attention_case(tmp_path, "short", 4096, partitioned=False)
     write_attention_case(tmp_path, "long", 16384, partitioned=True)
+    write_long_prefill_case(tmp_path)
 
     report = MODULE.summarize(tmp_path, run_id)
 
@@ -257,6 +286,8 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     assert report["performance"]["lowest_peak_memory"]["label"] == "sorted"
     assert report["graph_safe_moe"]["all_tp_promoted"]
     assert report["hybrid_cudagraph"]["all_tp_passed"]
+    assert report["evidence"]["long_prefill_kernel_evidence"]
+    assert report["long_prefill"]["by_tp"]["tp4"]["valid"]
     assert report["graph_safe_moe"]["by_tp"]["tp4"]["promotion"][
         "selected_decode_batches"
     ] == [1, 64]
@@ -346,6 +377,33 @@ def test_runtime_promotion_rejects_unstable_or_regressing_candidate():
     assert not result["promote_to_default"]
     assert not result["checks"]["throughput_non_regression"]
     assert not result["checks"]["stable_repeats"]
+
+
+def test_long_prefill_rejects_inaccurate_kernel():
+    result = {
+        "configuration": {
+            "prefill_only": True,
+            "prefill_batch": 1,
+            "prefill_tokens": 8192,
+            "tp_size": 4,
+            "resolved_device": "cuda:0",
+        },
+        "results": {
+            name: {
+                "candidate": {"median_ms": 1.0, "peak_extra_mib": 2.0},
+                "errors": [{"max_abs_error": error}],
+            }
+            for name, error in (
+                ("vectorized_prefill_convolution", 0.01),
+                ("grouped_delta_prefill", 0.051),
+            )
+        },
+    }
+
+    summary = MODULE.summarize_long_prefill(result, expected_tp_size=4)
+
+    assert not summary["valid"]
+    assert not summary["cases"]["grouped_delta_prefill"]["valid"]
 
 
 def test_memory_summary_rejects_non_saving_int8_cache():

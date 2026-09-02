@@ -38,11 +38,13 @@ def test_commands_are_fail_fast_and_cover_complete_validation_suite():
     assert [name for name, _ in stages] == [
         "preflight",
         "kernels-tp4",
+        "kernels-long-prefill-tp4",
         "attention-short-tp4",
         "attention-long-tp4",
         "cudagraph-short-tp4",
         "cudagraph-long-tp4",
         "kernels-tp8",
+        "kernels-long-prefill-tp8",
         "attention-short-tp8",
         "attention-long-tp8",
         "cudagraph-short-tp8",
@@ -54,13 +56,19 @@ def test_commands_are_fail_fast_and_cover_complete_validation_suite():
     assert "--preflight-only" in stages[0][1]
     assert stages[0][1][stages[0][1].index("--max-model-len") + 1] == "16384"
     assert stages[1][1][stages[1][1].index("--tp-size") + 1] == "4"
-    assert stages[2][1][stages[2][1].index("--context-len") + 1] == "4096"
-    assert stages[2][1][stages[2][1].index("--num-heads") + 1] == "4"
-    assert "--include-partitioned" not in stages[2][1]
-    assert stages[3][1][stages[3][1].index("--context-len") + 1] == "16384"
-    assert "--include-partitioned" in stages[3][1]
-    assert stages[3][1][stages[3][1].index("--partition-sizes") + 1] == "256,512"
     commands = dict(stages)
+    long_prefill = commands["kernels-long-prefill-tp4"]
+    assert "--prefill-only" in long_prefill
+    assert long_prefill[long_prefill.index("--prefill-tokens") + 1] == "8192"
+    assert long_prefill[long_prefill.index("--prefill-batch") + 1] == "1"
+    short_attention = commands["attention-short-tp4"]
+    long_attention = commands["attention-long-tp4"]
+    assert short_attention[short_attention.index("--context-len") + 1] == "4096"
+    assert short_attention[short_attention.index("--num-heads") + 1] == "4"
+    assert "--include-partitioned" not in short_attention
+    assert long_attention[long_attention.index("--context-len") + 1] == "16384"
+    assert "--include-partitioned" in long_attention
+    assert long_attention[long_attention.index("--partition-sizes") + 1] == "256,512"
     short_graph = commands["cudagraph-short-tp4"]
     long_graph = commands["cudagraph-long-tp4"]
     assert short_graph[short_graph.index("--input-length-base") + 1] == "33"

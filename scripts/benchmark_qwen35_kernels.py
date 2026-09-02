@@ -109,6 +109,7 @@ def compare(
     warmup: int,
     iterations: int,
     repeats: int,
+    measure_reference: bool = True,
 ) -> dict:
     expected = reference()
     actual = candidate()
@@ -121,12 +122,16 @@ def compare(
                 f"{tuple(target.shape)}"
             )
     errors = [error(value, target) for value, target in zip(actual, expected)]
-    reference_timing = measure(
-        reference,
-        device=device,
-        warmup=warmup,
-        iterations=iterations,
-        repeats=repeats,
+    reference_timing = (
+        measure(
+            reference,
+            device=device,
+            warmup=warmup,
+            iterations=iterations,
+            repeats=repeats,
+        )
+        if measure_reference
+        else None
     )
     candidate_timing = measure(
         candidate,
@@ -140,6 +145,8 @@ def compare(
         "candidate": candidate_timing,
         "speedup": (
             reference_timing["median_ms"] / candidate_timing["median_ms"]
+            if reference_timing is not None
+            else None
         ),
         "errors": errors,
     }
@@ -643,6 +650,7 @@ def benchmark_convolution(args, device, dtype, local_conv_channels) -> dict:
         warmup=args.warmup,
         iterations=args.iterations,
         repeats=args.repeats,
+        measure_reference=not args.prefill_only,
     )
 
 
@@ -802,6 +810,7 @@ def benchmark_delta_prefill_head_groups(
         warmup=args.warmup,
         iterations=args.iterations,
         repeats=args.repeats,
+        measure_reference=not args.prefill_only,
     )
     repeated_qk_elements = (
         2
@@ -942,6 +951,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--prefill-batch", type=int, default=1)
     parser.add_argument("--prefill-tokens", type=int, default=512)
+    parser.add_argument(
+        "--prefill-only",
+        action="store_true",
+        help="Measure only convolution and grouped DeltaNet prefill paths.",
+    )
     parser.add_argument("--decode-batch", type=int, default=32)
     parser.add_argument("--total-key-heads", type=int, default=16)
     parser.add_argument("--total-value-heads", type=int, default=32)
@@ -1032,18 +1046,25 @@ def main() -> None:
     )
 
     torch.manual_seed(args.seed)
-    expert_dispatch = benchmark_expert_dispatch_sweep(args, device, dtype)
-    result = {
-        **METADATA.collect_benchmark_metadata(torch),
-        "configuration": {
-            **vars(args),
-            "output": str(args.output),
-            "resolved_device": str(device),
-            "local_key_heads": local_key_heads,
-            "local_value_heads": local_value_heads,
-            "local_conv_channels": local_conv_channels,
-        },
-        "results": {
+    if args.prefill_only:
+        benchmark_results = {
+            "vectorized_prefill_convolution": benchmark_convolution(
+                args,
+                device,
+                dtype,
+                local_conv_channels,
+            ),
+            "grouped_delta_prefill": benchmark_delta_prefill_head_groups(
+                args,
+                device,
+                dtype,
+                local_key_heads,
+                local_value_heads,
+            ),
+        }
+    else:
+        expert_dispatch = benchmark_expert_dispatch_sweep(args, device, dtype)
+        benchmark_results = {
             "router_topk_first": benchmark_router(args, device, dtype),
             "expert_dispatch_torch": expert_dispatch,
             "moe_decode_chunk_recommendation": recommend_moe_decode_chunk_size(
@@ -1077,7 +1098,18 @@ def main() -> None:
                 dtype,
                 local_value_heads,
             ),
+        }
+    result = {
+        **METADATA.collect_benchmark_metadata(torch),
+        "configuration": {
+            **vars(args),
+            "output": str(args.output),
+            "resolved_device": str(device),
+            "local_key_heads": local_key_heads,
+            "local_value_heads": local_value_heads,
+            "local_conv_channels": local_conv_channels,
         },
+        "results": benchmark_results,
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(result, indent=2, default=str) + "\n")

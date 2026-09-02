@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 from pathlib import Path
 
 
@@ -18,6 +19,8 @@ ATTENTION_SHORT_CONTEXT = 4096
 ATTENTION_LONG_CONTEXT = 16384
 ATTENTION_MAX_ABS_ERROR = 0.05
 PRODUCTION_PARTITION_SIZE = 512
+LONG_PREFILL_TOKENS = 8192
+LONG_PREFILL_MAX_ABS_ERROR = 0.05
 
 
 def load_json(path: Path) -> dict:
@@ -303,6 +306,57 @@ def summarize_memory_preflight(report: dict) -> dict[str, dict]:
     return summaries
 
 
+def summarize_long_prefill(result: dict, *, expected_tp_size: int) -> dict:
+    configuration = result.get("configuration", {})
+    configuration_valid = (
+        configuration.get("prefill_only") is True
+        and configuration.get("prefill_batch") == 1
+        and configuration.get("prefill_tokens") == LONG_PREFILL_TOKENS
+        and configuration.get("tp_size") == expected_tp_size
+        and str(configuration.get("resolved_device", "")).startswith("cuda")
+    )
+    cases = {}
+    for name in (
+        "vectorized_prefill_convolution",
+        "grouped_delta_prefill",
+    ):
+        item = result.get("results", {}).get(name)
+        if not isinstance(item, dict):
+            raise ValueError(f"long-prefill benchmark is missing {name}")
+        candidate = item.get("candidate", {})
+        errors = item.get("errors", [])
+        max_abs_error = max(
+            (error.get("max_abs_error", math.inf) for error in errors),
+            default=math.inf,
+        )
+        median_ms = candidate.get("median_ms", math.nan)
+        peak_extra_mib = candidate.get("peak_extra_mib", math.nan)
+        valid = (
+            bool(errors)
+            and math.isfinite(max_abs_error)
+            and max_abs_error <= LONG_PREFILL_MAX_ABS_ERROR
+            and math.isfinite(median_ms)
+            and median_ms > 0
+            and math.isfinite(peak_extra_mib)
+            and peak_extra_mib >= 0
+        )
+        cases[name] = {
+            "valid": valid,
+            "median_ms": median_ms,
+            "peak_extra_mib": peak_extra_mib,
+            "max_abs_error": max_abs_error,
+        }
+    return {
+        "valid": configuration_valid and all(
+            item["valid"] for item in cases.values()
+        ),
+        "configuration_valid": configuration_valid,
+        "prefill_tokens": configuration.get("prefill_tokens"),
+        "max_allowed_abs_error": LONG_PREFILL_MAX_ABS_ERROR,
+        "cases": cases,
+    }
+
+
 def summarize(run_dir: Path, run_id: str) -> dict:
     audit = load_json(run_dir / "preflight" / "checkpoint_mapping_audit.json")
     memory = load_json(run_dir / "preflight" / "memory_preflight.json")
@@ -313,6 +367,9 @@ def summarize(run_dir: Path, run_id: str) -> dict:
     kernel_paths = sorted((run_dir / "kernels").glob("tp*.json"))
     if not kernel_paths:
         raise ValueError("no kernel benchmark artifacts were found")
+    long_prefill_paths = sorted((run_dir / "kernels_long").glob("tp*.json"))
+    if not long_prefill_paths:
+        raise ValueError("no long-prefill kernel artifacts were found")
     cudagraph_paths = sorted(
         (run_dir / "cudagraph").glob("tp*/*/run_*/summary.json")
     )
@@ -339,6 +396,7 @@ def summarize(run_dir: Path, run_id: str) -> dict:
     moe_runtime = summarize_moe_runtime(performance["runs"])
 
     kernels = {}
+    long_prefill = {}
     configured_max_decode_batch = performance["workload"]["max_num_seqs"]
     commits = {
         row["commit"]
@@ -437,6 +495,18 @@ def summarize(run_dir: Path, run_id: str) -> dict:
         clean_worktrees = clean_worktrees and not result["git_dirty"]
         cuda_measurements = cuda_measurements and result["cuda_available"]
 
+    for path in long_prefill_paths:
+        result = load_json(path)
+        tp_name = path.stem
+        tp_size = int(tp_name.removeprefix("tp"))
+        long_prefill[tp_name] = summarize_long_prefill(
+            result,
+            expected_tp_size=tp_size,
+        )
+        commits.add(result["commit"])
+        clean_worktrees = clean_worktrees and not result["git_dirty"]
+        cuda_measurements = cuda_measurements and result["cuda_available"]
+
     cudagraph = {}
     for path in cudagraph_paths:
         result = load_json(path)
@@ -527,6 +597,10 @@ def summarize(run_dir: Path, run_id: str) -> dict:
         "attention_kernel_evidence": (
             set(attention) == expected_tp_names and attention_valid
         ),
+        "long_prefill_kernel_evidence": (
+            set(long_prefill) == expected_tp_names
+            and all(item["valid"] for item in long_prefill.values())
+        ),
         "quality_reads_stored_kv": all(
             row["kv_sensitive_token_rows"] > 0 for row in quality["cases"]
         ),
@@ -592,6 +666,10 @@ def summarize(run_dir: Path, run_id: str) -> dict:
             "short_context": ATTENTION_SHORT_CONTEXT,
             "long_context": ATTENTION_LONG_CONTEXT,
             "by_tp": attention,
+        },
+        "long_prefill": {
+            "tokens": LONG_PREFILL_TOKENS,
+            "by_tp": long_prefill,
         },
     }
 

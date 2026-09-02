@@ -93,6 +93,32 @@ def commands(args: argparse.Namespace) -> list[tuple[str, list[str]]]:
                 ],
             )
         )
+        result.append(
+            (
+                f"kernels-long-prefill-tp{tp_size}",
+                [
+                    sys.executable,
+                    str(KERNEL_SCRIPT),
+                    "--device",
+                    "cuda",
+                    "--tp-size",
+                    str(tp_size),
+                    "--prefill-only",
+                    "--prefill-batch",
+                    "1",
+                    "--prefill-tokens",
+                    "8192",
+                    "--warmup",
+                    "2",
+                    "--iterations",
+                    "5",
+                    "--repeats",
+                    "3",
+                    "--output",
+                    str(root / "kernels_long" / f"tp{tp_size}.json"),
+                ],
+            )
+        )
         for context_name, context_len in (("short", 4096), ("long", 16384)):
             command = [
                 sys.executable,
@@ -250,6 +276,10 @@ def collect_stage_artifacts(
             root / "preflight" / "memory_preflight.json",
         ]
         search_root = root / "preflight"
+    elif stage_name.startswith("kernels-long-prefill-tp"):
+        tp_name = stage_name.removeprefix("kernels-long-prefill-")
+        required = [root / "kernels_long" / f"{tp_name}.json"]
+        search_root = root / "kernels_long"
     elif stage_name.startswith("kernels-tp"):
         required = [root / "kernels" / f"{stage_name.removeprefix('kernels-')}.json"]
         search_root = root / "kernels"
@@ -288,7 +318,7 @@ def collect_stage_artifacts(
     artifacts = (
         required
         if stage_name in ("preflight", "final-summary")
-        or stage_name.startswith("kernels-tp")
+        or stage_name.startswith("kernels-")
         or stage_name.startswith("attention-")
         or stage_name.startswith("cudagraph-")
         else sorted(search_root.rglob("*.json"))
