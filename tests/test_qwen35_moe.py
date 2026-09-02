@@ -29,7 +29,10 @@ sys.modules.setdefault("nanovllm.layers", layers_package)
 sys.modules.setdefault("nanovllm.models", models_package)
 load_module("nanovllm.layers.activation", "nanovllm/layers/activation.py")
 linear = load_module("nanovllm.layers.linear", "nanovllm/layers/linear.py")
-load_module("nanovllm.models.moe_dispatch", "nanovllm/models/moe_dispatch.py")
+moe_dispatch = load_module(
+    "nanovllm.models.moe_dispatch",
+    "nanovllm/models/moe_dispatch.py",
+)
 qwen35_moe = load_module("qwen35_moe_under_test", "nanovllm/models/qwen35_moe.py")
 
 
@@ -300,6 +303,18 @@ def test_batched_decode_preallocated_output_preserves_autograd():
     assert topk_weights.grad is not None
     assert experts.gate_up_proj.grad is not None
     assert experts.down_proj.grad is not None
+
+
+def test_batched_decode_swiglu_reuses_gate_storage_without_autograd():
+    gate = torch.randn(6, 4)
+    up = torch.randn(6, 4)
+    expected = torch.nn.functional.silu(gate) * up
+    gate_storage = gate.data_ptr()
+
+    actual = moe_dispatch.silu_and_mul(gate, up)
+
+    assert actual.data_ptr() == gate_storage
+    torch.testing.assert_close(actual, expected)
 
 
 def test_batched_backend_keeps_prefill_on_grouped_dispatch():

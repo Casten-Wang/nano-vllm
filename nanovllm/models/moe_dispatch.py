@@ -6,6 +6,13 @@ import torch
 import torch.nn.functional as F
 
 
+def silu_and_mul(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
+    if gate.requires_grad:
+        return F.silu(gate) * up
+    F.silu(gate, inplace=True)
+    return gate.mul_(up)
+
+
 def batched_expert_dispatch(
     hidden_states: torch.Tensor,
     topk_ids: torch.Tensor,
@@ -37,10 +44,11 @@ def batched_expert_dispatch(
         gate_up = torch.bmm(selected_gate_up, route_hidden).squeeze(-1)
         del selected_gate_up, route_hidden
         gate, up = gate_up.chunk(2, dim=-1)
+        activated = silu_and_mul(gate, up)
         selected_down = down_proj.index_select(0, expert_ids)
         expert_output = torch.bmm(
             selected_down,
-            (F.silu(gate) * up).unsqueeze(-1),
+            activated.unsqueeze(-1),
         ).squeeze(-1)
         output[start:end] = (
             expert_output.reshape(end - start, top_k, -1)
