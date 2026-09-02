@@ -25,6 +25,7 @@ LONG_PREFILL_MAX_ABS_ERROR = 0.05
 MIXED_MAX_COEFFICIENT_OF_VARIATION = 0.10
 NORMALIZATION_MAX_ABS_ERROR = 0.05
 BUFFER_REUSE_MAX_ABS_ERROR = 0.05
+KVCACHE_BLOCK_SIZE = 256
 OFFICIAL_CHECKPOINT_REPO = "Qwen/Qwen3.5-35B-A3B"
 OFFICIAL_CHECKPOINT_REVISION = "59d61f3ce65a6d9863b86d2e96597125219dc754"
 OFFICIAL_CONFIG_SHA256 = (
@@ -697,6 +698,15 @@ def summarize(run_dir: Path, run_id: str) -> dict:
         .get(row["recurrent_state_dtype"])
         for row in performance["runs"]
     )
+    kv_storage_matches_preflight = all(
+        row.get("storage", {}).get("kv_cache_storage", {}).get("total_bytes")
+        == row.get("storage", {}).get("num_kvcache_blocks", 0)
+        * KVCACHE_BLOCK_SIZE
+        * memory_by_tp.get(f"tp{row['tensor_parallel_size']}", {})
+        .get("kv_bytes_per_token_by_dtype", {})
+        .get(row["kv_cache_dtype"], 0)
+        for row in performance["runs"]
+    )
     attention = {}
     attention_valid = True
     for tp_name in sorted(expected_tp_names):
@@ -1054,6 +1064,7 @@ def summarize(run_dir: Path, run_id: str) -> dict:
         "recurrent_storage_matches_preflight": (
             recurrent_storage_matches_preflight
         ),
+        "kv_storage_matches_preflight": kv_storage_matches_preflight,
         "performance_paths_valid": performance["all_execution_paths_valid"],
         "performance_generation_valid": performance["all_generation_valid"],
         "performance_output_parity": performance["all_output_digests_match"],
