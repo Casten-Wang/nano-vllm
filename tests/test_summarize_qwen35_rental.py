@@ -627,7 +627,7 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
         [3],
     )
     write_attention_case(tmp_path, "short", 4096, partitioned=False)
-    write_attention_case(tmp_path, "long", 16384, partitioned=True)
+    write_attention_case(tmp_path, "long", 16385, partitioned=True)
     write_long_prefill_case(tmp_path)
     write_mixed_case(tmp_path)
 
