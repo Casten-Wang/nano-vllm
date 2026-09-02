@@ -85,6 +85,8 @@ def write_markdown(path: Path, result: dict) -> None:
         f"| kv_storage_estimated_all_ranks_mib | {result['kv_cache_storage']['estimated_all_ranks_mib']:.2f} |",
         f"| recurrent_state_local_rank_mib | {result['recurrent_state_storage']['total_bytes_local_rank'] / 1024 / 1024:.2f} |",
         f"| recurrent_state_all_ranks_mib | {result['recurrent_state_total_all_ranks_bytes'] / 1024 / 1024:.2f} |",
+        f"| rotary_cache_local_rank_mib | {result['recurrent_state_storage']['rotary_cache_bytes_local_rank'] / 1024 / 1024:.2f} |",
+        f"| model_state_local_rank_mib | {result['recurrent_state_storage']['total_model_state_bytes_local_rank'] / 1024 / 1024:.2f} |",
         f"| num_kvcache_blocks | {result['num_kvcache_blocks']} |",
         f"| final_used_kvcache_blocks | {result['final_used_kvcache_blocks']} |",
         f"| final_free_kvcache_blocks | {result['final_free_kvcache_blocks']} |",

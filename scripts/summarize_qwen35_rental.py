@@ -792,7 +792,10 @@ def summarize(run_dir: Path, run_id: str) -> dict:
             ),
             "recurrent_decode": summarize_buffer_reuse_candidate(
                 result["results"]["specialized_delta_decode"],
-                ("reused_recurrent_state_mib",),
+                (
+                    "reused_recurrent_state_mib",
+                    "reused_prediction_workspace_mib",
+                ),
                 {"avoided_full_state_intermediates": 2},
             ),
             "gated_delta_beta": summarize_buffer_reuse_candidate(
