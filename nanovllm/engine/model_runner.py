@@ -310,6 +310,27 @@ class ModelRunner:
             sliding_window_size=self.config.sliding_window_size,
         )
 
+    def _state_access_path(
+        self,
+        context,
+        *,
+        step_kind: str,
+        use_graph: bool,
+    ) -> str | None:
+        model_spec = self.config.model_spec
+        if model_spec is None or not model_spec.is_hybrid:
+            return None
+        if step_kind == "prefill":
+            return "prefill_indexed"
+        if use_graph:
+            return "decode_graph_indexed"
+        if (
+            getattr(context, "decode_state_span", None) is not None
+            and self.config.recurrent_state_dtype == "float32"
+        ):
+            return "decode_contiguous_view"
+        return "decode_indexed_copy"
+
     def loop(self):
         while True:
             method_name = None
@@ -1012,6 +1033,11 @@ class ModelRunner:
             model_path=model_path,
             attention_paths=attention_paths,
             graph_bucket=graph_bucket,
+            state_access_path=self._state_access_path(
+                context,
+                step_kind=step_kind,
+                use_graph=use_graph,
+            ),
         )
         if not use_graph:
             previous_trace = activate(self.shape_trace)
@@ -1074,6 +1100,11 @@ class ModelRunner:
             model_path=select_model_path("mixed", use_cuda_graph=False),
             attention_paths=attention_paths,
             graph_bucket=None,
+            state_access_path=self._state_access_path(
+                context,
+                step_kind="mixed",
+                use_graph=False,
+            ),
         )
         previous_trace = activate(self.shape_trace)
         try:

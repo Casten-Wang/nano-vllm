@@ -103,6 +103,7 @@ def context_metadata(
         "decode_max_context_len",
         "prefill_max_seqlen_q",
         "prefill_max_seqlen_k",
+        "decode_state_span",
     )
     result: dict[str, Any] = {
         "scalars": {
@@ -167,6 +168,7 @@ class ShapeTrace:
         model_path: str,
         attention_paths: tuple[str, ...],
         graph_bucket: int | None,
+        state_access_path: str | None = None,
     ) -> None:
         if not self.enabled:
             return
@@ -176,6 +178,7 @@ class ShapeTrace:
                 "model_path": model_path,
                 "attention_paths": list(attention_paths),
                 "graph_bucket": graph_bucket,
+                "state_access_path": state_access_path,
                 "tensors": {
                     "input_ids": tensor_metadata("input_ids", input_ids),
                     "positions": tensor_metadata("positions", positions),

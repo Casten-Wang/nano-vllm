@@ -14,6 +14,28 @@ SPEC.loader.exec_module(module)
 
 
 class CudaGraphParityHelperTest(unittest.TestCase):
+    def test_extracts_recorded_state_access_paths(self):
+        artifact = {
+            "shape_trace": {
+                "events": [
+                    {
+                        "event": "model_step_inputs",
+                        "state_access_path": "decode_contiguous_view",
+                    },
+                    {"event": "attention_forward"},
+                    {
+                        "event": "model_step_inputs",
+                        "state_access_path": None,
+                    },
+                ]
+            }
+        }
+
+        self.assertEqual(
+            module.observed_state_access_paths(artifact),
+            {"decode_contiguous_view"},
+        )
+
     def test_extract_decode_steps_excludes_prefill_shape_differences(self):
         artifact = {
             "logits_steps": [

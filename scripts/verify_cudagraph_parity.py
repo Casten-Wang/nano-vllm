@@ -77,6 +77,15 @@ def extract_decode_steps(artifact: dict) -> list[dict]:
     return [step for step in artifact["logits_steps"] if not step["is_prefill"]]
 
 
+def observed_state_access_paths(artifact: dict) -> set[str]:
+    return {
+        event["state_access_path"]
+        for event in artifact.get("shape_trace", {}).get("events", ())
+        if event.get("event") == "model_step_inputs"
+        and event.get("state_access_path") is not None
+    }
+
+
 def run_worker(args: argparse.Namespace) -> None:
     import torch
 
@@ -390,6 +399,18 @@ def compare_artifacts(
     expected_graph_attention_path = (
         graph_attention_paths.get(expected_attention_path, 0) > 0
     )
+    eager_state_paths = observed_state_access_paths(eager)
+    graph_state_paths = observed_state_access_paths(graph)
+    hybrid = graph.get("cudagraph_capture_stats", {}).get(
+        "hybrid_recurrent_state"
+    ) is True
+    expected_state_access_paths = (
+        not hybrid
+        or (
+            "decode_contiguous_view" in eager_state_paths
+            and "decode_graph_indexed" in graph_state_paths
+        )
+    )
     passed = (
         token_match
         and hidden_match
@@ -400,6 +421,7 @@ def compare_artifacts(
         and scratch_primed
         and expected_eager_attention_path
         and expected_graph_attention_path
+        and expected_state_access_paths
     )
     return {
         "passed": passed,
@@ -423,6 +445,9 @@ def compare_artifacts(
         "expected_attention_path": expected_attention_path,
         "expected_eager_attention_path": expected_eager_attention_path,
         "expected_graph_attention_path": expected_graph_attention_path,
+        "expected_state_access_paths": expected_state_access_paths,
+        "eager_state_access_paths": sorted(eager_state_paths),
+        "graph_state_access_paths": sorted(graph_state_paths),
         "hidden_step_results": hidden_step_results,
         "step_results": step_results,
     }
@@ -577,7 +602,9 @@ def main() -> None:
                 seed=scenario_seed,
                 primer_batch_size=primer_size,
             )
-            subprocess.run(command, check=True)
+            env = dict(os.environ)
+            env["NANOVLLM_SHAPE_TRACE"] = "1"
+            subprocess.run(command, check=True, env=env)
 
         eager = torch.load(eager_artifact, map_location="cpu", weights_only=False)
         graph = torch.load(graph_artifact, map_location="cpu", weights_only=False)

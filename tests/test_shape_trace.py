@@ -46,6 +46,7 @@ class ShapeTraceTest(unittest.TestCase):
             prefill_block_tables=None,
             prefill_dequant_block_ids=None,
             prefill_dequant_block_tables=None,
+            decode_state_span=(3, 2),
         )
 
     def test_disabled_trace_does_not_record(self):
@@ -112,6 +113,10 @@ class ShapeTraceTest(unittest.TestCase):
         self.assertEqual(
             event["context"]["tensors"]["block_tables"]["values"],
             [0, 2, 1, 3],
+        )
+        self.assertEqual(
+            event["context"]["scalars"]["decode_state_span"],
+            [3, 2],
         )
 
     def test_attention_event_records_optional_scales(self):
