@@ -384,7 +384,8 @@ def chunk_gated_delta_rule(
         intra_attention = intra_attention * pairwise_decay
     else:
         intra_attention.mul_(pairwise_decay)
-    key_beta_scale = cumulative_decay.exp().unsqueeze(-1)
+    cumulative_decay_exp = cumulative_decay.exp()
+    key_beta_scale = cumulative_decay_exp.unsqueeze(-1)
     if key_beta.requires_grad:
         decayed_key_beta = key_beta * key_beta_scale
     else:
@@ -434,11 +435,23 @@ def chunk_gated_delta_rule(
         if new_values.requires_grad
         else new_values
     )
-    query = query * cumulative_decay.exp().unsqueeze(-1)
+    query = query * cumulative_decay_exp.unsqueeze(-1)
     key = key * (
         cumulative_decay[..., -1:] - cumulative_decay
     ).exp().unsqueeze(-1)
-    chunk_decay = cumulative_decay[..., -1].exp()[..., None, None]
+    chunk_decay = cumulative_decay_exp[..., -1, None, None]
+    # The solves and decay projections no longer need these large
+    # intermediates. Dropping the Python references before the sequential scan
+    # lets the inference allocator reuse their storage for per-chunk results.
+    del (
+        decayed_key_beta,
+        key_beta,
+        key_beta_scale,
+        pairwise_decay,
+        transform,
+        upper_mask,
+        value_beta,
+    )
     for chunk_index in range(num_chunks):
         corrected_value = (
             new_values[:, :, :, chunk_index]
