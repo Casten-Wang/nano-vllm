@@ -827,6 +827,45 @@ def benchmark_beta_gate(args, device, dtype, local_value_heads: int) -> dict:
     return result
 
 
+def benchmark_decay_rate(args, device, dtype, local_value_heads: int) -> dict:
+    hidden = torch.randn(
+        args.router_tokens,
+        args.hidden_size,
+        device=device,
+        dtype=dtype,
+    )
+    weight = torch.randn(
+        local_value_heads,
+        args.hidden_size,
+        device=device,
+        dtype=dtype,
+    )
+    dt_bias = torch.randn(local_value_heads, device=device, dtype=dtype)
+    a_log = torch.randn(local_value_heads, device=device, dtype=torch.float32)
+    decay_rate = -a_log.exp()
+
+    def reference():
+        a = F.linear(hidden, weight)
+        return (-a_log.exp() * F.softplus(a.float() + dt_bias),)
+
+    def candidate():
+        a = F.linear(hidden, weight)
+        return (decay_rate * F.softplus(a.float() + dt_bias),)
+
+    result = compare(
+        reference,
+        candidate,
+        device=device,
+        warmup=args.warmup,
+        iterations=args.iterations,
+        repeats=args.repeats,
+    )
+    result["precomputed_decay_rate_mib"] = (
+        decay_rate.numel() * decay_rate.element_size() / 1024 / 1024
+    )
+    return result
+
+
 def benchmark_gated_rmsnorm(args, device, dtype) -> dict:
     hidden = torch.randn(
         args.router_tokens,
@@ -1503,6 +1542,12 @@ def main() -> None:
             ),
             "rmsnorm_fp32_reuse": benchmark_rmsnorm(args, device, dtype),
             "gated_delta_beta_buffer_reuse": benchmark_beta_gate(
+                args,
+                device,
+                dtype,
+                local_value_heads,
+            ),
+            "gated_delta_decay_rate_precompute": benchmark_decay_rate(
                 args,
                 device,
                 dtype,

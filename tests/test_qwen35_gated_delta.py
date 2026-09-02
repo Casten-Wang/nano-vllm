@@ -1022,6 +1022,16 @@ def test_gated_delta_reuses_beta_projection_during_inference():
     )
 
 
+def test_gated_delta_precomputes_decay_rate_when_weights_load():
+    layer = make_layer()
+    source = torch.tensor([0.0, 1.0, 2.0, 3.0])
+
+    layer.A_log.weight_loader(layer.A_log, source)
+
+    assert layer._decay_rate is not None
+    torch.testing.assert_close(layer._decay_rate, -source.exp())
+
+
 def test_equal_length_prefills_batch_without_changing_results():
     torch.manual_seed(23)
     layer = make_layer()

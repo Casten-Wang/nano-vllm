@@ -97,6 +97,26 @@ def test_beta_gate_benchmark_reuses_projection_buffer():
     assert result["errors"][0]["max_abs_error"] == 0
 
 
+def test_decay_rate_benchmark_reports_precomputed_storage():
+    args = SimpleNamespace(
+        router_tokens=8,
+        hidden_size=16,
+        warmup=0,
+        iterations=1,
+        repeats=1,
+    )
+
+    result = MODULE.benchmark_decay_rate(
+        args,
+        torch.device("cpu"),
+        torch.bfloat16,
+        local_value_heads=4,
+    )
+
+    assert result["precomputed_decay_rate_mib"] == 4 * 4 / 1024 / 1024
+    assert result["errors"][0]["max_abs_error"] == 0
+
+
 def test_moe_output_merge_benchmark_measures_buffer_reuse():
     args = SimpleNamespace(
         router_tokens=8,

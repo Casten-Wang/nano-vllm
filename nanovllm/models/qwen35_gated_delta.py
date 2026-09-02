@@ -669,8 +669,9 @@ class Qwen35GatedDeltaNet(nn.Module):
         self.A_log = nn.Parameter(
             torch.empty(self.num_v_heads, dtype=torch.float32)
         )
-        self.A_log.weight_loader = self._load_vector
-        self.A_log.safetensors_loader = self._load_column_slice
+        self.register_buffer("_decay_rate", None, persistent=False)
+        self.A_log.weight_loader = self._load_a_log
+        self.A_log.safetensors_loader = self._load_a_log_slice
         self.norm = Qwen35GatedRMSNorm(
             self.value_head_dim,
             eps=float(config.rms_norm_eps),
@@ -715,6 +716,14 @@ class Qwen35GatedDeltaNet(nn.Module):
 
     def _load_vector(self, param: nn.Parameter, weight: torch.Tensor) -> None:
         param.data.copy_(self._column_shard(weight))
+
+    def _load_a_log(self, param: nn.Parameter, weight: torch.Tensor) -> None:
+        self._load_vector(param, weight)
+        self._decay_rate = -param.detach().float().exp()
+
+    def _load_a_log_slice(self, param: nn.Parameter, weight) -> None:
+        self._load_column_slice(param, weight)
+        self._decay_rate = -param.detach().float().exp()
 
     def _load_row(self, param: nn.Parameter, weight: torch.Tensor) -> None:
         if weight.shape[1] % self.tp_size:
@@ -935,7 +944,12 @@ class Qwen35GatedDeltaNet(nn.Module):
             # avoid one token_count x local_value_heads allocation per layer.
             beta.sigmoid_()
         a = self.in_proj_a(hidden_states)
-        log_decay = -self.A_log.float().exp() * F.softplus(
+        decay_rate = (
+            self._decay_rate
+            if not torch.is_grad_enabled() and self._decay_rate is not None
+            else -self.A_log.float().exp()
+        )
+        log_decay = decay_rate * F.softplus(
             a.float() + self.dt_bias
         )
         # The gate projection is consumed before each slice is written. During
