@@ -25,6 +25,9 @@ LONG_PREFILL_MAX_ABS_ERROR = 0.05
 MIXED_MAX_COEFFICIENT_OF_VARIATION = 0.10
 NORMALIZATION_MAX_ABS_ERROR = 0.05
 BUFFER_REUSE_MAX_ABS_ERROR = 0.05
+MIXED_MOE_MIN_SPEEDUP = 1.0
+MIXED_MOE_MAX_PEAK_EXTRA_MIB = 64.0
+MIXED_MOE_MAX_ABS_ERROR = 0.05
 KVCACHE_BLOCK_SIZE = 256
 OFFICIAL_CHECKPOINT_REPO = "Qwen/Qwen3.5-35B-A3B"
 OFFICIAL_CHECKPOINT_REVISION = "59d61f3ce65a6d9863b86d2e96597125219dc754"
@@ -109,9 +112,7 @@ def summarize_buffer_reuse_candidate(
     max_abs_error = max(item["max_abs_error"] for item in errors)
     reference = result["reference"]
     candidate = result["candidate"]
-    metadata = {
-        key: result.get(key) for key in (required_metadata or {})
-    }
+    metadata = {key: result.get(key) for key in (required_metadata or {})}
     metadata_valid = all(
         metadata[key] == expected
         for key, expected in (required_metadata or {}).items()
@@ -146,6 +147,57 @@ def summarize_buffer_reuse_candidate(
         "max_allowed_abs_error": BUFFER_REUSE_MAX_ABS_ERROR,
         "workspace": workspace,
         "metadata": metadata,
+    }
+
+
+def summarize_mixed_moe_dispatch(result: dict) -> dict:
+    errors = result.get("errors", [])
+    max_abs_error = max(
+        (item.get("max_abs_error", math.inf) for item in errors),
+        default=math.inf,
+    )
+    reference_peak = result.get("reference", {}).get(
+        "peak_extra_mib",
+        math.nan,
+    )
+    candidate_peak = result.get("candidate", {}).get(
+        "peak_extra_mib",
+        math.nan,
+    )
+    speedup = result.get("speedup_vs_grouped", math.nan)
+    peak_delta = candidate_peak - reference_peak
+    checks = {
+        "cuda_measurement": result.get("measured_on_cuda") is True,
+        "mixed_shape": (
+            isinstance(result.get("decode_tokens"), int)
+            and result["decode_tokens"] > 0
+            and isinstance(result.get("prefill_tokens"), int)
+            and result["prefill_tokens"] > 0
+        ),
+        "accuracy": (
+            bool(errors)
+            and math.isfinite(max_abs_error)
+            and max_abs_error <= MIXED_MOE_MAX_ABS_ERROR
+        ),
+        "speed": math.isfinite(speedup) and speedup >= MIXED_MOE_MIN_SPEEDUP,
+        "peak_memory": (
+            math.isfinite(peak_delta)
+            and peak_delta <= MIXED_MOE_MAX_PEAK_EXTRA_MIB
+        ),
+    }
+    return {
+        "valid": all(checks.values()),
+        "checks": checks,
+        "decode_tokens": result.get("decode_tokens"),
+        "prefill_tokens": result.get("prefill_tokens"),
+        "speedup_vs_grouped": speedup,
+        "peak_extra_mib_delta": peak_delta,
+        "max_abs_error": max_abs_error,
+        "thresholds": {
+            "min_speedup": MIXED_MOE_MIN_SPEEDUP,
+            "max_peak_extra_mib": MIXED_MOE_MAX_PEAK_EXTRA_MIB,
+            "max_abs_error": MIXED_MOE_MAX_ABS_ERROR,
+        },
     }
 
 
@@ -615,6 +667,7 @@ def summarize(run_dir: Path, run_id: str) -> dict:
     kernels = {}
     normalization = {}
     buffer_reuse = {}
+    mixed_moe_dispatch = {}
     long_prefill = {}
     mixed_runs = {}
     configured_max_decode_batch = performance["workload"]["max_num_seqs"]
@@ -787,6 +840,9 @@ def summarize(run_dir: Path, run_id: str) -> dict:
         }
         candidate = candidates_by_batch["1"]
         tp_name = path.stem
+        mixed_moe_dispatch[tp_name] = summarize_mixed_moe_dispatch(
+            result["results"]["mixed_expert_dispatch"]
+        )
         normalization[tp_name] = {
             "rmsnorm": summarize_normalization_candidate(
                 result["results"]["rmsnorm_fp32_reuse"],
@@ -1125,6 +1181,10 @@ def summarize(run_dir: Path, run_id: str) -> dict:
                 for item in by_kind.values()
             )
         ),
+        "mixed_moe_dispatch_evidence": (
+            set(mixed_moe_dispatch) == expected_tp_names
+            and all(item["valid"] for item in mixed_moe_dispatch.values())
+        ),
         "quality_reads_stored_kv": all(
             row["kv_sensitive_token_rows"] > 0 for row in quality["cases"]
         ),
@@ -1206,6 +1266,7 @@ def summarize(run_dir: Path, run_id: str) -> dict:
             "runtime_all_tp_promoted": runtime_promoted,
             "by_tp": kernels,
             "runtime_by_tp": moe_runtime,
+            "mixed_dispatch_by_tp": mixed_moe_dispatch,
         },
         "normalization": {
             "by_tp": normalization,

@@ -447,6 +447,15 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
                     }}
                     for batch in ("1", "64")
                 },
+                "mixed_expert_dispatch": {
+                    "reference": {"peak_extra_mib": 8.0},
+                    "candidate": {"peak_extra_mib": 12.0},
+                    "errors": [{"max_abs_error": 0.01}],
+                    "decode_tokens": 32,
+                    "prefill_tokens": 512,
+                    "speedup_vs_grouped": 1.1,
+                    "measured_on_cuda": True,
+                },
                 "rmsnorm_fp32_reuse": {
                     "reference": {"peak_extra_mib": 8.0},
                     "candidate": {"peak_extra_mib": 4.0},
@@ -556,6 +565,7 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     ]
     assert report["evidence"]["long_prefill_kernel_evidence"]
     assert report["evidence"]["mixed_workload_evidence"]
+    assert report["evidence"]["mixed_moe_dispatch_evidence"]
     assert report["evidence"]["normalization_workspace_evidence"]
     assert report["evidence"]["buffer_reuse_evidence"]
     assert report["evidence"]["rotary_storage_matches_preflight"]
@@ -588,6 +598,10 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     assert report["graph_safe_moe"]["by_tp"]["tp4"]["promotion"][
         "selected_decode_batches"
     ] == [1, 64]
+    mixed_dispatch = report["graph_safe_moe"]["mixed_dispatch_by_tp"]["tp4"]
+    assert mixed_dispatch["valid"]
+    assert mixed_dispatch["speedup_vs_grouped"] == 1.1
+    assert mixed_dispatch["peak_extra_mib_delta"] == 4.0
     runtime = report["graph_safe_moe"]["runtime_by_tp"]["tp4"]["auto"]
     assert runtime["output_digest_matches"]
     assert runtime["throughput_speedup"] == 2.0
@@ -857,6 +871,25 @@ def test_buffer_reuse_summary_rejects_peak_memory_regression():
     assert summary["measurement_valid"]
     assert not summary["memory_non_regression"]
     assert not summary["valid"]
+
+
+def test_mixed_moe_summary_requires_cuda_and_non_regressing_speed():
+    result = {
+        "reference": {"peak_extra_mib": 8.0},
+        "candidate": {"peak_extra_mib": 9.0},
+        "errors": [{"max_abs_error": 0.01}],
+        "decode_tokens": 32,
+        "prefill_tokens": 512,
+        "speedup_vs_grouped": 0.99,
+        "measured_on_cuda": False,
+    }
+
+    summary = MODULE.summarize_mixed_moe_dispatch(result)
+
+    assert not summary["valid"]
+    assert not summary["checks"]["cuda_measurement"]
+    assert not summary["checks"]["speed"]
+    assert summary["peak_extra_mib_delta"] == 1.0
 
 
 def test_normalization_summary_rejects_invalid_measurements():
