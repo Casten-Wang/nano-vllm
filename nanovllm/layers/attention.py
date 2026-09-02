@@ -40,6 +40,7 @@ class Attention(nn.Module):
         self.int8_partitioned_decode_threshold = 8192
         self.int8_partitioned_decode_partition_size = 512
         self.int8_partitioned_decode_pool = None
+        self.int8_dequant_pool = None
 
     def _window_size(self):
         context = get_context()
@@ -137,14 +138,20 @@ class Attention(nn.Module):
                 dtype,
             )
 
-        packed_shape = (
-            num_selected_blocks,
-            self.k_cache.size(1),
-            self.k_cache.size(2),
-            self.k_cache.size(3),
-        )
-        packed_k_cache = torch.empty(packed_shape, dtype=dtype, device=self.k_cache.device)
-        packed_v_cache = torch.empty_like(packed_k_cache)
+        if self.int8_dequant_pool is None:
+            packed_shape = (num_selected_blocks, *self.k_cache.shape[1:])
+            packed_k_cache = torch.empty(
+                packed_shape,
+                dtype=dtype,
+                device=self.k_cache.device,
+            )
+            packed_v_cache = torch.empty_like(packed_k_cache)
+        else:
+            packed_k_cache, packed_v_cache = self.int8_dequant_pool.acquire(
+                self.k_cache,
+                num_selected_blocks,
+                dtype,
+            )
         dequant_packed_kvcache(
             self.k_cache,
             self.v_cache,

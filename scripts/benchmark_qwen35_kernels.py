@@ -228,6 +228,69 @@ def benchmark_partitioned_decode_buffer_reuse(
     }
 
 
+def benchmark_int8_dequant_buffer_reuse(
+    args,
+    device: torch.device,
+    dtype: torch.dtype,
+    local_kv_heads: int,
+) -> dict:
+    """Compare packed K/V allocation with a shared model-level pool."""
+
+    num_blocks = math.ceil(args.int8_context_len / args.kvcache_block_size)
+    cache = torch.empty(
+        num_blocks,
+        args.kvcache_block_size,
+        local_kv_heads,
+        args.attention_head_dim,
+        dtype=torch.int8,
+        device=device,
+    )
+    packed_shape = (num_blocks, *cache.shape[1:])
+    pool = KV_QUANT.Int8DequantBufferPool()
+    candidate_k, candidate_v = pool.acquire(cache, num_blocks, dtype)
+
+    def reference():
+        key = torch.empty(packed_shape, dtype=dtype, device=device)
+        return key, torch.empty_like(key)
+
+    def candidate():
+        return pool.acquire(cache, num_blocks, dtype)
+
+    return {
+        "reference": measure(
+            reference,
+            device=device,
+            warmup=args.warmup,
+            iterations=args.iterations,
+            repeats=args.repeats,
+        ),
+        "candidate": measure(
+            candidate,
+            device=device,
+            warmup=args.warmup,
+            iterations=args.iterations,
+            repeats=args.repeats,
+        ),
+        "configuration": {
+            "context_len": args.int8_context_len,
+            "block_size": args.kvcache_block_size,
+            "selected_blocks": num_blocks,
+            "local_kv_heads": local_kv_heads,
+            "head_dim": args.attention_head_dim,
+        },
+        "persistent_buffer_mib": (
+            pool.storage_stats()["total_bytes"] / 1024 / 1024
+        ),
+        "packed_k_shape": list(candidate_k.shape),
+        "packed_v_shape": list(candidate_v.shape),
+        "eliminated_tensor_allocations_per_attention_layer": 2,
+        "candidate_reuses_one_storage_for_kv": (
+            candidate_k.untyped_storage().data_ptr()
+            == candidate_v.untyped_storage().data_ptr()
+        ),
+    }
+
+
 def compare(
     reference: Callable[[], tuple[torch.Tensor, ...]],
     candidate: Callable[[], tuple[torch.Tensor, ...]],
@@ -3226,6 +3289,12 @@ def main() -> None:
                     dtype,
                     local_query_heads,
                 )
+            ),
+            "int8_dequant_buffer_reuse": benchmark_int8_dequant_buffer_reuse(
+                args,
+                device,
+                dtype,
+                local_kv_heads,
             ),
             "router_topk_first": benchmark_router(args, device, dtype),
             "sampling_filter_fast_paths": benchmark_sampling_filter(

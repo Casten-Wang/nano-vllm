@@ -138,6 +138,45 @@ def test_partitioned_decode_uses_shared_workspace_and_output():
     assert kernel.call_args.kwargs["buffer_pool"] is pool
 
 
+def test_int8_dequant_uses_shared_packed_kv_buffers():
+    layer = ATTENTION.Attention(2, 3, 3**-0.5, 1)
+    layer.k_cache = torch.empty(4, 2, 1, 3, dtype=torch.int8)
+    layer.v_cache = torch.empty_like(layer.k_cache)
+    layer.k_scale = torch.empty(4, 2, 1)
+    layer.v_scale = torch.empty_like(layer.k_scale)
+    block_ids = torch.tensor([3, 1], dtype=torch.int32)
+    block_tables = torch.tensor([[0, 1]], dtype=torch.int32)
+    packed_k = torch.empty(2, 2, 1, 3)
+    packed_v = torch.empty_like(packed_k)
+
+    class Pool:
+        def acquire(self, cache, count, dtype):
+            assert cache is layer.k_cache
+            assert count == 2
+            assert dtype == torch.float32
+            return packed_k, packed_v
+
+    layer.int8_dequant_pool = Pool()
+    with patch.object(ATTENTION, "dequant_packed_kvcache") as dequant:
+        actual = layer._dequant_kvcache(
+            torch.float32,
+            block_ids,
+            block_tables,
+        )
+
+    assert actual[0] is packed_k
+    assert actual[1] is packed_v
+    dequant.assert_called_once_with(
+        layer.k_cache,
+        layer.v_cache,
+        layer.k_scale,
+        layer.v_scale,
+        block_ids,
+        packed_k,
+        packed_v,
+    )
+
+
 @pytest.mark.parametrize("grad_enabled", [False, True])
 def test_mixed_attention_reuses_query_only_in_inference(grad_enabled):
     layer = make_mixed_attention()

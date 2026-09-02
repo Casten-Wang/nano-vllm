@@ -22,6 +22,7 @@ else:
         assert spec.loader is not None
         spec.loader.exec_module(module)
         store_kvcache_int8 = module.store_kvcache_int8
+        Int8DequantBufferPool = module.Int8DequantBufferPool
         dequant_selected_kvcache_torch = (
             module.dequant_selected_kvcache_torch
         )
@@ -51,6 +52,47 @@ def quantize_reference(tensor):
     f"missing dependency: {IMPORT_ERROR}",
 )
 class TorchKVCacheDequantTest(unittest.TestCase):
+    def test_dequant_buffer_pool_reuses_one_allocation_across_shapes(self):
+        pool = Int8DequantBufferPool()
+        cache = torch.empty(8, 4, 2, 3, dtype=torch.int8)
+
+        large_k, large_v = pool.acquire(cache, 6, torch.float32)
+        storage_ptr = large_k.untyped_storage().data_ptr()
+        small_k, small_v = pool.acquire(cache, 2, torch.float32)
+
+        self.assertEqual(large_k.shape, (6, 4, 2, 3))
+        self.assertEqual(large_v.shape, large_k.shape)
+        self.assertEqual(small_k.shape, (2, 4, 2, 3))
+        self.assertEqual(small_v.shape, small_k.shape)
+        self.assertEqual(small_k.untyped_storage().data_ptr(), storage_ptr)
+        self.assertEqual(small_v.untyped_storage().data_ptr(), storage_ptr)
+        self.assertNotEqual(small_k.data_ptr(), small_v.data_ptr())
+        self.assertEqual(
+            pool.storage_stats()["total_bytes"],
+            2 * large_k.numel() * large_k.element_size(),
+        )
+
+    def test_dequant_buffer_pool_grows_and_changes_dtype(self):
+        pool = Int8DequantBufferPool()
+        cache = torch.empty(8, 4, 2, 3, dtype=torch.int8)
+        first_k, _ = pool.acquire(cache, 1, torch.float16)
+        first_items = pool.storage.numel()
+
+        larger_k, larger_v = pool.acquire(cache, 5, torch.bfloat16)
+
+        self.assertGreater(pool.storage.numel(), first_items)
+        self.assertEqual(larger_k.dtype, torch.bfloat16)
+        self.assertEqual(larger_v.dtype, torch.bfloat16)
+        self.assertEqual(larger_k.shape, (5, 4, 2, 3))
+        self.assertNotEqual(first_k.dtype, larger_k.dtype)
+
+    def test_dequant_buffer_pool_rejects_empty_request(self):
+        pool = Int8DequantBufferPool()
+        cache = torch.empty(1, 4, 2, 3, dtype=torch.int8)
+
+        with self.assertRaisesRegex(ValueError, "at least one block"):
+            pool.acquire(cache, 0, torch.float16)
+
     def test_selected_dequant_reuses_gathered_output_storage(self):
         k_cache = torch.tensor(
             [[[[1, -2]]], [[[3, -4]]], [[[5, -6]]]],

@@ -3,6 +3,42 @@ import triton
 import triton.language as tl
 
 
+class Int8DequantBufferPool:
+    """Reusable single-stream storage for packed dequantized K/V blocks."""
+
+    def __init__(self) -> None:
+        self.storage: torch.Tensor | None = None
+
+    def acquire(
+        self,
+        cache: torch.Tensor,
+        num_selected_blocks: int,
+        dtype: torch.dtype,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if num_selected_blocks <= 0:
+            raise ValueError("dequant buffer requires at least one block")
+        shape = (num_selected_blocks, *cache.shape[1:])
+        items = num_selected_blocks * cache[0].numel()
+        required = 2 * items
+        if (
+            self.storage is None
+            or self.storage.numel() < required
+            or self.storage.dtype != dtype
+            or self.storage.device != cache.device
+        ):
+            self.storage = torch.empty(required, dtype=dtype, device=cache.device)
+        storage = self.storage[:required]
+        return storage[:items].view(shape), storage[items:].view(shape)
+
+    def storage_stats(self) -> dict[str, int]:
+        total_bytes = (
+            0
+            if self.storage is None
+            else self.storage.numel() * self.storage.element_size()
+        )
+        return {"total_bytes": total_bytes}
+
+
 def dequant_selected_kvcache_torch(
     k_cache: torch.Tensor,
     v_cache: torch.Tensor,

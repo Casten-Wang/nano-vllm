@@ -68,6 +68,31 @@ def test_partitioned_decode_benchmark_measures_shared_buffer_reuse():
     assert result["candidate_reuses_workspace_and_output"]
 
 
+def test_int8_dequant_benchmark_measures_shared_kv_storage():
+    args = SimpleNamespace(
+        attention_head_dim=8,
+        int8_context_len=17,
+        kvcache_block_size=8,
+        warmup=0,
+        iterations=1,
+        repeats=1,
+    )
+
+    result = MODULE.benchmark_int8_dequant_buffer_reuse(
+        args,
+        torch.device("cpu"),
+        torch.float32,
+        local_kv_heads=2,
+    )
+
+    assert result["configuration"]["selected_blocks"] == 3
+    assert result["packed_k_shape"] == [3, 8, 2, 8]
+    assert result["packed_v_shape"] == [3, 8, 2, 8]
+    assert result["persistent_buffer_mib"] > 0
+    assert result["eliminated_tensor_allocations_per_attention_layer"] == 2
+    assert result["candidate_reuses_one_storage_for_kv"]
+
+
 def test_packed_block_metadata_benchmark_measures_buffer_reuse():
     args = SimpleNamespace(
         sampling_batch=2,

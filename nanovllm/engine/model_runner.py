@@ -329,11 +329,20 @@ class ModelRunner:
 
     def get_runtime_buffer_stats(self):
         pools = {}
+        dequant_pools = {}
         for module in self.model.modules():
             pool = getattr(module, "int8_partitioned_decode_pool", None)
             if pool is not None:
                 pools[id(pool)] = pool
+            dequant_pool = getattr(module, "int8_dequant_pool", None)
+            if dequant_pool is not None:
+                dequant_pools[id(dequant_pool)] = dequant_pool
         stats = [pool.storage_stats() for pool in pools.values()]
+        dequant_stats = [
+            pool.storage_stats() for pool in dequant_pools.values()
+        ]
+        partitioned_total = sum(item["total_bytes"] for item in stats)
+        dequant_total = sum(item["total_bytes"] for item in dequant_stats)
         return {
             "int8_partitioned_decode_pool_count": len(stats),
             "int8_partitioned_workspace_bytes": sum(
@@ -342,7 +351,9 @@ class ModelRunner:
             "int8_partitioned_output_bytes": sum(
                 item["output_bytes"] for item in stats
             ),
-            "total_bytes_local_rank": sum(item["total_bytes"] for item in stats),
+            "int8_dequant_pool_count": len(dequant_stats),
+            "int8_dequant_buffer_bytes": dequant_total,
+            "total_bytes_local_rank": partitioned_total + dequant_total,
         }
 
     def get_runtime_buffer_stats_by_rank(self):
@@ -726,6 +737,7 @@ class ModelRunner:
         from nanovllm.layers.int8_fused_attention import (
             PartitionedDecodeBufferPool,
         )
+        from nanovllm.layers.kv_cache_quant import Int8DequantBufferPool
 
         config = self.config
         hf_config = config.model_config
@@ -769,6 +781,7 @@ class ModelRunner:
             dtype=torch.float16,
         )
         partitioned_decode_pool = PartitionedDecodeBufferPool()
+        dequant_pool = Int8DequantBufferPool()
         layer_id = 0
         for module in self.model.modules():
             if hasattr(module, "k_cache") and hasattr(module, "v_cache"):
@@ -782,6 +795,7 @@ class ModelRunner:
                 module.int8_partitioned_decode_threshold = config.int8_partitioned_decode_threshold
                 module.int8_partitioned_decode_partition_size = config.int8_partitioned_decode_partition_size
                 module.int8_partitioned_decode_pool = partitioned_decode_pool
+                module.int8_dequant_pool = dequant_pool
                 layer_id += 1
         if layer_id != num_layers:
             raise RuntimeError(
