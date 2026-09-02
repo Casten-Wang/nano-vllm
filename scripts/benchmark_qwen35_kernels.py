@@ -1209,6 +1209,59 @@ def benchmark_rmsnorm(args, device, dtype) -> dict:
     return result
 
 
+def benchmark_attention_norm_output_reuse(args, device, dtype) -> dict:
+    x = torch.randn(
+        args.router_tokens,
+        args.hidden_size,
+        device=device,
+        dtype=dtype,
+    )
+    weight = torch.randn(
+        args.hidden_size,
+        args.hidden_size,
+        device=device,
+        dtype=dtype,
+    )
+    gain = torch.randn(args.hidden_size, device=device, dtype=torch.float32)
+    eps = 1e-6
+
+    def reference():
+        projected = F.linear(x, weight)
+        projected_float = projected.float()
+        projected_float.mul_(
+            torch.rsqrt(
+                projected_float.square().mean(dim=-1, keepdim=True) + eps
+            )
+        )
+        projected_float.mul_(gain)
+        return (projected_float.to(dtype),)
+
+    def candidate():
+        projected = F.linear(x, weight)
+        projected_float = projected.float()
+        projected_float.mul_(
+            torch.rsqrt(
+                projected_float.square().mean(dim=-1, keepdim=True) + eps
+            )
+        )
+        projected_float.mul_(gain)
+        projected.copy_(projected_float)
+        return (projected,)
+
+    result = compare(
+        reference,
+        candidate,
+        device=device,
+        warmup=args.warmup,
+        iterations=args.iterations,
+        repeats=args.repeats,
+    )
+    result["reused_projection_output_mib"] = (
+        x.numel() * x.element_size() / 1024 / 1024
+    )
+    return result
+
+
 def benchmark_beta_gate(args, device, dtype, local_value_heads: int) -> dict:
     hidden = torch.randn(
         args.router_tokens,
@@ -2194,6 +2247,11 @@ def main() -> None:
                 dtype,
             ),
             "rmsnorm_fp32_reuse": benchmark_rmsnorm(args, device, dtype),
+            "attention_norm_output_reuse": benchmark_attention_norm_output_reuse(
+                args,
+                device,
+                dtype,
+            ),
             "gated_delta_beta_buffer_reuse": benchmark_beta_gate(
                 args,
                 device,

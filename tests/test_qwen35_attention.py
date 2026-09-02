@@ -59,10 +59,14 @@ class DeltaRMSNorm(nn.Module):
         self.weight = nn.Parameter(torch.zeros(hidden_size))
         self.eps = eps
 
-    def forward(self, x):
-        return x.float().mul(torch.rsqrt(x.float().pow(2).mean(-1, keepdim=True) + self.eps)).mul(
+    def forward(self, x, *, inplace_output=False):
+        output = x.float().mul(torch.rsqrt(x.float().pow(2).mean(-1, keepdim=True) + self.eps)).mul(
             1 + self.weight.float()
         ).to(x.dtype)
+        if inplace_output and not torch.is_grad_enabled():
+            x.copy_(output)
+            return x
+        return output
 
 
 moe_module.Qwen35RMSNorm = DeltaRMSNorm
@@ -169,6 +173,33 @@ def test_query_gate_reuses_attention_output_storage_in_inference():
         projection_hook.remove()
 
     assert storage["gated"] == storage["attention"]
+
+
+@torch.no_grad()
+def test_attention_norms_reuse_query_and_key_projection_storage():
+    layer = make_attention()
+    storage = {}
+    query_hook = layer.q_norm.register_forward_hook(
+        lambda _module, inputs, output: storage.update(
+            query_input=inputs[0].data_ptr(),
+            query_output=output.data_ptr(),
+        )
+    )
+    key_hook = layer.k_norm.register_forward_hook(
+        lambda _module, inputs, output: storage.update(
+            key_input=inputs[0].data_ptr(),
+            key_output=output.data_ptr(),
+        )
+    )
+
+    try:
+        layer(torch.arange(3), torch.randn(3, 8))
+    finally:
+        query_hook.remove()
+        key_hook.remove()
+
+    assert storage["query_output"] == storage["query_input"]
+    assert storage["key_output"] == storage["key_input"]
 
 
 def test_query_gate_keeps_separate_autograd_output():

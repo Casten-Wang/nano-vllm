@@ -106,8 +106,8 @@ class Qwen35Attention(nn.Module):
             self.head_dim,
         )
         value = self.v_proj(hidden_states).view_as(key)
-        query = self.q_norm(query)
-        key = self.k_norm(key)
+        query = self.q_norm(query, inplace_output=True)
+        key = self.k_norm(key, inplace_output=True)
         query, key = self.rotary_emb(positions, query, key)
         output = self.attn(query, key, value)
         if output.requires_grad or gate.requires_grad:

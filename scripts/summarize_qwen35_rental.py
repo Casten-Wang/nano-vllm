@@ -934,6 +934,10 @@ def summarize(run_dir: Path, run_id: str) -> dict:
                 result["results"]["router_topk_first"],
                 ("reused_selected_logits_mib",),
             ),
+            "attention_norm_output": summarize_buffer_reuse_candidate(
+                result["results"]["attention_norm_output_reuse"],
+                ("reused_projection_output_mib",),
+            ),
             "moe_output_merge": summarize_buffer_reuse_candidate(
                 result["results"]["moe_output_buffer_reuse"],
                 (

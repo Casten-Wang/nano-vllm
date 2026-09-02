@@ -527,6 +527,13 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
                     "reused_branch_output_mib_per_merge": 4.0,
                     "residual_merges_per_decoder_layer": 2,
                 },
+                "attention_norm_output_reuse": {
+                    "reference": {"peak_extra_mib": 8.0},
+                    "candidate": {"peak_extra_mib": 4.0},
+                    "speedup": 1.05,
+                    "errors": [{"max_abs_error": 0.0}],
+                    "reused_projection_output_mib": 4.0,
+                },
                 "torch_kv_dequant_buffer_reuse": {
                     "reference": {"peak_extra_mib": 32.0},
                     "candidate": {"peak_extra_mib": 16.0},
@@ -615,6 +622,9 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     assert report["buffer_reuse"]["by_tp"]["tp4"]["torch_kv_dequant"][
         "workspace"
     ]["avoided_output_workspace_mib"] == 16.0
+    assert report["buffer_reuse"]["by_tp"]["tp4"]["attention_norm_output"][
+        "workspace"
+    ]["reused_projection_output_mib"] == 4.0
     assert report["buffer_reuse"]["by_tp"]["tp4"]["recurrent_decode"][
         "metadata"
     ]["avoided_full_state_intermediates"] == 2

@@ -33,11 +33,22 @@ class Qwen35RMSNorm(nn.Module):
     def _load_weight_slice(param: nn.Parameter, loaded_weight) -> None:
         Qwen35RMSNorm._load_weight(param, loaded_weight[:])
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        *,
+        inplace_output: bool = False,
+    ) -> torch.Tensor:
         x_float = x.float()
         inverse_rms = torch.rsqrt(
             x_float.pow(2).mean(dim=-1, keepdim=True) + self.eps
         )
+        if inplace_output and not torch.is_grad_enabled():
+            x_float.mul_(inverse_rms)
+            x_float.mul_(self.weight)
+            if x_float is not x:
+                x.copy_(x_float)
+            return x
         if not torch.is_grad_enabled() and x_float is not x:
             x_float.mul_(inverse_rms)
             x_float.mul_(self.weight)

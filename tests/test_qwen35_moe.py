@@ -978,6 +978,27 @@ def test_qwen35_rmsnorm_inference_matches_fp32_reference_without_mutation(dtype)
     torch.testing.assert_close(output, expected)
 
 
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_qwen35_rmsnorm_can_reuse_explicit_inference_output(dtype):
+    torch.manual_seed(72)
+    norm = qwen35_moe.Qwen35RMSNorm(8)
+    norm.weight.data.normal_(mean=1.0, std=0.2)
+    source = torch.randn(5, 8, dtype=dtype)
+    source_ptr = source.data_ptr()
+    source_float = source.float()
+    expected = (
+        source_float
+        * torch.rsqrt(source_float.square().mean(dim=-1, keepdim=True) + norm.eps)
+        * norm.weight
+    ).to(dtype)
+
+    with torch.inference_mode():
+        output = norm(source, inplace_output=True)
+
+    assert output.data_ptr() == source_ptr
+    torch.testing.assert_close(output, expected)
+
+
 def test_qwen35_rmsnorm_autograd_preserves_backward_inputs():
     norm = qwen35_moe.Qwen35RMSNorm(8)
     source = torch.randn(5, 8, dtype=torch.bfloat16, requires_grad=True)
