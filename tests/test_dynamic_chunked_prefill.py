@@ -130,6 +130,25 @@ def test_dynamic_schedule_decodes_first_and_uses_remaining_budget_for_prefill():
     assert waiting.num_scheduled_tokens == 7
     assert waiting.num_cached_tokens == 0
     assert waiting.block_table
+    assert list(scheduler.running) == [running]
+
+
+def test_newly_admitted_prefill_does_not_jump_ahead_of_existing_decode():
+    scheduler = make_scheduler(max_tokens=8, max_seqs=8, block_size=4)
+    running = Sequence([1, 2, 3, 4])
+    waiting = Sequence([10] * 4)
+    scheduler.block_manager.allocate(running, 0)
+    running.status = SequenceStatus.RUNNING
+    running.is_prefill = False
+    running.num_cached_tokens = len(running)
+    scheduler.running.append(running)
+    scheduler.waiting.append(waiting)
+
+    result = scheduler.schedule()
+
+    assert result.decode_seqs == [running]
+    assert result.prefill_seqs == [waiting]
+    assert list(scheduler.running) == [running, waiting]
 
 
 def test_dynamic_schedule_prefill_waits_when_decode_fills_token_budget():

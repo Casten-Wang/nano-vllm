@@ -214,12 +214,19 @@ class Scheduler:
         # counted before admitting new prefill requests.
         active_decode_seqs = len(self.running) + len(decode_seqs)
         prefill_slots = max(self.max_num_seqs - active_decode_seqs, 0)
+        running_before_prefill = len(self.running)
         prefill_seqs = self.schedule_prefill_with_budget(prefill_budget, prefill_slots)
         if decode_seqs:
-            # Rotate decoded requests to the back. Using extendleft here
-            # repeatedly selected the same queue head when the token budget
-            # was smaller than the number of running requests.
+            # Rotate decoded requests behind unscheduled running requests, but
+            # keep them ahead of requests admitted by prefill in this step.
+            # Otherwise a newly admitted request jumps the FCFS queue and may
+            # cause an older request at the tail to be selected for preemption.
+            newly_admitted = []
+            while len(self.running) > running_before_prefill:
+                newly_admitted.append(self.running.pop())
+            newly_admitted.reverse()
             self.running.extend(decode_seqs)
+            self.running.extend(newly_admitted)
         if not decode_seqs and not prefill_seqs:
             if self.waiting:
                 seq = self.waiting[0]

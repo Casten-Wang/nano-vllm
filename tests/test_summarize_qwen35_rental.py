@@ -221,8 +221,8 @@ def write_pressure_case(root):
             "peak_torch_allocated_mib": 12_000.0,
             "metrics": {
                 "preemption_count": 1,
-                "preempted_token_progress": 1025,
-                "max_preempted_token_progress": 1025,
+                "preempted_token_progress": 1024,
+                "max_preempted_token_progress": 1024,
                 "reclaimed_kv_blocks": 4,
             },
             "execution_validation": {"valid": True},
@@ -964,7 +964,7 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     pressure = report["kv_pressure"]["by_tp"]["tp4"]
     assert pressure["valid"]
     assert pressure["preemption_count"] == 1
-    assert pressure["preempted_token_progress"] == 1025
+    assert pressure["preempted_token_progress"] == 1024
     memory = report["memory"]["by_tp"]["tp4"]
     assert memory["int8_kv_reduction_ratio"] == 0.49609375
     assert memory["minimum_budget_margin_bytes"] == 5_000
