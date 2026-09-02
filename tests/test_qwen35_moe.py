@@ -325,6 +325,77 @@ def test_batched_multi_token_decode_matches_sorted_backend_in_chunks():
     assert selected_route_counts == [4, 4, 2]
 
 
+def test_batched_dispatch_can_fill_caller_output_buffer():
+    torch.manual_seed(57)
+    experts = make_experts(
+        num_experts=4,
+        decode_backend="batched",
+        decode_chunk_size=2,
+    )
+    experts.gate_up_proj.data.normal_()
+    experts.down_proj.data.normal_()
+    hidden = torch.randn(3, 2)
+    topk_ids = torch.tensor([[3, 0], [1, 2], [0, 3]])
+    topk_weights = torch.rand(3, 2)
+    topk_weights /= topk_weights.sum(dim=-1, keepdim=True)
+    expected = moe_dispatch.batched_expert_dispatch(
+        hidden,
+        topk_ids,
+        topk_weights,
+        experts.gate_up_proj,
+        experts.down_proj,
+        2,
+    )
+    output = torch.empty_like(hidden)
+
+    actual = moe_dispatch.batched_expert_dispatch(
+        hidden,
+        topk_ids,
+        topk_weights,
+        experts.gate_up_proj,
+        experts.down_proj,
+        2,
+        output=output,
+    )
+
+    assert actual is output
+    torch.testing.assert_close(actual, expected)
+
+
+def test_mixed_batched_backend_only_splits_decode_prefix():
+    torch.manual_seed(58)
+    sorted_experts = make_experts(num_experts=4)
+    mixed_experts = make_experts(
+        num_experts=4,
+        decode_backend="batched",
+        decode_chunk_size=2,
+    )
+    mixed_experts.load_state_dict(sorted_experts.state_dict())
+    hidden = torch.randn(5, 2)
+    topk_ids = torch.tensor([[3, 0], [1, 2], [0, 3], [2, 1], [3, 2]])
+    topk_weights = torch.rand(5, 2)
+    topk_weights /= topk_weights.sum(dim=-1, keepdim=True)
+    expected = sorted_experts(hidden, topk_ids, topk_weights, is_decode=False)
+
+    with patch.object(
+        qwen35_moe,
+        "batched_expert_dispatch",
+        wraps=qwen35_moe.batched_expert_dispatch,
+    ) as batched:
+        actual = mixed_experts(
+            hidden,
+            topk_ids,
+            topk_weights,
+            is_decode=False,
+            decode_token_count=2,
+        )
+
+    torch.testing.assert_close(actual, expected)
+    assert batched.call_count == 1
+    assert torch.equal(batched.call_args.args[0], hidden[:2])
+    assert batched.call_args.kwargs["output"].data_ptr() == actual[:2].data_ptr()
+
+
 def test_batched_decode_preallocated_output_preserves_autograd():
     torch.manual_seed(59)
     experts = make_experts(
@@ -648,6 +719,7 @@ def test_mixed_batch_keeps_prefill_tokens_on_grouped_moe_dispatch():
     context_module.get_context = lambda: SimpleNamespace(
         is_prefill=False,
         is_mixed=True,
+        decode_token_count=2,
     )
     topk_weights = torch.ones(7, 2)
     topk_ids = torch.zeros(7, 2, dtype=torch.long)
@@ -672,7 +744,11 @@ def test_mixed_batch_keeps_prefill_tokens_on_grouped_moe_dispatch():
     ):
         block(hidden)
 
-    assert experts.call_args.kwargs["is_decode"] is False
+    assert experts.call_args.kwargs == {
+        "is_decode": False,
+        "decode_token_count": 2,
+        "reduce_output": False,
+    }
 
 
 def test_combined_routed_and_shared_tp_partials_match_full_reference():

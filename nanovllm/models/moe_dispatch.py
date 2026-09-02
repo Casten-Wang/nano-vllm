@@ -32,6 +32,8 @@ def batched_expert_dispatch(
     gate_up_proj: torch.Tensor,
     down_proj: torch.Tensor,
     chunk_size: int = 8,
+    *,
+    output: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Dispatch decode tokens without device-to-host synchronization.
 
@@ -42,7 +44,14 @@ def batched_expert_dispatch(
     if chunk_size <= 0:
         raise ValueError("decode chunk size must be positive")
     top_k = topk_ids.shape[1]
-    output = torch.empty_like(hidden_states)
+    if output is None:
+        output = torch.empty_like(hidden_states)
+    elif (
+        output.shape != hidden_states.shape
+        or output.dtype != hidden_states.dtype
+        or output.device != hidden_states.device
+    ):
+        raise ValueError("output must match hidden_states shape, dtype, and device")
     for start in range(0, hidden_states.shape[0], chunk_size):
         end = min(start + chunk_size, hidden_states.shape[0])
         expert_ids = topk_ids[start:end].reshape(-1)

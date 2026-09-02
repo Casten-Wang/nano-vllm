@@ -205,11 +205,16 @@ class Qwen35Experts(nn.Module):
         topk_weights: torch.Tensor,
         *,
         is_decode: bool | None = None,
+        decode_token_count: int = 0,
         reduce_output: bool = True,
     ) -> torch.Tensor:
         if is_decode is None:
             is_decode = hidden_states.shape[0] == 1
-        if is_decode and self.decode_backend == "batched":
+        if not 0 <= decode_token_count <= hidden_states.shape[0]:
+            raise ValueError("decode_token_count must fit within hidden_states")
+        if self.decode_backend == "batched" and (
+            is_decode or decode_token_count == hidden_states.shape[0]
+        ):
             output = batched_expert_dispatch(
                 hidden_states,
                 topk_ids,
@@ -221,7 +226,45 @@ class Qwen35Experts(nn.Module):
             if reduce_output and self.tp_size > 1:
                 dist.all_reduce(output)
             return output
-        output = torch.zeros_like(hidden_states)
+        if self.decode_backend == "batched" and decode_token_count:
+            output = torch.zeros_like(hidden_states)
+            batched_expert_dispatch(
+                hidden_states[:decode_token_count],
+                topk_ids[:decode_token_count],
+                topk_weights[:decode_token_count],
+                self.gate_up_proj,
+                self.down_proj,
+                self.decode_chunk_size,
+                output=output[:decode_token_count],
+            )
+            self._forward_sorted(
+                hidden_states[decode_token_count:],
+                topk_ids[decode_token_count:],
+                topk_weights[decode_token_count:],
+                output=output[decode_token_count:],
+            )
+        else:
+            output = self._forward_sorted(
+                hidden_states,
+                topk_ids,
+                topk_weights,
+            )
+        if reduce_output and self.tp_size > 1:
+            dist.all_reduce(output)
+        return output
+
+    def _forward_sorted(
+        self,
+        hidden_states: torch.Tensor,
+        topk_ids: torch.Tensor,
+        topk_weights: torch.Tensor,
+        *,
+        output: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if output is None:
+            output = torch.zeros_like(hidden_states)
+        else:
+            output.zero_()
         if hidden_states.shape[0] == 1:
             # Decode has only ``top_k`` routes. Preserve the expert-sorted
             # accumulation order without building the general flattened
@@ -240,8 +283,6 @@ class Qwen35Experts(nn.Module):
                 output.add_(
                     expert_output * topk_weights[0, route_index]
                 )
-            if reduce_output and self.tp_size > 1:
-                dist.all_reduce(output)
             return output
 
         assignments = topk_ids.reshape(-1)
@@ -278,8 +319,6 @@ class Qwen35Experts(nn.Module):
             expert_output = expert_output * sorted_weights[offset:end].unsqueeze(-1)
             output.index_add_(0, token_index, expert_output.to(output.dtype))
             offset = end
-        if reduce_output and self.tp_size > 1:
-            dist.all_reduce(output)
         return output
 
 
@@ -345,12 +384,17 @@ class Qwen35SparseMoeBlock(nn.Module):
         context = get_context()
         pure_decode = not context.is_prefill and not context.is_mixed
 
+        expert_options = {
+            "is_decode": pure_decode,
+            "reduce_output": False,
+        }
+        if context.is_mixed:
+            expert_options["decode_token_count"] = context.decode_token_count
         routed = self.experts(
             flat_states,
             topk_ids,
             topk_weights,
-            is_decode=pure_decode,
-            reduce_output=False,
+            **expert_options,
         )
         shared = self.shared_expert(flat_states, reduce_output=False)
         shared_gate = self.shared_expert_gate(flat_states)
