@@ -384,7 +384,10 @@ def test_sparse_moe_combines_tp_outputs_before_single_all_reduce():
     routed = torch.full_like(hidden, 2.0)
     shared = torch.full_like(hidden, 4.0)
     context_module = types.ModuleType("nanovllm.utils.context")
-    context_module.get_context = lambda: SimpleNamespace(is_prefill=False)
+    context_module.get_context = lambda: SimpleNamespace(
+        is_prefill=False,
+        is_mixed=False,
+    )
     block.shared_expert_gate.weight.data.zero_()
     topk_weights = torch.ones(3, 2)
     topk_ids = torch.zeros(3, 2, dtype=torch.long)
@@ -412,6 +415,55 @@ def test_sparse_moe_combines_tp_outputs_before_single_all_reduce():
     assert all_reduce.call_count == 1
     assert torch.equal(all_reduce.call_args.args[0], output)
     torch.testing.assert_close(output, routed + 0.5 * shared)
+
+
+def test_mixed_batch_keeps_prefill_tokens_on_grouped_moe_dispatch():
+    config = SimpleNamespace(
+        hidden_size=4,
+        num_experts=4,
+        num_experts_per_tok=2,
+        moe_intermediate_size=8,
+        shared_expert_intermediate_size=8,
+        qwen35_moe_decode_backend="batched",
+        qwen35_moe_decode_chunk_size=2,
+    )
+    with (
+        patch.object(qwen35_moe.dist, "get_world_size", return_value=1),
+        patch.object(qwen35_moe.dist, "get_rank", return_value=0),
+        patch.object(linear.dist, "get_world_size", return_value=1),
+        patch.object(linear.dist, "get_rank", return_value=0),
+    ):
+        block = qwen35_moe.Qwen35SparseMoeBlock(config)
+    hidden = torch.randn(7, 4)
+    context_module = types.ModuleType("nanovllm.utils.context")
+    context_module.get_context = lambda: SimpleNamespace(
+        is_prefill=False,
+        is_mixed=True,
+    )
+    topk_weights = torch.ones(7, 2)
+    topk_ids = torch.zeros(7, 2, dtype=torch.long)
+
+    with (
+        patch.dict(sys.modules, {"nanovllm.utils.context": context_module}),
+        patch.object(
+            block.gate,
+            "forward",
+            return_value=(topk_weights, topk_ids),
+        ),
+        patch.object(
+            block.experts,
+            "forward",
+            return_value=torch.zeros_like(hidden),
+        ) as experts,
+        patch.object(
+            block.shared_expert,
+            "forward",
+            return_value=torch.zeros_like(hidden),
+        ),
+    ):
+        block(hidden)
+
+    assert experts.call_args.kwargs["is_decode"] is False
 
 
 def test_combined_routed_and_shared_tp_partials_match_full_reference():

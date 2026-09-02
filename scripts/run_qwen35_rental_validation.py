@@ -16,6 +16,7 @@ MATRIX_SCRIPT = ROOT / "scripts" / "benchmark_qwen35_matrix.py"
 KERNEL_SCRIPT = ROOT / "scripts" / "benchmark_qwen35_kernels.py"
 ATTENTION_KERNEL_SCRIPT = ROOT / "scripts" / "benchmark_attention_kernel.py"
 QUALITY_SCRIPT = ROOT / "scripts" / "benchmark_qwen35_quality_matrix.py"
+ONLINE_MIXED_SCRIPT = ROOT / "scripts" / "benchmark_online_mixed.py"
 SUMMARY_SCRIPT = ROOT / "scripts" / "summarize_qwen35_rental.py"
 CUDAGRAPH_PARITY_SCRIPT = ROOT / "scripts" / "verify_cudagraph_parity.py"
 
@@ -90,6 +91,44 @@ def commands(args: argparse.Namespace) -> list[tuple[str, list[str]]]:
                     str(tp_size),
                     "--output",
                     str(root / "kernels" / f"tp{tp_size}.json"),
+                ],
+            )
+        )
+        result.append(
+            (
+                f"mixed-tp{tp_size}",
+                [
+                    sys.executable,
+                    str(ONLINE_MIXED_SCRIPT),
+                    "--model",
+                    args.model,
+                    "--tensor-parallel-size",
+                    str(tp_size),
+                    "--qwen35-moe-decode-backend",
+                    "batched",
+                    "--initial-seqs",
+                    "8",
+                    "--injected-seqs",
+                    "8",
+                    "--initial-input-len",
+                    "128",
+                    "--injected-input-len",
+                    "1024",
+                    "--output-len",
+                    "64",
+                    "--inject-after-decode-steps",
+                    "8",
+                    "--max-model-len",
+                    str(args.max_model_len),
+                    "--max-num-batched-tokens",
+                    "2048",
+                    "--max-num-seqs",
+                    str(args.max_num_seqs),
+                    "--enable-dynamic-chunked-prefill",
+                    "--require-paths",
+                    "mixed_eager",
+                    "--output",
+                    str(root / "mixed" / f"tp{tp_size}.json"),
                 ],
             )
         )
@@ -291,6 +330,10 @@ def collect_stage_artifacts(
         _, context_name, tp_name = stage_name.split("-")
         search_root = root / "attention" / tp_name
         required = [search_root / f"{context_name}.json"]
+    elif stage_name.startswith("mixed-tp"):
+        tp_name = stage_name.removeprefix("mixed-")
+        search_root = root / "mixed"
+        required = [search_root / f"{tp_name}.json"]
     elif stage_name.startswith("cudagraph-"):
         _, context_name, tp_name = stage_name.split("-")
         search_root = root / "cudagraph" / tp_name / context_name

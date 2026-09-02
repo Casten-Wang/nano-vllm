@@ -319,11 +319,14 @@ class Qwen35SparseMoeBlock(nn.Module):
         topk_weights, topk_ids = self.gate(flat_states)
         from nanovllm.utils.context import get_context
 
+        context = get_context()
+        pure_decode = not context.is_prefill and not context.is_mixed
+
         routed = self.experts(
             flat_states,
             topk_ids,
             topk_weights,
-            is_decode=not get_context().is_prefill,
+            is_decode=pure_decode,
             reduce_output=False,
         )
         shared = self.shared_expert(flat_states, reduce_output=False)

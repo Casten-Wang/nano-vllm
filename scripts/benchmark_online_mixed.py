@@ -41,6 +41,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-model-len", type=int, default=2048)
     parser.add_argument("--max-num-batched-tokens", type=int, default=256)
     parser.add_argument("--max-num-seqs", type=int, default=16)
+    parser.add_argument(
+        "--tensor-parallel-size",
+        type=int,
+        choices=(1, 2, 4, 8),
+        default=1,
+    )
+    parser.add_argument(
+        "--qwen35-moe-decode-backend",
+        choices=("sorted", "batched"),
+        default="sorted",
+    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--vocab-size", type=int, default=10000)
     parser.add_argument("--enforce-eager", action="store_true")
@@ -52,6 +63,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--enable-dynamic-chunked-prefill", action="store_true")
     parser.add_argument("--name", default=None)
     parser.add_argument("--result-dir", default="benchmark_results")
+    parser.add_argument("--output", type=Path)
     parser.add_argument(
         "--require-paths",
         default="",
@@ -89,6 +101,8 @@ def main() -> None:
         max_model_len=args.max_model_len,
         max_num_batched_tokens=args.max_num_batched_tokens,
         max_num_seqs=args.max_num_seqs,
+        tensor_parallel_size=args.tensor_parallel_size,
+        qwen35_moe_decode_backend=args.qwen35_moe_decode_backend,
         kv_cache_dtype=args.kv_cache_dtype,
         kv_dequant_backend=args.kv_dequant_backend,
         int8_partitioned_decode_threshold=args.int8_partitioned_decode_threshold,
@@ -242,6 +256,8 @@ def main() -> None:
         "max_model_len": args.max_model_len,
         "max_num_batched_tokens": args.max_num_batched_tokens,
         "max_num_seqs": args.max_num_seqs,
+        "tensor_parallel_size": args.tensor_parallel_size,
+        "qwen35_moe_decode_backend": args.qwen35_moe_decode_backend,
         "enforce_eager": args.enforce_eager,
         "kv_cache_dtype": args.kv_cache_dtype,
         "kv_dequant_backend": args.kv_dequant_backend,
@@ -292,7 +308,8 @@ def main() -> None:
         if args.enable_dynamic_chunked_prefill:
             prefix += "_dynchunk"
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    json_path = result_dir / f"{prefix}_{timestamp}.json"
+    json_path = args.output or result_dir / f"{prefix}_{timestamp}.json"
+    json_path.parent.mkdir(parents=True, exist_ok=True)
     json_path.write_text(json.dumps(result, indent=2, ensure_ascii=False) + "\n")
     print(json.dumps(result, indent=2, ensure_ascii=False))
     print(f"Wrote {json_path}")

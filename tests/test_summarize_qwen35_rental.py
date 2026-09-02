@@ -147,6 +147,28 @@ def write_long_prefill_case(root, *, max_abs_error=0.01):
     )
 
 
+def write_mixed_case(root):
+    write(
+        root / "mixed/tp4.json",
+        {
+            "commit": "abc",
+            "git_dirty": False,
+            "cuda_available": True,
+            "tensor_parallel_size": 4,
+            "qwen35_moe_decode_backend": "batched",
+            "enable_dynamic_chunked_prefill": True,
+            "injected": True,
+            "initial_p95_decode_gap_s": 0.02,
+            "peak_torch_allocated_mib": 12_000.0,
+            "execution_stats": {
+                "model_path_counts": {"mixed_eager": 3},
+            },
+            "execution_validation": {"valid": True},
+            "generation_validation": {"valid": True},
+        },
+    )
+
+
 def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     run_id = "rental-a"
     write(tmp_path / "preflight/checkpoint_mapping_audit.json", {"valid": True, "complete": True})
@@ -302,6 +324,7 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     write_attention_case(tmp_path, "short", 4096, partitioned=False)
     write_attention_case(tmp_path, "long", 16384, partitioned=True)
     write_long_prefill_case(tmp_path)
+    write_mixed_case(tmp_path)
 
     report = MODULE.summarize(tmp_path, run_id)
 
@@ -311,10 +334,12 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     assert report["graph_safe_moe"]["all_tp_promoted"]
     assert report["hybrid_cudagraph"]["all_tp_passed"]
     assert report["evidence"]["long_prefill_kernel_evidence"]
+    assert report["evidence"]["mixed_workload_evidence"]
     assert report["long_prefill"]["by_tp"]["tp4"]["valid"]
     chunk_sweep = report["long_prefill"]["by_tp"]["tp4"]["chunk_sweep"]
     assert chunk_sweep["fastest_chunk_size"] == 64
     assert chunk_sweep["lowest_memory_chunk_size"] == 32
+    assert report["mixed_workload"]["by_tp"]["tp4"]["mixed_steps"] == 3
     assert report["graph_safe_moe"]["by_tp"]["tp4"]["promotion"][
         "selected_decode_batches"
     ] == [1, 64]

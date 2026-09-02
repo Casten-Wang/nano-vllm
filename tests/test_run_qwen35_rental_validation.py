@@ -38,12 +38,14 @@ def test_commands_are_fail_fast_and_cover_complete_validation_suite():
     assert [name for name, _ in stages] == [
         "preflight",
         "kernels-tp4",
+        "mixed-tp4",
         "kernels-long-prefill-tp4",
         "attention-short-tp4",
         "attention-long-tp4",
         "cudagraph-short-tp4",
         "cudagraph-long-tp4",
         "kernels-tp8",
+        "mixed-tp8",
         "kernels-long-prefill-tp8",
         "attention-short-tp8",
         "attention-long-tp8",
@@ -57,6 +59,11 @@ def test_commands_are_fail_fast_and_cover_complete_validation_suite():
     assert stages[0][1][stages[0][1].index("--max-model-len") + 1] == "16384"
     assert stages[1][1][stages[1][1].index("--tp-size") + 1] == "4"
     commands = dict(stages)
+    mixed = commands["mixed-tp4"]
+    assert mixed[mixed.index("--tensor-parallel-size") + 1] == "4"
+    assert mixed[mixed.index("--qwen35-moe-decode-backend") + 1] == "batched"
+    assert "--enable-dynamic-chunked-prefill" in mixed
+    assert mixed[mixed.index("--require-paths") + 1] == "mixed_eager"
     long_prefill = commands["kernels-long-prefill-tp4"]
     assert "--prefill-only" in long_prefill
     assert long_prefill[long_prefill.index("--prefill-tokens") + 1] == "8192"

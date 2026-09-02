@@ -455,6 +455,9 @@ def summarize(run_dir: Path, run_id: str) -> dict:
     long_prefill_paths = sorted((run_dir / "kernels_long").glob("tp*.json"))
     if not long_prefill_paths:
         raise ValueError("no long-prefill kernel artifacts were found")
+    mixed_paths = sorted((run_dir / "mixed").glob("tp*.json"))
+    if not mixed_paths:
+        raise ValueError("no mixed-workload benchmark artifacts were found")
     cudagraph_paths = sorted(
         (run_dir / "cudagraph").glob("tp*/*/run_*/summary.json")
     )
@@ -482,6 +485,7 @@ def summarize(run_dir: Path, run_id: str) -> dict:
 
     kernels = {}
     long_prefill = {}
+    mixed_workload = {}
     configured_max_decode_batch = performance["workload"]["max_num_seqs"]
     commits = {
         row["commit"]
@@ -592,6 +596,38 @@ def summarize(run_dir: Path, run_id: str) -> dict:
         clean_worktrees = clean_worktrees and not result["git_dirty"]
         cuda_measurements = cuda_measurements and result["cuda_available"]
 
+    for path in mixed_paths:
+        result = load_json(path)
+        tp_name = path.stem
+        tp_size = int(tp_name.removeprefix("tp"))
+        model_paths = result.get("execution_stats", {}).get(
+            "model_path_counts",
+            {},
+        )
+        valid = (
+            result.get("tensor_parallel_size") == tp_size
+            and result.get("qwen35_moe_decode_backend") == "batched"
+            and result.get("enable_dynamic_chunked_prefill") is True
+            and result.get("injected") is True
+            and result.get("execution_validation", {}).get("valid") is True
+            and result.get("generation_validation", {}).get("valid") is True
+            and model_paths.get("mixed_eager", 0) > 0
+            and result.get("cuda_available") is True
+        )
+        mixed_workload[tp_name] = {
+            "valid": valid,
+            "mixed_steps": model_paths.get("mixed_eager", 0),
+            "initial_p95_decode_gap_s": result.get(
+                "initial_p95_decode_gap_s"
+            ),
+            "peak_torch_allocated_mib": result.get(
+                "peak_torch_allocated_mib"
+            ),
+        }
+        commits.add(result["commit"])
+        clean_worktrees = clean_worktrees and not result["git_dirty"]
+        cuda_measurements = cuda_measurements and result["cuda_available"]
+
     cudagraph = {}
     for path in cudagraph_paths:
         result = load_json(path)
@@ -686,6 +722,10 @@ def summarize(run_dir: Path, run_id: str) -> dict:
             set(long_prefill) == expected_tp_names
             and all(item["valid"] for item in long_prefill.values())
         ),
+        "mixed_workload_evidence": (
+            set(mixed_workload) == expected_tp_names
+            and all(item["valid"] for item in mixed_workload.values())
+        ),
         "quality_reads_stored_kv": all(
             row["kv_sensitive_token_rows"] > 0 for row in quality["cases"]
         ),
@@ -755,6 +795,9 @@ def summarize(run_dir: Path, run_id: str) -> dict:
         "long_prefill": {
             "tokens": LONG_PREFILL_TOKENS,
             "by_tp": long_prefill,
+        },
+        "mixed_workload": {
+            "by_tp": mixed_workload,
         },
     }
 
