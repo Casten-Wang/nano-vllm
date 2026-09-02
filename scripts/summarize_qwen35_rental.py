@@ -31,6 +31,15 @@ LONG_PREFILL_TOKENS = 8192
 LONG_PREFILL_MAX_ABS_ERROR = 0.05
 MIXED_MAX_COEFFICIENT_OF_VARIATION = 0.10
 PRESSURE_MAX_COEFFICIENT_OF_VARIATION = 0.10
+FAIRNESS_INITIAL_SEQUENCES = 32
+FAIRNESS_INJECTED_SEQUENCES = 8
+FAIRNESS_INITIAL_INPUT_LENGTH = 128
+FAIRNESS_INJECTED_INPUT_LENGTH = 1024
+FAIRNESS_OUTPUT_LENGTH = 64
+FAIRNESS_INJECT_AFTER_DECODE_STEPS = 4
+FAIRNESS_MAX_BATCHED_TOKENS = 32
+FAIRNESS_THRESHOLD = 4
+FAIRNESS_TOKEN_BUDGET = 256
 NORMALIZATION_MAX_ABS_ERROR = 0.05
 BUFFER_REUSE_MAX_ABS_ERROR = 0.05
 MIXED_MOE_MIN_SPEEDUP = 1.0
@@ -990,6 +999,202 @@ def summarize_kv_pressure_repeats(
     }
 
 
+def summarize_fairness_repeats(
+    results: list[dict],
+    *,
+    expected_tp_size: int,
+    mode: str,
+) -> dict:
+    """Validate one scheduler-fairness mode and aggregate repeated runs."""
+
+    if not results:
+        raise ValueError("scheduler-fairness benchmark has no repeat results")
+    expected_threshold = 0 if mode == "disabled" else FAIRNESS_THRESHOLD
+    numeric_fields = (
+        "injected_p95_ttft_s",
+        "initial_p95_decode_gap_s",
+        "initial_max_decode_gap_s",
+        "output_throughput_tok_s",
+    )
+    rows = []
+    for result in results:
+        metrics = result.get("metrics", {})
+        values = {key: result.get(key) for key in numeric_fields}
+        values.update(
+            prefill_starved_steps=metrics.get("prefill_starved_steps"),
+            max_prefill_starvation_steps=metrics.get(
+                "max_prefill_starvation_steps"
+            ),
+            p95_tpot_s=metrics.get("p95_tpot_s"),
+        )
+        measurements_valid = all(
+            isinstance(value, (int, float))
+            and math.isfinite(value)
+            and value >= 0
+            for value in values.values()
+        )
+        configuration_valid = (
+            result.get("tensor_parallel_size") == expected_tp_size
+            and result.get("initial_seqs") == FAIRNESS_INITIAL_SEQUENCES
+            and result.get("injected_seqs") == FAIRNESS_INJECTED_SEQUENCES
+            and result.get("initial_input_len") == FAIRNESS_INITIAL_INPUT_LENGTH
+            and result.get("injected_input_len") == FAIRNESS_INJECTED_INPUT_LENGTH
+            and result.get("output_len") == FAIRNESS_OUTPUT_LENGTH
+            and result.get("inject_after_decode_steps")
+            == FAIRNESS_INJECT_AFTER_DECODE_STEPS
+            and result.get("max_num_batched_tokens")
+            == FAIRNESS_MAX_BATCHED_TOKENS
+            and result.get("max_num_seqs")
+            == FAIRNESS_INITIAL_SEQUENCES + FAIRNESS_INJECTED_SEQUENCES
+            and result.get("prefill_starvation_threshold")
+            == expected_threshold
+            and result.get("prefill_starvation_token_budget")
+            == FAIRNESS_TOKEN_BUDGET
+            and result.get("enable_dynamic_chunked_prefill") is True
+            and result.get("qwen35_moe_decode_backend") == "batched"
+            and result.get("injected_ttft_count")
+            == FAIRNESS_INJECTED_SEQUENCES
+        )
+        model_paths = result.get("execution_stats", {}).get(
+            "model_path_counts", {}
+        )
+        mode_path_valid = (
+            model_paths.get("mixed_eager", 0) == 0
+            and model_paths.get("prefill_eager", 0) > 0
+            and (
+                model_paths.get("decode_eager", 0) > 0
+                or model_paths.get("decode_cuda_graph", 0) > 0
+            )
+            if mode == "disabled"
+            else model_paths.get("mixed_eager", 0) > 0
+        )
+        execution_valid = (
+            result.get("execution_validation", {}).get("valid") is True
+            and result.get("generation_validation", {}).get("valid") is True
+            and mode_path_valid
+            and result.get("cuda_available") is True
+        )
+        rows.append(
+            {
+                "valid": configuration_valid and execution_valid and measurements_valid,
+                "configuration_valid": configuration_valid,
+                "execution_valid": execution_valid,
+                "measurements_valid": measurements_valid,
+                "generated_token_ids_digest": result.get(
+                    "generated_token_ids", {}
+                ).get("digest"),
+                **values,
+            }
+        )
+    digests = {row["generated_token_ids_digest"] for row in rows}
+    output_parity = None not in digests and len(digests) == 1
+    commits = {result.get("commit") for result in results}
+    checkpoint_digests = {
+        result.get("checkpoint_manifest", {}).get("digest")
+        for result in results
+    }
+    implementation_stable = None not in commits and len(commits) == 1
+    checkpoint_stable = (
+        None not in checkpoint_digests and len(checkpoint_digests) == 1
+    )
+    summary = {
+        "valid": (
+            len(rows) >= 2
+            and all(row["valid"] for row in rows)
+            and output_parity
+            and implementation_stable
+            and checkpoint_stable
+        ),
+        "repeat_count": len(rows),
+        "output_parity": output_parity,
+        "implementation_stable": implementation_stable,
+        "checkpoint_stable": checkpoint_stable,
+        "commit": next(iter(commits)) if implementation_stable else None,
+        "checkpoint_digest": (
+            next(iter(checkpoint_digests)) if checkpoint_stable else None
+        ),
+        "generated_token_ids_digest": next(iter(digests)) if output_parity else None,
+        "runs": rows,
+    }
+    for key in (
+        *numeric_fields,
+        "prefill_starved_steps",
+        "max_prefill_starvation_steps",
+        "p95_tpot_s",
+    ):
+        summary[f"median_{key}"] = statistics.median(row[key] for row in rows)
+    return summary
+
+
+def compare_fairness_modes(disabled: dict, enabled: dict) -> dict:
+    """Gate causal fairness evidence while reporting decode cost separately."""
+
+    output_parity = (
+        disabled.get("generated_token_ids_digest") is not None
+        and disabled.get("generated_token_ids_digest")
+        == enabled.get("generated_token_ids_digest")
+    )
+    same_implementation = (
+        disabled.get("commit") is not None
+        and disabled.get("commit") == enabled.get("commit")
+    )
+    same_checkpoint = (
+        disabled.get("checkpoint_digest") is not None
+        and disabled.get("checkpoint_digest")
+        == enabled.get("checkpoint_digest")
+    )
+    starvation_improved = (
+        enabled["median_max_prefill_starvation_steps"]
+        < disabled["median_max_prefill_starvation_steps"]
+    )
+    injected_ttft_improved = (
+        enabled["median_injected_p95_ttft_s"]
+        < disabled["median_injected_p95_ttft_s"]
+    )
+
+    def ratio(candidate: float, baseline: float) -> float | None:
+        return candidate / baseline if baseline > 0 else None
+
+    return {
+        "valid": (
+            disabled["valid"]
+            and enabled["valid"]
+            and disabled["repeat_count"] == enabled["repeat_count"]
+            and output_parity
+            and same_implementation
+            and same_checkpoint
+            and starvation_improved
+            and injected_ttft_improved
+        ),
+        "output_parity": output_parity,
+        "same_implementation": same_implementation,
+        "same_checkpoint": same_checkpoint,
+        "starvation_improved": starvation_improved,
+        "injected_ttft_improved": injected_ttft_improved,
+        "injected_p95_ttft_ratio": ratio(
+            enabled["median_injected_p95_ttft_s"],
+            disabled["median_injected_p95_ttft_s"],
+        ),
+        "initial_p95_decode_gap_ratio": ratio(
+            enabled["median_initial_p95_decode_gap_s"],
+            disabled["median_initial_p95_decode_gap_s"],
+        ),
+        "initial_max_decode_gap_ratio": ratio(
+            enabled["median_initial_max_decode_gap_s"],
+            disabled["median_initial_max_decode_gap_s"],
+        ),
+        "p95_tpot_ratio": ratio(
+            enabled["median_p95_tpot_s"],
+            disabled["median_p95_tpot_s"],
+        ),
+        "throughput_ratio": ratio(
+            enabled["median_output_throughput_tok_s"],
+            disabled["median_output_throughput_tok_s"],
+        ),
+        "performance_ratios_are_observations_not_acceptance_gates": True,
+    }
+
+
 def summarize_memory_preflight(report: dict) -> dict[str, dict]:
     summaries = {}
     for tp_name, item in sorted(report.get("results", {}).items()):
@@ -1389,6 +1594,9 @@ def summarize(run_dir: Path, run_id: str) -> dict:
     pressure_paths = sorted((run_dir / "pressure").glob("tp*/*/r*.json"))
     if not pressure_paths:
         raise ValueError("no KV-pressure benchmark artifacts were found")
+    fairness_paths = sorted((run_dir / "fairness").glob("*/tp*/r*.json"))
+    if not fairness_paths:
+        raise ValueError("no scheduler-fairness benchmark artifacts were found")
     cudagraph_paths = sorted(
         (run_dir / "cudagraph").glob("tp*/*/run_*/summary.json")
     )
@@ -1426,6 +1634,7 @@ def summarize(run_dir: Path, run_id: str) -> dict:
     long_prefill = {}
     mixed_runs = {}
     kv_pressure = {}
+    scheduler_fairness = {}
     configured_max_decode_batch = performance["workload"]["max_num_seqs"]
     commits = {
         row["commit"]
@@ -1946,6 +2155,35 @@ def summarize(run_dir: Path, run_id: str) -> dict:
                 )
             ),
         }
+
+    fairness_results = {}
+    for path in fairness_paths:
+        result = load_json(path)
+        mode = path.parents[1].name
+        tp_name = path.parent.name
+        if mode not in {"disabled", "enabled"}:
+            raise ValueError(f"unknown scheduler-fairness mode: {mode}")
+        fairness_results.setdefault((tp_name, mode), []).append(result)
+        commits.add(result["commit"])
+        clean_worktrees = clean_worktrees and not result["git_dirty"]
+        cuda_measurements = cuda_measurements and result["cuda_available"]
+
+    for (tp_name, mode), results in sorted(fairness_results.items()):
+        scheduler_fairness.setdefault(tp_name, {})[mode] = (
+            summarize_fairness_repeats(
+                results,
+                expected_tp_size=int(tp_name.removeprefix("tp")),
+                mode=mode,
+            )
+        )
+    fairness_comparisons = {
+        tp_name: compare_fairness_modes(
+            by_mode["disabled"],
+            by_mode["enabled"],
+        )
+        for tp_name, by_mode in scheduler_fairness.items()
+        if set(by_mode) == {"disabled", "enabled"}
+    }
     for path in mixed_paths:
         result = load_json(path)
         tp_name = path.parent.name
@@ -2175,6 +2413,15 @@ def summarize(run_dir: Path, run_id: str) -> dict:
                 for tp_name, by_policy in kv_pressure.items()
             )
         ),
+        "scheduler_fairness_evidence": (
+            set(scheduler_fairness) == expected_tp_names
+            and all(
+                set(by_mode) == {"disabled", "enabled"}
+                and all(item["valid"] for item in by_mode.values())
+                and fairness_comparisons.get(tp_name, {}).get("valid") is True
+                for tp_name, by_mode in scheduler_fairness.items()
+            )
+        ),
         "normalization_workspace_evidence": (
             set(normalization) == expected_tp_names
             and all(
@@ -2333,6 +2580,17 @@ def summarize(run_dir: Path, run_id: str) -> dict:
             "configured_kv_blocks": PRESSURE_KV_BLOCKS,
             "by_tp": kv_pressure,
             "comparisons": kv_pressure_comparisons,
+        },
+        "scheduler_fairness": {
+            "workload": {
+                "initial_sequences": FAIRNESS_INITIAL_SEQUENCES,
+                "injected_sequences": FAIRNESS_INJECTED_SEQUENCES,
+                "max_num_batched_tokens": FAIRNESS_MAX_BATCHED_TOKENS,
+                "enabled_threshold": FAIRNESS_THRESHOLD,
+                "enabled_token_budget": FAIRNESS_TOKEN_BUDGET,
+            },
+            "by_tp": scheduler_fairness,
+            "comparisons": fairness_comparisons,
         },
     }
 

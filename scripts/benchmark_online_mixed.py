@@ -244,6 +244,7 @@ def main() -> None:
     torch.cuda.synchronize()
     llm.model_runner.call("reset_cuda_peak_memory_stats")
     start = time.perf_counter()
+    request_arrival_times = {seq_id: start for seq_id in initial_ids}
     step_count = 0
 
     while not llm.is_finished():
@@ -266,10 +267,17 @@ def main() -> None:
         if decode_tokens > 0 and not injected:
             decode_steps_before_injection += 1
             if decode_steps_before_injection >= args.inject_after_decode_steps:
+                injection_time = time.perf_counter()
                 for prompt in injected_prompts:
                     llm.add_request(prompt, sampling_params)
                 for seq in llm.scheduler.waiting:
-                    groups.setdefault(seq.seq_id, request_group(seq.seq_id, initial_ids))
+                    group = request_group(seq.seq_id, initial_ids)
+                    groups.setdefault(seq.seq_id, group)
+                    if group == "injected":
+                        request_arrival_times.setdefault(
+                            seq.seq_id,
+                            injection_time,
+                        )
                 injected = True
 
         for seq_id, token_ids in output:
@@ -299,7 +307,15 @@ def main() -> None:
     total_time = time.perf_counter() - start
     initial_gaps = []
     injected_gaps = []
+    initial_ttfts = []
+    injected_ttfts = []
     for seq_id, times in token_times.items():
+        if times and seq_id in request_arrival_times:
+            ttft = times[0] - request_arrival_times[seq_id]
+            if groups.get(seq_id) == "initial":
+                initial_ttfts.append(ttft)
+            else:
+                injected_ttfts.append(ttft)
         gaps = [b - a for a, b in zip(times, times[1:])]
         if not gaps:
             continue
@@ -421,6 +437,14 @@ def main() -> None:
         "step_count": step_count,
         "initial_decode_gap_count": len(initial_gaps),
         "injected_decode_gap_count": len(injected_gaps),
+        "initial_ttft_count": len(initial_ttfts),
+        "injected_ttft_count": len(injected_ttfts),
+        "initial_avg_ttft_s": avg(initial_ttfts),
+        "initial_p95_ttft_s": percentile(initial_ttfts, 95),
+        "initial_max_ttft_s": max_or_zero(initial_ttfts),
+        "injected_avg_ttft_s": avg(injected_ttfts),
+        "injected_p95_ttft_s": percentile(injected_ttfts, 95),
+        "injected_max_ttft_s": max_or_zero(injected_ttfts),
         "initial_avg_decode_gap_s": avg(initial_gaps),
         "initial_median_decode_gap_s": statistics.median(initial_gaps) if initial_gaps else 0.0,
         "initial_p95_decode_gap_s": percentile(initial_gaps, 95),
@@ -429,6 +453,11 @@ def main() -> None:
         "injected_median_decode_gap_s": statistics.median(injected_gaps) if injected_gaps else 0.0,
         "injected_p95_decode_gap_s": percentile(injected_gaps, 95),
         "injected_max_decode_gap_s": max_or_zero(injected_gaps),
+        "output_throughput_tok_s": (
+            sum(finished_output_lengths.values()) / total_time
+            if total_time > 0
+            else 0.0
+        ),
         "num_kvcache_blocks": llm.model_runner.config.num_kvcache_blocks,
         "kv_cache_storage": kv_cache_storage_metadata(llm.model_runner),
         "model_config": model_config_metadata(llm.model_runner.config.hf_config),

@@ -56,6 +56,12 @@ def test_commands_are_fail_fast_and_cover_complete_validation_suite():
         "mixed-tp4-r1",
         "mixed-tp4-r2",
         "mixed-tp4-r3",
+        "fairness-disabled-tp4-r1",
+        "fairness-disabled-tp4-r2",
+        "fairness-disabled-tp4-r3",
+        "fairness-enabled-tp4-r1",
+        "fairness-enabled-tp4-r2",
+        "fairness-enabled-tp4-r3",
         "pressure-fcfs-tp4-r1",
         "pressure-fcfs-tp4-r2",
         "pressure-fcfs-tp4-r3",
@@ -76,6 +82,12 @@ def test_commands_are_fail_fast_and_cover_complete_validation_suite():
         "mixed-tp8-r1",
         "mixed-tp8-r2",
         "mixed-tp8-r3",
+        "fairness-disabled-tp8-r1",
+        "fairness-disabled-tp8-r2",
+        "fairness-disabled-tp8-r3",
+        "fairness-enabled-tp8-r1",
+        "fairness-enabled-tp8-r2",
+        "fairness-enabled-tp8-r3",
         "pressure-fcfs-tp8-r1",
         "pressure-fcfs-tp8-r2",
         "pressure-fcfs-tp8-r3",
@@ -112,6 +124,26 @@ def test_commands_are_fail_fast_and_cover_complete_validation_suite():
     assert mixed[mixed.index("--temperature") + 1] == "0"
     assert "--enable-dynamic-chunked-prefill" in mixed
     assert mixed[mixed.index("--require-paths") + 1] == "mixed_eager"
+    fairness_disabled = commands["fairness-disabled-tp4-r1"]
+    fairness_enabled = commands["fairness-enabled-tp4-r1"]
+    assert fairness_disabled[
+        fairness_disabled.index("--prefill-starvation-threshold") + 1
+    ] == "0"
+    assert fairness_disabled[
+        fairness_disabled.index("--require-paths") + 1
+    ] == "prefill_eager"
+    assert fairness_enabled[
+        fairness_enabled.index("--prefill-starvation-threshold") + 1
+    ] == str(MODULE.FAIRNESS_THRESHOLD)
+    assert fairness_enabled[
+        fairness_enabled.index("--max-num-batched-tokens") + 1
+    ] == str(MODULE.FAIRNESS_MAX_BATCHED_TOKENS)
+    assert fairness_enabled[
+        fairness_enabled.index("--initial-seqs") + 1
+    ] == str(MODULE.FAIRNESS_INITIAL_SEQUENCES)
+    assert fairness_enabled[
+        fairness_enabled.index("--require-paths") + 1
+    ] == "mixed_eager"
     pressure = commands["pressure-min_recompute-tp4-r1"]
     assert pressure[pressure.index("--num-kvcache-blocks-override") + 1] == "5"
     assert pressure[pressure.index("--initial-input-lens") + 1] == "256,1024"
@@ -387,6 +419,25 @@ def test_pressure_stage_collects_only_its_policy_repeat(tmp_path):
     artifacts = MODULE.collect_stage_artifacts(
         arguments,
         "pressure-fcfs-tp4-r2",
+    )
+
+    assert artifacts == [artifact]
+
+
+def test_fairness_stage_collects_only_its_mode_repeat(tmp_path):
+    arguments = args()
+    arguments.result_dir = str(tmp_path)
+    fairness_dir = (
+        tmp_path / arguments.run_id / "fairness" / "enabled" / "tp4"
+    )
+    fairness_dir.mkdir(parents=True)
+    artifact = fairness_dir / "r2.json"
+    artifact.write_text('{"valid": true}\n')
+    (fairness_dir / "r1.json").write_text('{"valid": true}\n')
+
+    artifacts = MODULE.collect_stage_artifacts(
+        arguments,
+        "fairness-enabled-tp4-r2",
     )
 
     assert artifacts == [artifact]

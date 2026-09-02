@@ -35,6 +35,15 @@ OFFICIAL_GPTQ_CHECKPOINT_REVISION = "3af5ca2972faf6de1fd6f4efc4d8d319ca751e8b"
 QUALITY_MAX_PROMPT_LENGTH = 8_192
 QUALITY_CONTINUATION_LENGTH = 16
 MIXED_CONCURRENT_SEQUENCES = 16
+FAIRNESS_INITIAL_SEQUENCES = 32
+FAIRNESS_INJECTED_SEQUENCES = 8
+FAIRNESS_INITIAL_INPUT_LENGTH = 128
+FAIRNESS_INJECTED_INPUT_LENGTH = 1024
+FAIRNESS_OUTPUT_LENGTH = 64
+FAIRNESS_INJECT_AFTER_DECODE_STEPS = 4
+FAIRNESS_MAX_BATCHED_TOKENS = 32
+FAIRNESS_THRESHOLD = 4
+FAIRNESS_TOKEN_BUDGET = 256
 PRESSURE_KV_BLOCKS = 5
 PRESSURE_INITIAL_SEQUENCES = 2
 PRESSURE_INJECTED_SEQUENCES = 2
@@ -300,6 +309,66 @@ def commands(args: argparse.Namespace) -> list[tuple[str, list[str]]]:
                     ],
                 )
             )
+        fairness_modes = (("disabled", 0), ("enabled", FAIRNESS_THRESHOLD))
+        for mode, threshold in fairness_modes:
+            for repeat in range(1, args.repeats + 1):
+                result.append(
+                    (
+                        f"fairness-{mode}-tp{tp_size}-r{repeat}",
+                        [
+                            sys.executable,
+                            str(ONLINE_MIXED_SCRIPT),
+                            "--model",
+                            args.model,
+                            "--tensor-parallel-size",
+                            str(tp_size),
+                            "--qwen35-moe-decode-backend",
+                            "batched",
+                            "--initial-seqs",
+                            str(FAIRNESS_INITIAL_SEQUENCES),
+                            "--injected-seqs",
+                            str(FAIRNESS_INJECTED_SEQUENCES),
+                            "--initial-input-len",
+                            str(FAIRNESS_INITIAL_INPUT_LENGTH),
+                            "--injected-input-len",
+                            str(FAIRNESS_INJECTED_INPUT_LENGTH),
+                            "--output-len",
+                            str(FAIRNESS_OUTPUT_LENGTH),
+                            "--temperature",
+                            "0",
+                            "--inject-after-decode-steps",
+                            str(FAIRNESS_INJECT_AFTER_DECODE_STEPS),
+                            "--max-model-len",
+                            str(args.max_model_len),
+                            "--max-num-batched-tokens",
+                            str(FAIRNESS_MAX_BATCHED_TOKENS),
+                            "--max-num-seqs",
+                            str(
+                                FAIRNESS_INITIAL_SEQUENCES
+                                + FAIRNESS_INJECTED_SEQUENCES
+                            ),
+                            "--enable-dynamic-chunked-prefill",
+                            "--prefill-starvation-threshold",
+                            str(threshold),
+                            "--prefill-starvation-token-budget",
+                            str(FAIRNESS_TOKEN_BUDGET),
+                            "--require-paths",
+                            (
+                                "prefill_eager"
+                                if mode == "disabled"
+                                else "mixed_eager"
+                            ),
+                            "--output",
+                            str(
+                                root
+                                / "fairness"
+                                / mode
+                                / f"tp{tp_size}"
+                                / f"r{repeat}.json"
+                            ),
+                        ],
+                    )
+                )
         for policy in ("fcfs", "min_recompute"):
             for repeat in range(1, args.repeats + 1):
                 result.append(
@@ -785,6 +854,12 @@ def collect_stage_artifacts(
         ).rsplit("-", 2)
         search_root = root / "pressure" / tp_name / policy
         required = [search_root / f"{repeat_name}.json"]
+    elif stage_name.startswith("fairness-"):
+        mode, tp_name, repeat_name = stage_name.removeprefix(
+            "fairness-"
+        ).rsplit("-", 2)
+        search_root = root / "fairness" / mode / tp_name
+        required = [search_root / f"{repeat_name}.json"]
     elif stage_name.startswith("cudagraph-"):
         _, context_name, tp_name = stage_name.split("-")
         search_root = root / "cudagraph" / tp_name / context_name
@@ -837,6 +912,7 @@ def collect_stage_artifacts(
         or stage_name.startswith("attention-")
         or stage_name.startswith("mixed-")
         or stage_name.startswith("pressure-")
+        or stage_name.startswith("fairness-")
         or stage_name.startswith("cudagraph-")
         else sorted(search_root.rglob("*.json"))
     )

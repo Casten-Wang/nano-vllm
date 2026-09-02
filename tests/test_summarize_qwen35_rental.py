@@ -386,6 +386,98 @@ def write_pressure_case(root):
             )
 
 
+def write_fairness_case(root):
+    for mode, threshold, starvation, ttft, decode_gap, tpot, throughput in (
+        ("disabled", 0, 40, 4.0, 0.020, 0.012, 100.0),
+        ("enabled", MODULE.FAIRNESS_THRESHOLD, 4, 1.5, 0.023, 0.013, 98.0),
+    ):
+        for repeat in range(1, 4):
+            write(
+                root / f"fairness/{mode}/tp4/r{repeat}.json",
+                {
+                    "commit": "abc",
+                    "checkpoint_manifest": {"digest": "weights"},
+                    "git_dirty": False,
+                    "cuda_available": True,
+                    "tensor_parallel_size": 4,
+                    "initial_seqs": MODULE.FAIRNESS_INITIAL_SEQUENCES,
+                    "injected_seqs": MODULE.FAIRNESS_INJECTED_SEQUENCES,
+                    "initial_input_len": MODULE.FAIRNESS_INITIAL_INPUT_LENGTH,
+                    "injected_input_len": MODULE.FAIRNESS_INJECTED_INPUT_LENGTH,
+                    "output_len": MODULE.FAIRNESS_OUTPUT_LENGTH,
+                    "inject_after_decode_steps": (
+                        MODULE.FAIRNESS_INJECT_AFTER_DECODE_STEPS
+                    ),
+                    "max_num_batched_tokens": (
+                        MODULE.FAIRNESS_MAX_BATCHED_TOKENS
+                    ),
+                    "max_num_seqs": (
+                        MODULE.FAIRNESS_INITIAL_SEQUENCES
+                        + MODULE.FAIRNESS_INJECTED_SEQUENCES
+                    ),
+                    "prefill_starvation_threshold": threshold,
+                    "prefill_starvation_token_budget": (
+                        MODULE.FAIRNESS_TOKEN_BUDGET
+                    ),
+                    "enable_dynamic_chunked_prefill": True,
+                    "qwen35_moe_decode_backend": "batched",
+                    "injected_ttft_count": MODULE.FAIRNESS_INJECTED_SEQUENCES,
+                    "injected_p95_ttft_s": ttft + (repeat - 2) * 0.02,
+                    "initial_p95_decode_gap_s": decode_gap,
+                    "initial_max_decode_gap_s": decode_gap * 1.5,
+                    "output_throughput_tok_s": throughput,
+                    "generated_token_ids": {"digest": "fairness-tokens"},
+                    "metrics": {
+                        "prefill_starved_steps": starvation,
+                        "max_prefill_starvation_steps": starvation,
+                        "p95_tpot_s": tpot,
+                    },
+                    "execution_stats": {
+                        "model_path_counts": (
+                            {
+                                "prefill_eager": 3,
+                                "decode_cuda_graph": 60,
+                            }
+                            if mode == "disabled"
+                            else {"mixed_eager": 3}
+                        ),
+                    },
+                    "execution_validation": {"valid": True},
+                    "generation_validation": {"valid": True},
+                },
+            )
+
+
+def load_fairness_repeats(root, mode):
+    return [
+        json.loads(path.read_text())
+        for path in sorted((root / f"fairness/{mode}/tp4").glob("r*.json"))
+    ]
+
+
+def test_scheduler_fairness_comparison_rejects_ttft_regression(tmp_path):
+    write_fairness_case(tmp_path)
+    disabled = MODULE.summarize_fairness_repeats(
+        load_fairness_repeats(tmp_path, "disabled"),
+        expected_tp_size=4,
+        mode="disabled",
+    )
+    enabled_results = load_fairness_repeats(tmp_path, "enabled")
+    for result in enabled_results:
+        result["injected_p95_ttft_s"] = 5.0
+    enabled = MODULE.summarize_fairness_repeats(
+        enabled_results,
+        expected_tp_size=4,
+        mode="enabled",
+    )
+
+    comparison = MODULE.compare_fairness_modes(disabled, enabled)
+
+    assert not comparison["valid"]
+    assert comparison["starvation_improved"]
+    assert not comparison["injected_ttft_improved"]
+
+
 def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     run_id = "rental-a"
     write(
@@ -1013,6 +1105,7 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     write_long_prefill_case(tmp_path)
     write_mixed_case(tmp_path)
     write_pressure_case(tmp_path)
+    write_fairness_case(tmp_path)
     for profile_name, kv_dtype, state_dtype, components in (
         (
             "auto-float32",
@@ -1162,6 +1255,12 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     assert mixed["median_mixed_steps"] == 3
     assert mixed["initial_p95_decode_gap_cv"] < 0.1
     assert report["mixed_workload"]["cross_tp_output_parity"]
+    fairness = report["scheduler_fairness"]
+    assert report["evidence"]["scheduler_fairness_evidence"]
+    assert fairness["by_tp"]["tp4"]["disabled"]["repeat_count"] == 3
+    assert fairness["comparisons"]["tp4"]["starvation_improved"]
+    assert fairness["comparisons"]["tp4"]["injected_ttft_improved"]
+    assert fairness["comparisons"]["tp4"]["throughput_ratio"] == 0.98
     assert report["normalization"]["by_tp"]["tp4"]["rmsnorm"][
         "peak_extra_mib_delta"
     ] == -4.0
