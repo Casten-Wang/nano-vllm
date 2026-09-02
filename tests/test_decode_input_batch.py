@@ -98,10 +98,15 @@ def test_decode_input_batch_rejects_invalid_block_tables(values):
         make_batch(capacity=2, max_num_blocks=2).update_block_tables(values)
 
 
-def make_token_batch(token_capacity=6, sequence_capacity=3):
+def make_token_batch(
+    token_capacity=6,
+    sequence_capacity=3,
+    max_num_blocks=4,
+):
     return TokenInputBatch(
         token_capacity,
         sequence_capacity,
+        max_num_blocks,
         device="cpu",
         pin_memory=False,
     )
@@ -150,3 +155,72 @@ def test_token_input_batch_rejects_invalid_sizes():
         batch.update_cu_seqlens([0, 1], [0])
     with pytest.raises(ValueError):
         batch.update_decode_context_lens([1, 2])
+
+
+def test_packed_block_metadata_preserves_values_and_reuses_storage():
+    batch = make_token_batch()
+
+    first_ids, first_tables = batch.update_packed_block_metadata(
+        [7, 3, 11],
+        [[0, 1, -1], [2, -1, -1]],
+    )
+    storage = (first_ids.data_ptr(), first_tables.data_ptr())
+    assert torch.equal(first_ids, torch.tensor([7, 3, 11], dtype=torch.int32))
+    assert torch.equal(
+        first_tables,
+        torch.tensor([[0, 1, -1], [2, -1, -1]], dtype=torch.int32),
+    )
+
+    second_ids, second_tables = batch.update_packed_block_metadata(
+        [5, 13],
+        [[1, 0]],
+    )
+
+    assert (second_ids.data_ptr(), second_tables.data_ptr()) == storage
+    assert torch.equal(second_ids, torch.tensor([5, 13], dtype=torch.int32))
+    assert torch.equal(second_tables, torch.tensor([[1, 0]], dtype=torch.int32))
+
+
+def test_packed_block_metadata_slots_keep_mixed_live_ranges_disjoint():
+    batch = make_token_batch()
+    decode_ids, decode_tables = batch.update_packed_block_metadata(
+        [7, 3],
+        [[0, 1]],
+        slot=0,
+    )
+    prefill_ids, prefill_tables = batch.update_packed_block_metadata(
+        [11, 13, 17],
+        [[0, 1], [2, -1]],
+        slot=1,
+    )
+
+    assert decode_ids.data_ptr() != prefill_ids.data_ptr()
+    assert decode_tables.data_ptr() != prefill_tables.data_ptr()
+    assert torch.equal(decode_ids, torch.tensor([7, 3], dtype=torch.int32))
+    assert torch.equal(decode_tables, torch.tensor([[0, 1]], dtype=torch.int32))
+    assert torch.equal(prefill_ids, torch.tensor([11, 13, 17], dtype=torch.int32))
+    assert torch.equal(
+        prefill_tables,
+        torch.tensor([[0, 1], [2, -1]], dtype=torch.int32),
+    )
+
+
+@pytest.mark.parametrize(
+    ("selected", "tables"),
+    (
+        ([], [[0]]),
+        ([1], []),
+        ([1], [[]]),
+        ([1], [[0], [0, 1]]),
+        ([1], [[0, 1, 2, 3, 4]]),
+        ([1], [[0], [0], [0], [0]]),
+    ),
+)
+def test_packed_block_metadata_rejects_invalid_sizes(selected, tables):
+    batch = make_token_batch()
+
+    with pytest.raises(ValueError):
+        batch.update_packed_block_metadata(selected, tables)
+
+    with pytest.raises(ValueError, match="slot"):
+        batch.update_packed_block_metadata([1], [[0]], slot=2)

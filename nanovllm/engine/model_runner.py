@@ -163,6 +163,7 @@ class ModelRunner:
         self.token_inputs = TokenInputBatch(
             config.max_num_batched_tokens,
             config.max_num_seqs,
+            (config.max_model_len + self.block_size - 1) // self.block_size,
         )
         self.allocate_recurrent_state_cache()
         self.warmup_model()
@@ -770,10 +771,17 @@ class ModelRunner:
         block_tables = torch.tensor(block_tables, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
         return block_tables
 
-    def prepare_packed_block_metadata(self, metadata: PackedBlockMetadata):
-        selected_block_ids = torch.tensor(metadata.selected_block_ids, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
-        packed_block_tables = torch.tensor(metadata.packed_block_tables, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
-        return selected_block_ids, packed_block_tables
+    def prepare_packed_block_metadata(
+        self,
+        metadata: PackedBlockMetadata,
+        *,
+        slot: int = 0,
+    ):
+        return self.token_inputs.update_packed_block_metadata(
+            metadata.selected_block_ids,
+            metadata.packed_block_tables,
+            slot=slot,
+        )
 
     def prepare_state_slots(
         self,
@@ -896,7 +904,9 @@ class ModelRunner:
                     seq_lens=prefix_lens,
                     query_start_lens=query_start_lens,
                 )
-                dequant_block_ids, dequant_block_tables = self.prepare_packed_block_metadata(metadata)
+                dequant_block_ids, dequant_block_tables = (
+                    self.prepare_packed_block_metadata(metadata)
+                )
         state_token_ranges = tuple(zip(cu_seqlens_q[:-1], cu_seqlens_q[1:]))
         logits_indices = self.token_inputs.update_logits_indices(
             [end - 1 for end in cu_seqlens_q[1:]]
@@ -986,7 +996,9 @@ class ModelRunner:
                     seq_lens=prefix_lens,
                     query_start_lens=query_start_lens,
                 )
-                dequant_block_ids, dequant_block_tables = self.prepare_packed_block_metadata(metadata)
+                dequant_block_ids, dequant_block_tables = (
+                    self.prepare_packed_block_metadata(metadata, slot=1)
+                )
 
         return dict(
             input_ids=input_ids,

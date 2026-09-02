@@ -43,6 +43,29 @@ def test_measure_runs_the_inference_path():
     assert grad_modes == [False, False, False]
 
 
+def test_packed_block_metadata_benchmark_measures_buffer_reuse():
+    args = SimpleNamespace(
+        sampling_batch=2,
+        prefill_tokens=512,
+        warmup=0,
+        iterations=1,
+        repeats=1,
+    )
+
+    result = MODULE.benchmark_packed_block_metadata_reuse(
+        args,
+        torch.device("cpu"),
+    )
+
+    assert result["errors"] == [
+        {"max_abs_error": 0.0, "max_relative_error": 0.0, "rmse": 0.0},
+        {"max_abs_error": 0.0, "max_relative_error": 0.0, "rmse": 0.0},
+    ]
+    assert result["eliminated_tensor_allocations_per_update"] == 4
+    assert result["persistent_metadata_buffers_mib"] > 0
+    assert result["candidate_reuses_two_isolated_buffer_banks"]
+
+
 def test_error_treats_matching_negative_infinity_as_equal():
     result = MODULE.error(
         torch.tensor([1.0, float("-inf")]),

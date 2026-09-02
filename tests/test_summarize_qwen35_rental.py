@@ -556,6 +556,15 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
                     "persistent_sampling_input_mib": 0.01,
                     "candidate_reuses_host_device_storage": True,
                 },
+                "packed_block_metadata_buffer_reuse": {
+                    "reference": {"peak_extra_mib": 1.0},
+                    "candidate": {"peak_extra_mib": 0.0},
+                    "speedup": 1.1,
+                    "errors": [{"max_abs_error": 0.0}] * 2,
+                    "eliminated_tensor_allocations_per_update": 4,
+                    "persistent_metadata_buffers_mib": 0.01,
+                    "candidate_reuses_two_isolated_buffer_banks": True,
+                },
                 "compact_top_k_sampling": {
                     "reference": {"peak_extra_mib": 32.0},
                     "candidate": {"peak_extra_mib": 2.0},

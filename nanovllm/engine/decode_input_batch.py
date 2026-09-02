@@ -161,14 +161,18 @@ class TokenInputBatch:
         self,
         token_capacity: int,
         sequence_capacity: int,
+        max_num_blocks: int = 1,
         *,
         device: torch.device | str = "cuda",
         pin_memory: bool = True,
     ) -> None:
         if token_capacity <= 0 or sequence_capacity <= 0:
             raise ValueError("token input capacities must be positive")
+        if max_num_blocks <= 0:
+            raise ValueError("packed block-table capacity must be positive")
         self.token_capacity = token_capacity
         self.sequence_capacity = sequence_capacity
+        self.max_num_blocks = max_num_blocks
         specs = {
             "input_ids": (token_capacity, torch.int64),
             "positions": (token_capacity, torch.int64),
@@ -194,6 +198,52 @@ class TokenInputBatch:
         self._arrays = {
             name: tensor.numpy() for name, tensor in self.host.items()
         }
+        packed_block_capacity = sequence_capacity * max_num_blocks
+        # Mixed batches retain decode and prefill metadata at the same time.
+        # Two banks keep those live ranges disjoint while still avoiding
+        # per-step pinned-host and device allocations.
+        self.host_selected_block_ids = tuple(
+            torch.empty(
+                packed_block_capacity,
+                dtype=torch.int32,
+                device="cpu",
+                pin_memory=pin_memory,
+            )
+            for _ in range(2)
+        )
+        self.device_selected_block_ids = tuple(
+            torch.empty(
+                packed_block_capacity,
+                dtype=torch.int32,
+                device=device,
+            )
+            for _ in range(2)
+        )
+        self.host_packed_block_tables = tuple(
+            torch.empty(
+                sequence_capacity,
+                max_num_blocks,
+                dtype=torch.int32,
+                device="cpu",
+                pin_memory=pin_memory,
+            )
+            for _ in range(2)
+        )
+        self.device_packed_block_tables = tuple(
+            torch.empty(
+                sequence_capacity,
+                max_num_blocks,
+                dtype=torch.int32,
+                device=device,
+            )
+            for _ in range(2)
+        )
+        self._selected_block_ids_arrays = tuple(
+            tensor.numpy() for tensor in self.host_selected_block_ids
+        )
+        self._packed_block_tables_arrays = tuple(
+            tensor.numpy() for tensor in self.host_packed_block_tables
+        )
 
     def _update(self, name: str, values: list[int]) -> torch.Tensor:
         size = len(values)
@@ -242,3 +292,59 @@ class TokenInputBatch:
 
     def update_logits_indices(self, values: list[int]) -> torch.Tensor:
         return self._update("logits_indices", values)
+
+    def update_packed_block_metadata(
+        self,
+        selected_block_ids: list[int],
+        packed_block_tables: list[list[int]],
+        *,
+        slot: int = 0,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if slot not in (0, 1):
+            raise ValueError("packed metadata slot must be 0 or 1")
+        host_ids = self.host_selected_block_ids[slot]
+        device_ids = self.device_selected_block_ids[slot]
+        host_tables = self.host_packed_block_tables[slot]
+        device_tables = self.device_packed_block_tables[slot]
+        selected_count = len(selected_block_ids)
+        sequence_count = len(packed_block_tables)
+        if not 0 < selected_count <= host_ids.numel():
+            raise ValueError(
+                "selected block count must be in "
+                f"[1, {host_ids.numel()}]"
+            )
+        if not 0 < sequence_count <= self.sequence_capacity:
+            raise ValueError(
+                "packed block-table row count must be in "
+                f"[1, {self.sequence_capacity}]"
+            )
+        width = len(packed_block_tables[0])
+        if not 0 < width <= self.max_num_blocks:
+            raise ValueError(
+                "packed block-table width must be in "
+                f"[1, {self.max_num_blocks}]"
+            )
+        if any(len(row) != width for row in packed_block_tables):
+            raise ValueError("packed block-table rows must have equal width")
+
+        self._selected_block_ids_arrays[slot][:selected_count] = (
+            selected_block_ids
+        )
+        selected_device = device_ids[:selected_count]
+        selected_device.copy_(
+            host_ids[:selected_count],
+            non_blocking=True,
+        )
+
+        self._packed_block_tables_arrays[slot][:sequence_count, :width] = (
+            packed_block_tables
+        )
+        tables_device = device_tables[
+            :sequence_count,
+            :width,
+        ]
+        tables_device.copy_(
+            host_tables[:sequence_count, :width],
+            non_blocking=True,
+        )
+        return selected_device, tables_device

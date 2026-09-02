@@ -54,6 +54,10 @@ SAMPLING_INPUTS = load_source_module(
     "qwen35_sampling_inputs_benchmark",
     "nanovllm/engine/sampling_input_batch.py",
 )
+TOKEN_INPUTS = load_source_module(
+    "qwen35_token_inputs_benchmark",
+    "nanovllm/engine/decode_input_batch.py",
+)
 ROTARY = load_source_module(
     "qwen35_rotary_benchmark",
     "nanovllm/layers/rotary_embedding.py",
@@ -500,6 +504,75 @@ def benchmark_sampling_input_reuse(args, device, dtype) -> dict:
         / 1024
     )
     result["candidate_reuses_host_device_storage"] = True
+    return result
+
+
+def benchmark_packed_block_metadata_reuse(args, device) -> dict:
+    block_size = 256
+    sequence_count = args.sampling_batch
+    blocks_per_sequence = max(
+        1,
+        (args.prefill_tokens + block_size - 1) // block_size,
+    )
+    selected_block_ids = list(range(sequence_count * blocks_per_sequence))
+    packed_block_tables = [
+        list(range(start, start + blocks_per_sequence))
+        for start in range(
+            0,
+            len(selected_block_ids),
+            blocks_per_sequence,
+        )
+    ]
+    pin_memory = device.type == "cuda"
+    batch = TOKEN_INPUTS.TokenInputBatch(
+        token_capacity=max(args.prefill_tokens, 1),
+        sequence_capacity=sequence_count,
+        max_num_blocks=blocks_per_sequence,
+        device=device,
+        pin_memory=pin_memory,
+    )
+
+    def reference():
+        return (
+            torch.tensor(
+                selected_block_ids,
+                dtype=torch.int32,
+                pin_memory=pin_memory,
+            ).to(device, non_blocking=pin_memory),
+            torch.tensor(
+                packed_block_tables,
+                dtype=torch.int32,
+                pin_memory=pin_memory,
+            ).to(device, non_blocking=pin_memory),
+        )
+
+    def candidate():
+        return batch.update_packed_block_metadata(
+            selected_block_ids,
+            packed_block_tables,
+        )
+
+    result = compare(
+        reference,
+        candidate,
+        device=device,
+        warmup=args.warmup,
+        iterations=args.iterations,
+        repeats=args.repeats,
+    )
+    tensors = (
+        *batch.host_selected_block_ids,
+        *batch.device_selected_block_ids,
+        *batch.host_packed_block_tables,
+        *batch.device_packed_block_tables,
+    )
+    result["eliminated_tensor_allocations_per_update"] = 4
+    result["persistent_metadata_buffers_mib"] = (
+        sum(tensor.numel() * tensor.element_size() for tensor in tensors)
+        / 1024
+        / 1024
+    )
+    result["candidate_reuses_two_isolated_buffer_banks"] = True
     return result
 
 
@@ -3073,6 +3146,9 @@ def main() -> None:
                 args,
                 device,
                 dtype,
+            ),
+            "packed_block_metadata_buffer_reuse": (
+                benchmark_packed_block_metadata_reuse(args, device)
             ),
             "moe_output_buffer_reuse": benchmark_moe_output_merge(
                 args,

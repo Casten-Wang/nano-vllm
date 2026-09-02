@@ -1378,6 +1378,14 @@ def summarize(run_dir: Path, run_id: str) -> dict:
                 ),
                 {"candidate_reuses_host_device_storage": True},
             ),
+            "packed_block_metadata": summarize_buffer_reuse_candidate(
+                result["results"]["packed_block_metadata_buffer_reuse"],
+                ("persistent_metadata_buffers_mib",),
+                {
+                    "eliminated_tensor_allocations_per_update": 4,
+                    "candidate_reuses_two_isolated_buffer_banks": True,
+                },
+            ),
             "decode_convolution_state": summarize_buffer_reuse_candidate(
                 result["results"]["decode_convolution_state_reuse"],
                 ("reused_convolution_state_mib",),
