@@ -220,6 +220,20 @@ def summarize_repeats(results: list[dict], labels: list[str]) -> dict:
             "benchmark repeats do not share one implementation: "
             + ", ".join(mismatches)
         )
+    required_execution_paths = baseline["execution_validation"].get(
+        "required_paths", []
+    )
+    if any(
+        result["execution_validation"].get("required_paths", [])
+        != required_execution_paths
+        for result in results[1:]
+    ):
+        raise ValueError("benchmark repeats require different execution paths")
+    observed_path_sets = [
+        set(result["execution_validation"].get("observed_paths", []))
+        for result in results
+    ]
+    observed_in_all_repeats = sorted(set.intersection(*observed_path_sets))
 
     metrics = {
         "output_throughput_tok_s": [
@@ -248,6 +262,10 @@ def summarize_repeats(results: list[dict], labels: list[str]) -> dict:
         "generated_token_ids_digest": baseline["generated_token_ids"]["digest"],
         "all_output_digests_match": comparison["all_output_digests_match"],
         "all_execution_paths_valid": comparison["all_execution_paths_valid"],
+        "execution_paths": {
+            "required": list(required_execution_paths),
+            "observed_in_all_repeats": observed_in_all_repeats,
+        },
         "all_generation_valid": comparison["all_generation_valid"],
         "statistics": {
             name: distribution(values) for name, values in metrics.items()
@@ -294,6 +312,7 @@ def compare_repeat_summaries(summaries: list[dict], labels: list[str]) -> dict:
                 "execution_paths_valid": summary[
                     "all_execution_paths_valid"
                 ],
+                "execution_paths": summary.get("execution_paths", {}),
                 "generation_valid": summary["all_generation_valid"],
                 "median": {
                     name: statistics_by_name[name]["median"]

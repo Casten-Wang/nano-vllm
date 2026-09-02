@@ -69,7 +69,15 @@ def result(
         "output_throughput_tok_s": throughput,
         "peak_torch_allocated_mib": memory,
         "generated_token_ids": {"digest": digest},
-        "execution_validation": {"valid": True},
+        "execution_validation": {
+            "valid": True,
+            "required_paths": ["decode_contiguous_view"],
+            "observed_paths": [
+                "decode_contiguous_view",
+                "decode_eager",
+                "float_flash_decode",
+            ],
+        },
         "generation_validation": {"valid": True},
         "metrics": {
             "avg_ttft_s": 2.0,
@@ -215,6 +223,14 @@ def test_repeat_summary_reports_distribution_and_stability():
     assert throughput["coefficient_of_variation"] == pytest.approx(0.081649658)
     assert summary["all_output_digests_match"]
     assert summary["generated_token_ids_digest"] == "same"
+    assert summary["execution_paths"] == {
+        "required": ["decode_contiguous_view"],
+        "observed_in_all_repeats": [
+            "decode_contiguous_view",
+            "decode_eager",
+            "float_flash_decode",
+        ],
+    }
     assert summary["storage"]["recurrent_state_storage"][
         "rotary_cache_bytes_local_rank"
     ] == 512
@@ -245,6 +261,9 @@ def test_matrix_summary_compares_configuration_medians_and_quality():
     ] == 1024
     assert comparison["baseline"] == "float"
     assert comparison["runs"][0]["vs_baseline"]["output_throughput"] == 1.0
+    assert comparison["runs"][0]["execution_paths"]["required"] == [
+        "decode_contiguous_view"
+    ]
     assert comparison["runs"][1]["vs_baseline"]["output_throughput"] == 1.25
     assert comparison["runs"][1]["vs_baseline"]["peak_memory"] == 0.75
     assert comparison["all_repeat_output_digests_match"]
@@ -272,6 +291,19 @@ def test_repeat_summary_rejects_different_optimization_configuration():
     candidate["kv_cache_dtype"] = "int8"
 
     with pytest.raises(ValueError, match="candidate.kv_cache_dtype"):
+        MODULE.summarize_repeats(
+            [result(), candidate],
+            ["baseline", "candidate"],
+        )
+
+
+def test_repeat_summary_rejects_different_execution_contracts():
+    candidate = result()
+    candidate["execution_validation"]["required_paths"] = [
+        "decode_graph_indexed"
+    ]
+
+    with pytest.raises(ValueError, match="different execution paths"):
         MODULE.summarize_repeats(
             [result(), candidate],
             ["baseline", "candidate"],
