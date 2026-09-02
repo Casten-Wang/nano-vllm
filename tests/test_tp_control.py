@@ -158,6 +158,7 @@ def load_model_runner_module():
 model_runner_module = load_model_runner_module()
 ModelRunner = model_runner_module.ModelRunner
 CONTROL_STATUS_SIZE = model_runner_module.CONTROL_STATUS_SIZE
+validate_initial_cache_capacity = model_runner_module.validate_initial_cache_capacity
 
 
 def make_runner(rank: int, events):
@@ -169,6 +170,30 @@ def make_runner(rank: int, events):
 
 
 class TPControlTest(unittest.TestCase):
+    def test_initial_cache_capacity_reserves_state_and_one_kv_block(self):
+        remaining = validate_initial_cache_capacity(
+            free_bytes=900,
+            total_bytes=1000,
+            gpu_memory_utilization=0.8,
+            state_bytes=500,
+            minimum_kv_bytes=100,
+        )
+
+        self.assertEqual(remaining, 100)
+
+    def test_initial_cache_capacity_fails_before_state_allocation(self):
+        with self.assertRaisesRegex(
+            RuntimeError,
+            r"required 701 bytes .* available 700 bytes.*reduce max_num_seqs",
+        ):
+            validate_initial_cache_capacity(
+                free_bytes=900,
+                total_bytes=1000,
+                gpu_memory_utilization=0.8,
+                state_bytes=601,
+                minimum_kv_bytes=100,
+            )
+
     def test_collective_rpc_is_published_before_waiting_for_workers(self):
         runner = make_runner(
             0,

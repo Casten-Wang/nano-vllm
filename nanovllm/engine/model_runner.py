@@ -64,6 +64,34 @@ def dtype_nbytes(dtype: torch.dtype) -> int:
     return torch.empty((), dtype=dtype, device="cpu").element_size()
 
 
+def validate_initial_cache_capacity(
+    *,
+    free_bytes: int,
+    total_bytes: int,
+    gpu_memory_utilization: float,
+    state_bytes: int,
+    minimum_kv_bytes: int,
+) -> int:
+    """Return the remaining device budget or fail before large state allocation."""
+
+    used_bytes = total_bytes - free_bytes
+    available_bytes = max(
+        int(total_bytes * gpu_memory_utilization) - used_bytes,
+        0,
+    )
+    required_bytes = state_bytes + minimum_kv_bytes
+    if required_bytes > available_bytes:
+        raise RuntimeError(
+            "recurrent state cache leaves no room for KV cache within "
+            f"gpu_memory_utilization: required {required_bytes} bytes "
+            f"({state_bytes} state + {minimum_kv_bytes} minimum KV), "
+            f"available {available_bytes} bytes; reduce max_num_seqs, use "
+            "recurrent_state_dtype='model', increase tensor_parallel_size, "
+            "or increase gpu_memory_utilization"
+        )
+    return available_bytes - required_bytes
+
+
 class ModelRunner:
 
     def __init__(
@@ -542,6 +570,38 @@ class ModelRunner:
             num_state_slots += 1
         else:
             self.recurrent_graph_padding_slot = None
+        kv_dtype = (
+            torch.int8
+            if self.config.kv_cache_dtype == "int8"
+            else model_config.dtype
+        )
+        cache_plan = plan_cache_memory(
+            model_spec,
+            self.world_size,
+            kv_dtype_bytes=dtype_nbytes(kv_dtype),
+            recurrent_dtype_bytes=dtype_nbytes(recurrent_dtype),
+            convolution_dtype_bytes=dtype_nbytes(model_config.dtype),
+        )
+        state_bytes = num_state_slots * (
+            cache_plan.recurrent_bytes_per_sequence
+            + cache_plan.convolution_bytes_per_sequence
+        )
+        minimum_kv_bytes = cache_plan.kv_bytes_per_token * self.block_size
+        if self.config.kv_cache_dtype == "int8":
+            minimum_kv_bytes += (
+                cache_plan.int8_scale_bytes_per_token * self.block_size
+            )
+        # Model loading may leave reusable blocks in PyTorch's allocator.
+        # Release those blocks so device-free memory is not underestimated.
+        torch.cuda.empty_cache()
+        free_bytes, total_bytes = torch.cuda.mem_get_info()
+        validate_initial_cache_capacity(
+            free_bytes=free_bytes,
+            total_bytes=total_bytes,
+            gpu_memory_utilization=self.config.gpu_memory_utilization,
+            state_bytes=state_bytes,
+            minimum_kv_bytes=minimum_kv_bytes,
+        )
         for module in self.model.modules():
             allocate = getattr(module, "allocate_state_cache", None)
             if allocate is not None and callable(allocate):
