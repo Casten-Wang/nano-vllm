@@ -4,8 +4,13 @@ import torch
 from nanovllm.engine.decode_input_batch import DecodeInputBatch
 
 
-def make_batch(capacity=4):
-    return DecodeInputBatch(capacity, device="cpu", pin_memory=False)
+def make_batch(capacity=4, max_num_blocks=4):
+    return DecodeInputBatch(
+        capacity,
+        max_num_blocks,
+        device="cpu",
+        pin_memory=False,
+    )
 
 
 def test_decode_input_batch_preserves_values_and_dtypes():
@@ -38,6 +43,25 @@ def test_decode_input_batch_reuses_all_host_and_device_storage():
     assert device_pointers == tuple(value.data_ptr() for value in second)
 
 
+def test_decode_block_tables_are_padded_and_reuse_storage():
+    batch = make_batch()
+
+    first = batch.update_block_tables([[3, 5, 7], [11]])
+    storage = first.data_ptr()
+    assert torch.equal(
+        first,
+        torch.tensor([[3, 5, 7], [11, -1, -1]], dtype=torch.int32),
+    )
+
+    second = batch.update_block_tables([[13], [17, 19]])
+
+    assert second.data_ptr() == storage
+    assert torch.equal(
+        second,
+        torch.tensor([[13, -1], [17, 19]], dtype=torch.int32),
+    )
+
+
 @pytest.mark.parametrize(
     "values",
     [
@@ -49,3 +73,9 @@ def test_decode_input_batch_reuses_all_host_and_device_storage():
 def test_decode_input_batch_rejects_invalid_sizes(values):
     with pytest.raises(ValueError):
         make_batch(capacity=2).update(*values)
+
+
+@pytest.mark.parametrize("values", [[], [[]], [[1, 2, 3]]])
+def test_decode_input_batch_rejects_invalid_block_tables(values):
+    with pytest.raises(ValueError):
+        make_batch(capacity=2, max_num_blocks=2).update_block_tables(values)

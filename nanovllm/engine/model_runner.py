@@ -146,7 +146,10 @@ class ModelRunner:
             if self.rank == 0
             else None
         )
-        self.decode_inputs = DecodeInputBatch(config.max_num_seqs)
+        self.decode_inputs = DecodeInputBatch(
+            config.max_num_seqs,
+            (config.max_model_len + self.block_size - 1) // self.block_size,
+        )
         self.allocate_recurrent_state_cache()
         self.warmup_model()
         self.allocate_kv_cache()
@@ -726,7 +729,16 @@ class ModelRunner:
                 f"attached {layer_id} KV cache layers, expected {num_layers}"
             )
 
-    def prepare_block_tables(self, seqs: list[Sequence]):
+    def prepare_block_tables(
+        self,
+        seqs: list[Sequence],
+        *,
+        reuse_decode_buffer: bool = False,
+    ):
+        if reuse_decode_buffer:
+            return self.decode_inputs.update_block_tables(
+                [seq.block_table for seq in seqs]
+            )
         max_len = max(len(seq.block_table) for seq in seqs)
         block_tables = [seq.block_table + [-1] * (max_len - len(seq.block_table)) for seq in seqs]
         block_tables = torch.tensor(block_tables, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
@@ -961,7 +973,10 @@ class ModelRunner:
             positions.append(len(seq) - 1)
             context_lens.append(len(seq))
             slot_mapping.append(seq.block_table[-1] * self.block_size + seq.last_block_num_tokens  - 1)
-        block_tables = self.prepare_block_tables(seqs)
+        block_tables = self.prepare_block_tables(
+            seqs,
+            reuse_decode_buffer=True,
+        )
         dequant_block_ids = None
         dequant_block_tables = None
         if self.config.kv_cache_dtype == "int8" and self.config.kv_dequant_backend != "fused":
@@ -1011,7 +1026,10 @@ class ModelRunner:
             slot_mapping,
             context_lens,
         )
-        block_tables = self.prepare_block_tables(seqs)
+        block_tables = self.prepare_block_tables(
+            seqs,
+            reuse_decode_buffer=True,
+        )
         dequant_block_ids = None
         dequant_block_tables = None
         if self.config.kv_cache_dtype == "int8" and self.config.kv_dequant_backend != "fused":

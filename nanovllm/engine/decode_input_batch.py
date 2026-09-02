@@ -9,13 +9,17 @@ class DecodeInputBatch:
     def __init__(
         self,
         capacity: int,
+        max_num_blocks: int = 1,
         *,
         device: torch.device | str = "cuda",
         pin_memory: bool = True,
     ) -> None:
         if capacity <= 0:
             raise ValueError("decode input capacity must be positive")
+        if max_num_blocks <= 0:
+            raise ValueError("decode block-table capacity must be positive")
         self.capacity = capacity
+        self.max_num_blocks = max_num_blocks
         specs = {
             "input_ids": torch.int64,
             "positions": torch.int64,
@@ -38,6 +42,20 @@ class DecodeInputBatch:
         self._arrays = {
             name: tensor.numpy() for name, tensor in self.host.items()
         }
+        self.host_block_tables = torch.empty(
+            capacity,
+            max_num_blocks,
+            dtype=torch.int32,
+            device="cpu",
+            pin_memory=pin_memory,
+        )
+        self.device_block_tables = torch.empty(
+            capacity,
+            max_num_blocks,
+            dtype=torch.int32,
+            device=device,
+        )
+        self._block_table_array = self.host_block_tables.numpy()
 
     def update(
         self,
@@ -72,3 +90,23 @@ class DecodeInputBatch:
             self.device[name][:size]
             for name in ("input_ids", "positions", "slot_mapping", "context_lens")
         )
+
+    def update_block_tables(self, block_tables: list[list[int]]) -> torch.Tensor:
+        size = len(block_tables)
+        if not 0 < size <= self.capacity:
+            raise ValueError(
+                f"decode batch size must be in [1, {self.capacity}]"
+            )
+        width = max((len(row) for row in block_tables), default=0)
+        if not 0 < width <= self.max_num_blocks:
+            raise ValueError(
+                "decode block-table width must be in "
+                f"[1, {self.max_num_blocks}]"
+            )
+        host = self.host_block_tables[:size, :width]
+        host.fill_(-1)
+        for row_index, row in enumerate(block_tables):
+            self._block_table_array[row_index, : len(row)] = row
+        device = self.device_block_tables[:size, :width]
+        device.copy_(host, non_blocking=True)
+        return device
