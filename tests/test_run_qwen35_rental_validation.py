@@ -283,15 +283,19 @@ def test_manifest_rejects_results_from_different_source_tree(tmp_path):
         MODULE.prepare_manifest(path, changed, resume=True)
 
 
-def test_source_fingerprint_ignores_results_and_documentation(monkeypatch, tmp_path):
+def test_source_fingerprint_ignores_repository_excluded_files(monkeypatch, tmp_path):
     source = tmp_path / "nanovllm"
     scripts = tmp_path / "scripts"
     source.mkdir()
     scripts.mkdir()
     (source / "model.py").write_text("VALUE = 1\n")
     (scripts / "run.py").write_text("print('run')\n")
+    private_script = scripts / "private_interview.py"
+    private_script.write_text("PRIVATE = 1\n")
     project = tmp_path / "pyproject.toml"
     project.write_text("[project]\nname = 'test'\n")
+    (tmp_path / ".gitignore").write_text("scripts/private_interview.py\n")
+    MODULE.subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
     monkeypatch.setattr(MODULE, "ROOT", tmp_path)
     monkeypatch.setattr(MODULE, "SOURCE_ROOTS", (source, scripts))
     monkeypatch.setattr(MODULE, "SOURCE_FILES", (project,))
@@ -299,6 +303,7 @@ def test_source_fingerprint_ignores_results_and_documentation(monkeypatch, tmp_p
     baseline = MODULE.source_tree_sha256()
     (tmp_path / "benchmark_results.json").write_text("{}\n")
     (tmp_path / "notes.md").write_text("private notes\n")
+    private_script.write_text("PRIVATE = 2\n")
 
     assert MODULE.source_tree_sha256() == baseline
     (source / "model.py").write_text("VALUE = 2\n")

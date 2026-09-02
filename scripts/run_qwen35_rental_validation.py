@@ -53,9 +53,7 @@ def validate_run_id(value: str) -> str:
 def source_tree_sha256() -> str:
     """Fingerprint executable project sources used by rental validation."""
 
-    paths = list(SOURCE_FILES)
-    for source_root in SOURCE_ROOTS:
-        paths.extend(source_root.rglob("*.py"))
+    paths = source_tree_paths()
     digest = hashlib.sha256()
     for path in sorted(paths, key=lambda item: item.relative_to(ROOT).as_posix()):
         relative = path.relative_to(ROOT).as_posix().encode()
@@ -65,6 +63,47 @@ def source_tree_sha256() -> str:
         digest.update(len(content).to_bytes(8, "big"))
         digest.update(content)
     return digest.hexdigest()
+
+
+def source_tree_paths() -> list[Path]:
+    """Return runnable sources, excluding files ignored by repository policy."""
+
+    fallback = list(SOURCE_FILES)
+    for source_root in SOURCE_ROOTS:
+        fallback.extend(source_root.rglob("*.py"))
+    try:
+        pathspecs = [str(path.relative_to(ROOT)) for path in SOURCE_ROOTS]
+        pathspecs.extend(str(path.relative_to(ROOT)) for path in SOURCE_FILES)
+    except ValueError:
+        return fallback
+    result = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(ROOT),
+            "ls-files",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "-z",
+            "--",
+            *pathspecs,
+        ],
+        check=False,
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        return fallback
+    relative_paths = [
+        Path(value.decode())
+        for value in result.stdout.split(b"\0")
+        if value
+    ]
+    return [
+        ROOT / path
+        for path in relative_paths
+        if path.suffix == ".py" or path == Path("pyproject.toml")
+    ]
 
 
 def commands(args: argparse.Namespace) -> list[tuple[str, list[str]]]:
