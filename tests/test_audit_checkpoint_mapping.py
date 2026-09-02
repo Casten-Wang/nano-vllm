@@ -55,6 +55,10 @@ def test_cache_storage_metadata_uses_tp_and_model_dtype():
 
     assert result == {
         "kv_bytes_per_token": 32,
+        "kv_bytes_per_token_by_dtype": {
+            "auto": 32,
+            "int8": 20,
+        },
         "state_bytes_per_sequence": {
             "float32": 384,
             "model": 256,

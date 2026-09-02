@@ -13,6 +13,7 @@ class CacheMemoryPlan:
     local_kv_heads: int
     kv_head_replication: int
     kv_bytes_per_token: int
+    int8_scale_bytes_per_token: int
     recurrent_bytes_per_sequence: int
     convolution_bytes_per_sequence: int
 
@@ -89,6 +90,12 @@ def plan_cache_memory(
         * head_dim
         * kv_dtype_bytes
     )
+    int8_scale_bytes_per_token = (
+        2
+        * model_spec.num_kv_cache_layers
+        * local_kv_heads
+        * 2  # Runtime stores one FP16 scale per K/V token and local KV head.
+    )
 
     recurrent_bytes = 0
     convolution_bytes = 0
@@ -127,6 +134,7 @@ def plan_cache_memory(
         local_kv_heads=local_kv_heads,
         kv_head_replication=kv_head_replication,
         kv_bytes_per_token=kv_bytes_per_token,
+        int8_scale_bytes_per_token=int8_scale_bytes_per_token,
         recurrent_bytes_per_sequence=recurrent_bytes,
         convolution_bytes_per_sequence=convolution_bytes,
     )

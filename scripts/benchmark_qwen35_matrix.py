@@ -269,9 +269,15 @@ def validate_memory_capacity(
         )
         state_slot_count = max_num_seqs + recurrent_padding_slots
         state_bytes = state_bytes_per_sequence * state_slot_count
-        kv_bytes_per_token = audit.get("kv_bytes_per_token")
-        if not isinstance(kv_bytes_per_token, int) or kv_bytes_per_token <= 0:
+        kv_sizes = audit.get("kv_bytes_per_token_by_dtype")
+        if kv_sizes is None:
+            kv_sizes = {"auto": audit.get("kv_bytes_per_token")}
+        if not isinstance(kv_sizes, dict) or not kv_sizes or not all(
+            isinstance(value, int) and value > 0
+            for value in kv_sizes.values()
+        ):
             raise ValueError(f"checkpoint audit has no TP={tp_size} KV size")
+        kv_bytes_per_token = max(kv_sizes.values())
         blocks_per_sequence = (
             sequence_length + KVCACHE_BLOCK_SIZE - 1
         ) // KVCACHE_BLOCK_SIZE
@@ -302,6 +308,7 @@ def validate_memory_capacity(
             "local_parameter_bytes": parameter_bytes,
             "max_state_bytes_per_rank": state_bytes,
             "minimum_workload_kv_bytes_per_rank": kv_bytes,
+            "kv_bytes_per_token_by_dtype": kv_sizes,
             "max_num_seqs": max_num_seqs,
             "recurrent_padding_slots": recurrent_padding_slots,
             "allocated_state_slot_count": state_slot_count,

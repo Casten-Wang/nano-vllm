@@ -141,6 +141,7 @@ def test_memory_preflight_covers_each_tp_rank():
             "tp4": {
                 "local_parameter_bytes": 16 * gib,
                 "kv_bytes_per_token": 1024,
+                "kv_bytes_per_token_by_dtype": {"auto": 1024, "int8": 520},
                 "state_bytes_per_sequence": {"float32": 8, "model": 4},
             },
             "tp8": {
@@ -170,6 +171,10 @@ def test_memory_preflight_covers_each_tp_rank():
     assert result["results"]["tp4"]["minimum_workload_kv_bytes_per_rank"] == (
         64 * 3 * 256 * 1024
     )
+    assert result["results"]["tp4"]["kv_bytes_per_token_by_dtype"] == {
+        "auto": 1024,
+        "int8": 520,
+    }
     assert result["results"]["tp4"]["required_free_bytes_per_rank"] == (
         18 * gib + 8 * 65 + 64 * 3 * 256 * 1024
     )
@@ -204,6 +209,30 @@ def test_memory_preflight_rejects_insufficient_rank():
             640,
             1.0,
             1,
+        )
+
+
+def test_memory_preflight_rejects_empty_kv_dtype_sizes():
+    report = {
+        "results": {
+            "tp1": {
+                "local_parameter_bytes": 1,
+                "kv_bytes_per_token_by_dtype": {},
+                "state_bytes_per_sequence": {"float32": 0, "model": 0},
+            }
+        }
+    }
+
+    with pytest.raises(ValueError, match="has no TP=1 KV size"):
+        MODULE.validate_memory_capacity(
+            report,
+            (1,),
+            [{"free": 1024, "total": 1024}],
+            0,
+            1,
+            1,
+            1,
+            1.0,
         )
 
 

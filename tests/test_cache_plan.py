@@ -59,6 +59,7 @@ def test_qwen35_tp1_cache_layout_matches_official_config():
     assert plan.local_kv_heads == 2
     assert plan.kv_head_replication == 1
     assert plan.kv_bytes_per_token == 20_480
+    assert plan.int8_scale_bytes_per_token == 80
     assert plan.recurrent_bytes_per_sequence == 62_914_560
     assert plan.convolution_bytes_per_sequence == 1_966_080
 
@@ -69,6 +70,7 @@ def test_qwen35_tp4_accounts_for_kv_head_replication():
     assert plan.local_kv_heads == 1
     assert plan.kv_head_replication == 2
     assert plan.kv_bytes_per_token == 10_240
+    assert plan.int8_scale_bytes_per_token == 40
     assert plan.recurrent_bytes_per_sequence == 15_728_640
     assert plan.convolution_bytes_per_sequence == 491_520
     assert plan.bytes_per_sequence(32_768) == 351_764_480

@@ -264,8 +264,22 @@ def cache_storage_metadata(model_spec, tp_size: int, model_dtype_bytes: int) -> 
         recurrent_dtype_bytes=model_dtype_bytes,
         convolution_dtype_bytes=model_dtype_bytes,
     )
+    int8_cache = plan_cache_memory(
+        model_spec,
+        tp_size,
+        kv_dtype_bytes=1,
+        recurrent_dtype_bytes=model_dtype_bytes,
+        convolution_dtype_bytes=model_dtype_bytes,
+    )
     return {
         "kv_bytes_per_token": fp32_state.kv_bytes_per_token,
+        "kv_bytes_per_token_by_dtype": {
+            "auto": fp32_state.kv_bytes_per_token,
+            "int8": (
+                int8_cache.kv_bytes_per_token
+                + int8_cache.int8_scale_bytes_per_token
+            ),
+        },
         "state_bytes_per_sequence": {
             "float32": fp32_state.recurrent_bytes_per_sequence
             + fp32_state.convolution_bytes_per_sequence,
