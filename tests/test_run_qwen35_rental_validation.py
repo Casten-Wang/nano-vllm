@@ -52,6 +52,7 @@ def test_commands_are_fail_fast_and_cover_complete_validation_suite():
         "kernels-long-prefill-tp4",
         "attention-short-tp4",
         "attention-long-tp4",
+        "attention-max-tp4",
         "cudagraph-short-tp4",
         "cudagraph-long-tp4",
         "kernels-tp8",
@@ -61,6 +62,7 @@ def test_commands_are_fail_fast_and_cover_complete_validation_suite():
         "kernels-long-prefill-tp8",
         "attention-short-tp8",
         "attention-long-tp8",
+        "attention-max-tp8",
         "cudagraph-short-tp8",
         "cudagraph-long-tp8",
         "performance-matrix",
@@ -123,6 +125,7 @@ def test_attention_commands_match_summary_contract():
         for name, expected_context in (
             ("short", SUMMARY_MODULE.ATTENTION_SHORT_CONTEXT),
             ("long", SUMMARY_MODULE.ATTENTION_LONG_CONTEXT),
+            ("max", SUMMARY_MODULE.ATTENTION_MAX_CONTEXT),
         ):
             command = stages[f"attention-{name}-tp{tp_size}"]
             def value(flag):
@@ -136,6 +139,11 @@ def test_attention_commands_match_summary_contract():
                 SUMMARY_MODULE.QWEN35_KV_HEADS_PER_RANK
             )
             assert value("--head-dim") == SUMMARY_MODULE.QWEN35_HEAD_DIM
+
+    max_attention = stages["attention-max-tp4"]
+    assert max_attention[max_attention.index("--batch-size") + 1] == "1"
+    assert max_attention[max_attention.index("--variants") + 1] == "v3"
+    assert max_attention[max_attention.index("--iters") + 1] == "5"
 
 
 @pytest.mark.parametrize("value", ["", "../run", "run id", "a/b"])

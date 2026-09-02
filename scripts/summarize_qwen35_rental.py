@@ -18,6 +18,7 @@ QWEN35_KV_HEADS_PER_RANK = 1
 QWEN35_HEAD_DIM = 256
 ATTENTION_SHORT_CONTEXT = 4096
 ATTENTION_LONG_CONTEXT = 16385
+ATTENTION_MAX_CONTEXT = 262143
 ATTENTION_MAX_ABS_ERROR = 0.05
 PRODUCTION_PARTITION_SIZE = 512
 LONG_PREFILL_TOKENS = 8192
@@ -835,15 +836,17 @@ def summarize(run_dir: Path, run_id: str) -> dict:
     for tp_name in sorted(expected_tp_names):
         tp_size = int(tp_name.removeprefix("tp"))
         cases = {}
-        for case_name, context_len, partitioned in (
-            ("short", ATTENTION_SHORT_CONTEXT, False),
-            ("long", ATTENTION_LONG_CONTEXT, True),
+        for case_name, context_len, batch_size, partitioned in (
+            ("short", ATTENTION_SHORT_CONTEXT, 4, False),
+            ("long", ATTENTION_LONG_CONTEXT, 4, True),
+            ("max", ATTENTION_MAX_CONTEXT, 1, True),
         ):
             result = load_json(
                 run_dir / "attention" / tp_name / f"{case_name}.json"
             )
             dimensions_valid = (
                 result["context_len"] == context_len
+                and result["batch_size"] == batch_size
                 and result["num_heads"]
                 == QWEN35_TOTAL_QUERY_HEADS // tp_size
                 and result["num_kv_heads"] == QWEN35_KV_HEADS_PER_RANK
@@ -1387,6 +1390,7 @@ def summarize(run_dir: Path, run_id: str) -> dict:
         "int8_attention": {
             "short_context": ATTENTION_SHORT_CONTEXT,
             "long_context": ATTENTION_LONG_CONTEXT,
+            "max_context": ATTENTION_MAX_CONTEXT,
             "by_tp": attention,
         },
         "long_prefill": {

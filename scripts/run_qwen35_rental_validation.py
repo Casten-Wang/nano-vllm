@@ -217,12 +217,16 @@ def commands(args: argparse.Namespace) -> list[tuple[str, list[str]]]:
         # Keep the long case one token past both the 256-token cache block and
         # the 256/512-token partition boundaries so the CUDA gate exercises a
         # partially filled final block and partition.
-        for context_name, context_len in (("short", 4096), ("long", 16385)):
+        for context_name, context_len, batch_size in (
+            ("short", 4096, 4),
+            ("long", 16385, 4),
+            ("max", 262143, 1),
+        ):
             command = [
                 sys.executable,
                 str(ATTENTION_KERNEL_SCRIPT),
                 "--batch-size",
-                "4",
+                str(batch_size),
                 "--context-len",
                 str(context_len),
                 "--num-heads",
@@ -236,9 +240,28 @@ def commands(args: argparse.Namespace) -> list[tuple[str, list[str]]]:
                 "--name",
                 context_name,
             ]
-            if context_name == "long":
+            if context_name != "short":
                 command.extend(
                     ("--include-partitioned", "--partition-sizes", "256,512")
+                )
+            if context_name == "max":
+                command.extend(
+                    (
+                        "--variants",
+                        "v3",
+                        "--block-tokens",
+                        "256",
+                        "--num-warps",
+                        "8",
+                        "--num-stages",
+                        "2",
+                        "--warmup",
+                        "2",
+                        "--iters",
+                        "5",
+                        "--repeats",
+                        "3",
+                    )
                 )
             result.append(
                 (f"attention-{context_name}-tp{tp_size}", command)

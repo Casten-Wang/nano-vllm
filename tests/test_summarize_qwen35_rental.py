@@ -27,6 +27,7 @@ def write_attention_case(
     context_len,
     *,
     partitioned,
+    batch_size=4,
     max_abs_diff=0.01,
 ):
     results = {
@@ -60,7 +61,7 @@ def write_attention_case(
             "commit": "abc",
             "git_dirty": False,
             "cuda_available": True,
-            "batch_size": 4,
+            "batch_size": batch_size,
             "context_len": context_len,
             "num_heads": 4,
             "num_kv_heads": 1,
@@ -628,6 +629,13 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     )
     write_attention_case(tmp_path, "short", 4096, partitioned=False)
     write_attention_case(tmp_path, "long", 16385, partitioned=True)
+    write_attention_case(
+        tmp_path,
+        "max",
+        262143,
+        partitioned=True,
+        batch_size=1,
+    )
     write_long_prefill_case(tmp_path)
     write_mixed_case(tmp_path)
 
