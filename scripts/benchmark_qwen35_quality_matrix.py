@@ -77,6 +77,10 @@ def command_for_case(
         str(args.max_model_len),
         "--max-num-batched-tokens",
         str(args.max_num_batched_tokens),
+        "--partition-threshold",
+        str(args.partition_threshold),
+        "--partition-size",
+        str(args.partition_size),
         "--trace-max-events",
         str(args.trace_max_events),
         "--trace-max-index-values",
@@ -125,6 +129,13 @@ def summarize_results(
     for case, result in results.items():
         summary = result["summary"]
         decode_ppl = summary["decode_ppl"]
+        int8_attention_paths = {
+            path
+            for batch in result["batches"]
+            for path in batch["execution_validation"]["int8"][
+                "observed_paths"
+            ]
+        }
         rows.append(
             {
                 "tensor_parallel_size": case.tensor_parallel_size,
@@ -141,6 +152,9 @@ def summarize_results(
                 "kv_sensitive_token_rows": summary[
                     "kv_sensitive_token_rows_compared"
                 ],
+                "int8_partitioned_decode_observed": (
+                    "int8_partitioned_decode" in int8_attention_paths
+                ),
             }
         )
 
@@ -305,6 +319,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--continuation-len", type=int, default=16)
     parser.add_argument("--max-model-len", type=int, default=4096)
     parser.add_argument("--max-num-batched-tokens", type=int, default=16384)
+    parser.add_argument("--partition-threshold", type=int, default=8192)
+    parser.add_argument("--partition-size", type=int, default=512)
     parser.add_argument("--trace-max-events", type=int, default=2048)
     parser.add_argument("--trace-max-index-values", type=int, default=64)
     parser.add_argument("--result-dir", default="benchmark_results/qwen35_quality_matrix")
@@ -324,7 +340,12 @@ def normalize_args(args: argparse.Namespace) -> argparse.Namespace:
         raise ValueError(
             "cases-per-length must be positive and continuation-len must be at least 2"
         )
-    if args.max_model_len <= 0 or args.max_num_batched_tokens <= 0:
+    if min(
+        args.max_model_len,
+        args.max_num_batched_tokens,
+        args.partition_threshold,
+        args.partition_size,
+    ) <= 0:
         raise ValueError("model and batch token limits must be positive")
     if args.trace_max_events <= 0 or args.trace_max_index_values <= 0:
         raise ValueError("trace limits must be positive")

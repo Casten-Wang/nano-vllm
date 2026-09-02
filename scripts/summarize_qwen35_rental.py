@@ -530,6 +530,10 @@ def summarize(run_dir: Path, run_id: str) -> dict:
         "quality_reads_stored_kv": all(
             row["kv_sensitive_token_rows"] > 0 for row in quality["cases"]
         ),
+        "quality_partitioned_int8_path": all(
+            row["int8_partitioned_decode_observed"]
+            for row in quality["cases"]
+        ),
         "quality_cross_tp_parity": quality["cross_tp"]["all_passed"],
         "quality_thresholds_passed": quality["quality_gates"]["all_passed"],
         "cuda_measurements": cuda_measurements,

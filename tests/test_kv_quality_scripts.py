@@ -146,6 +146,8 @@ def test_teacher_forcing_worker_command_forwards_tensor_parallel_size(
         recurrent_state_dtype="model",
         max_model_len=4096,
         max_num_batched_tokens=8192,
+        partition_threshold=8192,
+        partition_size=512,
     )
 
     TEACHER_FORCING.run_worker_process(
@@ -161,11 +163,18 @@ def test_teacher_forcing_worker_command_forwards_tensor_parallel_size(
     assert command[command.index("--recurrent-state-dtype") + 1] == "model"
 
 
-def execution_worker(mode, *, include_decode=True):
+def execution_worker(mode, *, include_decode=True, partitioned=False):
     attention_paths = (
         {"float_flash_prefill": 1, "float_flash_decode": 1}
         if mode == "auto"
-        else {"int8_prefill": 1, "int8_fused_decode": 1}
+        else {
+            "int8_prefill": 1,
+            (
+                "int8_partitioned_decode"
+                if partitioned
+                else "int8_fused_decode"
+            ): 1,
+        }
     )
     if not include_decode:
         attention_paths = {
@@ -175,6 +184,8 @@ def execution_worker(mode, *, include_decode=True):
         }
     return {
         "mode": mode,
+        "cases": [{"prompt_ids": [1] * (8192 if partitioned else 128)}],
+        "partition_threshold": 8192,
         "forced_steps": 2 if include_decode else 1,
         "stage_records": (
             [{"stage": "prefill"}, {"stage": "decode"}]
@@ -205,6 +216,23 @@ def test_teacher_forcing_execution_validation_requires_real_decode(mode):
     assert valid["valid"]
     assert not invalid["valid"]
     assert "decode_eager" in invalid["missing_paths"]
+
+
+def test_teacher_forcing_execution_validation_requires_partitioned_long_decode():
+    valid = TEACHER_FORCING.validate_worker_execution(
+        execution_worker("int8", partitioned=True)
+    )
+    wrong_path = execution_worker("int8", partitioned=True)
+    wrong_path["execution_stats"]["attention_path_counts"] = {
+        "int8_prefill": 1,
+        "int8_fused_decode": 1,
+    }
+
+    invalid = TEACHER_FORCING.validate_worker_execution(wrong_path)
+
+    assert valid["valid"]
+    assert not invalid["valid"]
+    assert "int8_partitioned_decode" in invalid["missing_paths"]
 
 
 def test_decode_only_quality_aggregate_excludes_prefill_control():

@@ -74,6 +74,9 @@ def test_commands_are_fail_fast_and_cover_complete_validation_suite():
     assert "--no-memory-preflight" in stages[-3][1]
     assert "--include-moe-candidate" in stages[-3][1]
     assert "--no-checkpoint-audit" in stages[-2][1]
+    assert stages[-2][1][stages[-2][1].index("--prompt-lengths") + 1] == (
+        "128,1024,3072,8192"
+    )
     assert stages[-1][1][-1].endswith("summary.json")
 
 

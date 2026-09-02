@@ -25,6 +25,8 @@ def args(**overrides):
         "continuation_len": 16,
         "max_model_len": 4096,
         "max_num_batched_tokens": 8192,
+        "partition_threshold": 8192,
+        "partition_size": 512,
         "trace_max_events": 128,
         "trace_max_index_values": 32,
         "result_dir": "benchmark_results/quality",
@@ -54,7 +56,12 @@ def summary(
                     "int8_top1_token_ids": [[top1]],
                     "bf16_target_logprobs": [[logprob]],
                     "int8_target_logprobs": [[logprob - 0.01]],
-                }
+                },
+                "execution_validation": {
+                    "int8": {
+                        "observed_paths": ["int8_partitioned_decode"],
+                    }
+                },
             }
         ],
         "summary": {
@@ -87,6 +94,7 @@ def test_quality_case_command_forwards_all_quality_dimensions():
     assert command[command.index("--tensor-parallel-size") + 1] == "8"
     assert command[command.index("--recurrent-state-dtype") + 1] == "model"
     assert command[command.index("--continuation-len") + 1] == "16"
+    assert command[command.index("--partition-size") + 1] == "512"
     assert command[command.index("--name") + 1] == "run-1_qwen35_tp8_state-model"
 
 
@@ -102,6 +110,7 @@ def test_matrix_summary_separates_state_and_kv_quality_effects():
     assert comparison["model_state_bf16_kv_relative_change"] == pytest.approx(0.02)
     assert comparison["float32_state_int8_kv_relative_change"] == pytest.approx(0.05)
     assert comparison["model_state_int8_kv_relative_change"] == pytest.approx(0.08)
+    assert result["cases"][0]["int8_partitioned_decode_observed"]
 
 
 def test_matrix_summary_requires_cross_tp_logit_parity():

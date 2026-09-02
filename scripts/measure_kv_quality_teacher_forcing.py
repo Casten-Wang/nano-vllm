@@ -338,7 +338,8 @@ def run_worker(args: argparse.Namespace) -> None:
         max_num_seqs=batch_size,
         kv_cache_dtype="auto" if mode == "auto" else "int8",
         kv_dequant_backend="fused",
-        int8_partitioned_decode_threshold=999999,
+        int8_partitioned_decode_threshold=args.partition_threshold,
+        int8_partitioned_decode_partition_size=args.partition_size,
     )
     runner = llm.model_runner
     collector = KVMetricCollector(mode)
@@ -422,6 +423,8 @@ def run_worker(args: argparse.Namespace) -> None:
             "mode": mode,
             "tensor_parallel_size": args.tensor_parallel_size,
             "recurrent_state_dtype": args.recurrent_state_dtype,
+            "partition_threshold": args.partition_threshold,
+            "partition_size": args.partition_size,
             "cases": cases,
             "target_matrix": target_matrix.tolist(),
             "forced_steps": state["step"],
@@ -495,9 +498,18 @@ def _row_metrics(left: torch.Tensor, right: torch.Tensor, targets: torch.Tensor)
 
 def validate_worker_execution(worker: dict[str, Any]) -> dict[str, Any]:
     mode = worker.get("mode")
+    max_prompt_length = max(
+        len(case["prompt_ids"]) for case in worker.get("cases", [])
+    )
+    partition_threshold = worker.get("partition_threshold", 8192)
+    int8_decode_path = (
+        "int8_partitioned_decode"
+        if max_prompt_length >= partition_threshold
+        else "int8_fused_decode"
+    )
     expected_attention = {
         "auto": {"float_flash_prefill", "float_flash_decode"},
-        "int8": {"int8_prefill", "int8_fused_decode"},
+        "int8": {"int8_prefill", int8_decode_path},
     }
     if mode not in expected_attention:
         raise ValueError(f"unsupported worker mode: {mode!r}")
@@ -732,6 +744,10 @@ def run_worker_process(
         str(args.max_model_len),
         "--max-num-batched-tokens",
         str(args.max_num_batched_tokens),
+        "--partition-threshold",
+        str(args.partition_threshold),
+        "--partition-size",
+        str(args.partition_size),
     ]
     subprocess.run(command, check=True)
     return output_path
@@ -761,6 +777,8 @@ def main() -> None:
     parser.add_argument("--continuation-len", type=int, default=16)
     parser.add_argument("--max-model-len", type=int, default=4096)
     parser.add_argument("--max-num-batched-tokens", type=int, default=16384)
+    parser.add_argument("--partition-threshold", type=int, default=8192)
+    parser.add_argument("--partition-size", type=int, default=512)
     parser.add_argument("--trace-max-events", type=int, default=2048)
     parser.add_argument("--trace-max-index-values", type=int, default=64)
     parser.add_argument("--result-dir", default="benchmark_results/kv_quality_teacher_forcing")
@@ -781,6 +799,8 @@ def main() -> None:
         )
     if args.trace_max_events <= 0 or args.trace_max_index_values <= 0:
         parser.error("trace limits must be positive")
+    if args.partition_threshold <= 0 or args.partition_size <= 0:
+        parser.error("partition settings must be positive")
     prompt_lengths = [int(item) for item in args.prompt_lengths.split(",") if item]
     if not prompt_lengths or any(item <= 0 for item in prompt_lengths):
         parser.error("prompt-lengths must contain positive integers")
@@ -873,6 +893,8 @@ def main() -> None:
             "trace_max_index_values": args.trace_max_index_values,
             "max_model_len": args.max_model_len,
             "max_num_batched_tokens": args.max_num_batched_tokens,
+            "partition_threshold": args.partition_threshold,
+            "partition_size": args.partition_size,
             "compute_dtype": "model_config_dtype",
             "auto_mode": "BF16/float KV cache",
             "int8_mode": "INT8 KV cache + fused decode",

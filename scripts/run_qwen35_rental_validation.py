@@ -184,6 +184,12 @@ def commands(args: argparse.Namespace) -> list[tuple[str, list[str]]]:
                     "--result-dir",
                     str(root / "quality"),
                     "--no-checkpoint-audit",
+                    "--prompt-lengths",
+                    "128,1024,3072,8192",
+                    "--max-model-len",
+                    str(args.max_model_len),
+                    "--max-num-batched-tokens",
+                    str(args.max_model_len),
                 ],
             ),
             (
