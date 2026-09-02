@@ -115,6 +115,19 @@ class Qwen3_5MoeForCausalLM(nn.Module):
             return "model." + weight_name[len(prefix) :]
         return weight_name
 
+    def resolve_checkpoint_parameter(self, weight_name: str):
+        from nanovllm.models.qwen35_gptq import resolve_gptq_expert_parameter
+
+        resolved = resolve_gptq_expert_parameter(weight_name)
+        if resolved is None:
+            return None
+        target, expert_id = resolved
+        try:
+            self.get_parameter(target)
+        except AttributeError:
+            return None
+        return target, expert_id
+
     def forward(
         self,
         input_ids: torch.Tensor,

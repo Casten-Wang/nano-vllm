@@ -390,13 +390,24 @@ class Qwen35SparseMoeBlock(nn.Module):
             int(config.num_experts),
             int(config.num_experts_per_tok),
         )
-        self.experts = Qwen35Experts(
-            self.hidden_size,
-            int(config.moe_intermediate_size),
-            int(config.num_experts),
-            getattr(config, "qwen35_moe_decode_backend", "sorted"),
-            int(getattr(config, "qwen35_moe_decode_chunk_size", 8)),
-        )
+        quantization = getattr(config, "nanovllm_quantization_spec", None)
+        if quantization is not None and quantization.format == "gptq_int4":
+            from nanovllm.models.qwen35_gptq import Qwen35GPTQExperts
+
+            self.experts = Qwen35GPTQExperts(
+                self.hidden_size,
+                int(config.moe_intermediate_size),
+                int(config.num_experts),
+                int(quantization.group_size),
+            )
+        else:
+            self.experts = Qwen35Experts(
+                self.hidden_size,
+                int(config.moe_intermediate_size),
+                int(config.num_experts),
+                getattr(config, "qwen35_moe_decode_backend", "sorted"),
+                int(getattr(config, "qwen35_moe_decode_chunk_size", 8)),
+            )
         self.shared_expert = Qwen35SharedExpert(
             self.hidden_size,
             int(config.shared_expert_intermediate_size),

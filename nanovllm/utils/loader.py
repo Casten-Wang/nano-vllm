@@ -45,10 +45,21 @@ def load_model(model: nn.Module, path: str):
                 weight_name = map_weight_name(source_weight_name)
                 if weight_name is None:
                     continue
-                packed_parameter = resolve_packed_parameter(
-                    weight_name,
-                    packed_modules_mapping,
+                resolve_checkpoint_parameter = getattr(
+                    model,
+                    "resolve_checkpoint_parameter",
+                    None,
                 )
+                packed_parameter = (
+                    resolve_checkpoint_parameter(weight_name)
+                    if resolve_checkpoint_parameter is not None
+                    else None
+                )
+                if packed_parameter is None:
+                    packed_parameter = resolve_packed_parameter(
+                        weight_name,
+                        packed_modules_mapping,
+                    )
                 if packed_parameter is not None:
                     param_name, shard_id = packed_parameter
                     shards = loaded_packed_shards.setdefault(param_name, set())
@@ -110,6 +121,16 @@ def load_model(model: nn.Module, path: str):
             packed_shards_by_target.setdefault(target_module, set()).add(shard_id)
         incomplete = []
         for param_name, loaded_shards in loaded_packed_shards.items():
+            parameter = model.get_parameter(param_name)
+            explicit_required = getattr(parameter, "required_checkpoint_shards", None)
+            if explicit_required is not None:
+                required_shards = set(explicit_required)
+                if loaded_shards != required_shards:
+                    incomplete.append(
+                        f"{param_name}: loaded {sorted(map(str, loaded_shards))}, "
+                        f"expected {sorted(map(str, required_shards))}"
+                    )
+                continue
             target_modules = set(param_name.split(".")).intersection(
                 packed_shards_by_target
             )

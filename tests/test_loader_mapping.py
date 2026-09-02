@@ -111,6 +111,26 @@ class StrictPackedModel(nn.Module):
         )
 
 
+class StackedCheckpointModel(nn.Module):
+    strict_weight_loading = True
+
+    def __init__(self):
+        super().__init__()
+        self.stacked = nn.Parameter(torch.zeros(2, 2))
+        self.stacked.required_checkpoint_shards = frozenset({0, 1})
+        self.stacked.packed_safetensors_loader = self.load_shard
+
+    @staticmethod
+    def resolve_checkpoint_parameter(name):
+        if name.startswith("expert."):
+            return "stacked", int(name.split(".")[1])
+        return None
+
+    @staticmethod
+    def load_shard(param, source, shard_id):
+        param.data[shard_id].copy_(source)
+
+
 def test_loader_maps_text_names_before_loading_and_skips_visual_tensors(tmp_path):
     (tmp_path / "model.safetensors").touch()
     FakeSafeFile.requested.clear()
@@ -208,3 +228,32 @@ def test_strict_loader_accepts_every_packed_shard(tmp_path):
         loader.load_model(model, str(tmp_path))
 
     assert model.loaded_shards == [0, 1]
+
+
+def test_loader_supports_checkpoint_shards_stacked_by_model_hook(tmp_path):
+    (tmp_path / "model.safetensors").touch()
+    safe_file = FakeSafeFile()
+    safe_file.keys = lambda: ("expert.0", "expert.1")
+    model = StackedCheckpointModel()
+
+    with patch.object(loader, "safe_open", return_value=safe_file):
+        loader.load_model(model, str(tmp_path))
+
+    torch.testing.assert_close(
+        model.stacked,
+        torch.tensor([[5.0, 6.0], [5.0, 6.0]]),
+    )
+
+
+def test_loader_rejects_missing_model_defined_checkpoint_shard(tmp_path):
+    (tmp_path / "model.safetensors").touch()
+    safe_file = FakeSafeFile()
+    safe_file.keys = lambda: ("expert.0",)
+
+    with patch.object(loader, "safe_open", return_value=safe_file):
+        try:
+            loader.load_model(StackedCheckpointModel(), str(tmp_path))
+        except RuntimeError as error:
+            assert "expected ['0', '1']" in str(error)
+        else:
+            raise AssertionError("strict loading accepted a missing expert shard")

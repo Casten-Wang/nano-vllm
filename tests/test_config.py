@@ -98,6 +98,66 @@ def test_quantized_checkpoint_is_rejected_before_runtime_setup(monkeypatch, tmp_
         config_module.Config(str(tmp_path))
 
 
+def test_gptq_reference_backend_is_explicitly_admitted(monkeypatch, tmp_path):
+    text_config = SimpleNamespace(max_position_embeddings=32768)
+    quantization = QuantizationSpec(
+        format="gptq_int4",
+        weight_bits=4,
+        group_size=128,
+        symmetric=True,
+        desc_act=False,
+    )
+    monkeypatch.setattr(
+        config_module.AutoConfig,
+        "from_pretrained",
+        lambda _model: SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        config_module,
+        "resolve_model_spec",
+        lambda _config: SimpleNamespace(
+            text_config=text_config,
+            quantization=quantization,
+        ),
+    )
+
+    config = config_module.Config(
+        str(tmp_path),
+        weight_quant_backend="reference",
+    )
+
+    assert config.model_config.nanovllm_quantization_spec is quantization
+
+
+def test_gptq_reference_rejects_incompatible_moe_backend(monkeypatch, tmp_path):
+    text_config = SimpleNamespace(max_position_embeddings=32768)
+    quantization = QuantizationSpec(
+        format="gptq_int4",
+        weight_bits=4,
+        group_size=128,
+    )
+    monkeypatch.setattr(
+        config_module.AutoConfig,
+        "from_pretrained",
+        lambda _model: SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        config_module,
+        "resolve_model_spec",
+        lambda _config: SimpleNamespace(
+            text_config=text_config,
+            quantization=quantization,
+        ),
+    )
+
+    with pytest.raises(ValueError, match="requires.*sorted"):
+        config_module.Config(
+            str(tmp_path),
+            weight_quant_backend="reference",
+            qwen35_moe_decode_backend="batched",
+        )
+
+
 def test_generation_config_resolves_all_eos_tokens(tmp_path):
     (tmp_path / "generation_config.json").write_text(
         json.dumps({"eos_token_id": [248046, 248044, 248046]}),
