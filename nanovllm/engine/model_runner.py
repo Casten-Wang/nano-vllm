@@ -73,6 +73,7 @@ def validate_initial_cache_capacity(
     gpu_memory_utilization: float,
     state_bytes: int,
     minimum_kv_bytes: int,
+    state_bytes_per_slot: int | None = None,
 ) -> int:
     """Return the remaining device budget or fail before large state allocation."""
 
@@ -83,11 +84,20 @@ def validate_initial_cache_capacity(
     )
     required_bytes = state_bytes + minimum_kv_bytes
     if required_bytes > available_bytes:
+        slot_hint = ""
+        if state_bytes_per_slot is not None:
+            if state_bytes_per_slot <= 0:
+                raise ValueError("state_bytes_per_slot must be positive")
+            max_slots = max(
+                (available_bytes - minimum_kv_bytes) // state_bytes_per_slot,
+                0,
+            )
+            slot_hint = f"; at most {max_slots} recurrent state slots fit"
         raise RuntimeError(
             "recurrent state cache leaves no room for KV cache within "
             f"gpu_memory_utilization: required {required_bytes} bytes "
             f"({state_bytes} state + {minimum_kv_bytes} minimum KV), "
-            f"available {available_bytes} bytes; reduce max_num_seqs, use "
+            f"available {available_bytes} bytes{slot_hint}; reduce max_num_seqs, use "
             "recurrent_state_dtype='model', increase tensor_parallel_size, "
             "or increase gpu_memory_utilization"
         )
@@ -615,6 +625,10 @@ class ModelRunner:
             gpu_memory_utilization=self.config.gpu_memory_utilization,
             state_bytes=state_bytes,
             minimum_kv_bytes=minimum_kv_bytes,
+            state_bytes_per_slot=(
+                cache_plan.recurrent_bytes_per_sequence
+                + cache_plan.convolution_bytes_per_sequence
+            ),
         )
         for module in self.model.modules():
             allocate = getattr(module, "allocate_state_cache", None)

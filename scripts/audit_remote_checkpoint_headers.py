@@ -15,16 +15,20 @@ from types import SimpleNamespace
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
+import torch
+
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.audit_checkpoint_mapping import (
+    cache_storage_metadata,
     instantiate_meta_model,
     parameter_storage_bytes,
     validate_weight_shape,
 )
+from nanovllm.models.model_spec import resolve_model_spec
 from nanovllm.utils.loader import resolve_packed_parameter
 from nanovllm.models.quantization_spec import (
     QuantizationSpec,
@@ -590,6 +594,16 @@ def main() -> None:
     with tempfile.TemporaryDirectory() as directory:
         model_dir = Path(directory)
         (model_dir / "config.json").write_bytes(config_bytes)
+        from transformers import AutoConfig
+
+        hf_config = AutoConfig.from_pretrained(model_dir)
+        model_spec = resolve_model_spec(hf_config)
+        model_dtype = getattr(model_spec.text_config, "dtype", None)
+        if not isinstance(model_dtype, torch.dtype):
+            model_dtype = getattr(model_spec.text_config, "torch_dtype", None)
+        if not isinstance(model_dtype, torch.dtype):
+            model_dtype = torch.bfloat16
+        model_dtype_bytes = torch.empty((), dtype=model_dtype).element_size()
         results = {}
         for tp_size in args.tp_sizes:
             executable_layout = quantization.format == "gptq_int4"
@@ -601,6 +615,9 @@ def main() -> None:
             result = audit_model_headers(
                 model,
                 headers if executable_layout else logical_headers,
+            )
+            result.update(
+                cache_storage_metadata(model_spec, tp_size, model_dtype_bytes)
             )
             if quantization.is_quantized:
                 if executable_layout:

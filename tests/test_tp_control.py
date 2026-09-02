@@ -197,7 +197,8 @@ class TPControlTest(unittest.TestCase):
     def test_initial_cache_capacity_fails_before_state_allocation(self):
         with self.assertRaisesRegex(
             RuntimeError,
-            r"required 701 bytes .* available 700 bytes.*reduce max_num_seqs",
+            r"required 701 bytes .* available 700 bytes; at most 6 recurrent "
+            r"state slots fit; reduce max_num_seqs",
         ):
             validate_initial_cache_capacity(
                 free_bytes=900,
@@ -205,6 +206,7 @@ class TPControlTest(unittest.TestCase):
                 gpu_memory_utilization=0.8,
                 state_bytes=601,
                 minimum_kv_bytes=100,
+                state_bytes_per_slot=100,
             )
 
     def test_collective_rpc_is_published_before_waiting_for_workers(self):

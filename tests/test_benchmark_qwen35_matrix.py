@@ -395,6 +395,66 @@ def test_memory_preflight_reports_dtype_concurrency_boundary():
     ] == 6
 
 
+def test_official_qwen35_gptq_tp1_capacity_rejects_512_slots_on_32gib():
+    """Guard the capacity boundary derived from the pinned official checkpoint."""
+
+    gib = 1024**3
+    report = {
+        "results": {
+            "tp1": {
+                "local_parameter_bytes": 21_821_080_192,
+                "model_max_position_embeddings": 262_144,
+                "rotary_cache_bytes_per_position": 256,
+                "kv_bytes_per_token_by_dtype": {
+                    "auto": 20_480,
+                    "int8": 10_320,
+                },
+                "state_bytes_per_sequence": {
+                    "float32": 64_880_640,
+                    "model": 33_423_360,
+                },
+            }
+        }
+    }
+    memory = [{"free": 32 * gib, "total": 32 * gib}]
+
+    with pytest.raises(
+        ValueError,
+        match=r"fixed model/state/headroom exceeds the usable budget",
+    ):
+        MODULE.validate_memory_capacity(
+            report,
+            (1,),
+            memory,
+            2 * gib,
+            512,
+            1,
+            4096,
+            0.9,
+            configured_max_model_len=4096,
+        )
+
+    result = MODULE.validate_memory_capacity(
+        report,
+        (1,),
+        memory,
+        2 * gib,
+        46,
+        46,
+        4096,
+        0.9,
+        configured_max_model_len=4096,
+    )["results"]["tp1"]
+
+    assert result["valid"]
+    assert result["allocated_state_slot_count"] == 46
+    auto_capacity = result["kv_capacity_by_dtype"]["auto"]
+    assert auto_capacity[
+        "memory_limited_concurrent_sequences_at_workload_length"
+    ] == 47
+    assert auto_capacity["effective_concurrent_sequences_at_workload_length"] == 46
+
+
 def test_case_command_is_eager_and_fully_identified():
     case = MODULE.BenchmarkCase(8, "model", "int8")
     command = MODULE.command_for_case(args(), case, repeat=2)
