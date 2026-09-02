@@ -1,0 +1,224 @@
+"""Streaming wire format for one tensor-parallel rank's cache payload."""
+
+from __future__ import annotations
+
+import hashlib
+import hmac
+import json
+import struct
+from collections.abc import Iterable
+
+import torch
+
+from nanovllm.engine.cache_transfer import RankCacheTransfer
+
+
+WIRE_MAGIC = b"NVCT"
+WIRE_VERSION = 1
+WIRE_HEADER = struct.Struct("!4sBQQ")
+WIRE_DIGEST_BYTES = hashlib.sha256().digest_size
+MAX_HEADER_BYTES = 64 * 1024
+DEFAULT_MAX_PAYLOAD_BYTES = 16 * 1024**3
+_CHUNK_BYTES = 1024 * 1024
+
+_DTYPE_TO_NAME = {
+    torch.float16: "float16",
+    torch.bfloat16: "bfloat16",
+    torch.float32: "float32",
+    torch.int8: "int8",
+}
+_NAME_TO_DTYPE = {name: dtype for dtype, name in _DTYPE_TO_NAME.items()}
+
+
+def _payload_tensors(
+    payload: RankCacheTransfer,
+) -> Iterable[tuple[str, torch.Tensor]]:
+    yield "kv_blocks", payload.kv_blocks
+    if payload.kv_scales is not None:
+        yield "kv_scales", payload.kv_scales
+    for index, tensor in enumerate(payload.recurrent_states):
+        yield f"recurrent/{index}", tensor
+    for index, tensor in enumerate(payload.convolution_states):
+        yield f"convolution/{index}", tensor
+
+
+def _host_tensor(tensor: torch.Tensor) -> torch.Tensor:
+    if tensor.dtype not in _DTYPE_TO_NAME:
+        raise ValueError(f"unsupported cache transfer dtype: {tensor.dtype}")
+    if tensor.ndim == 0:
+        raise ValueError("cache transfer tensors must not be scalars")
+    return tensor.detach().to(device="cpu").contiguous()
+
+
+def _byte_view(tensor: torch.Tensor) -> memoryview:
+    return memoryview(tensor.view(torch.uint8).reshape(-1).numpy())
+
+
+def _send_bytes(sock, data: bytes | memoryview, digest=None) -> None:
+    view = memoryview(data)
+    for start in range(0, len(view), _CHUNK_BYTES):
+        chunk = view[start : start + _CHUNK_BYTES]
+        sock.sendall(chunk)
+        if digest is not None:
+            digest.update(chunk)
+
+
+def send_rank_cache_transfer(sock, payload: RankCacheTransfer) -> int:
+    """Send one payload without materializing a second full byte buffer."""
+
+    tensors = [(name, _host_tensor(tensor)) for name, tensor in _payload_tensors(payload)]
+    descriptors = []
+    body_bytes = 0
+    for name, tensor in tensors:
+        nbytes = tensor.numel() * tensor.element_size()
+        body_bytes += nbytes
+        descriptors.append(
+            {
+                "name": name,
+                "dtype": _DTYPE_TO_NAME[tensor.dtype],
+                "shape": list(tensor.shape),
+                "nbytes": nbytes,
+            }
+        )
+    header = json.dumps(
+        {
+            "format_version": payload.format_version,
+            "transfer_id": payload.transfer_id,
+            "tensor_parallel_rank": payload.tensor_parallel_rank,
+            "tensor_parallel_size": payload.tensor_parallel_size,
+            "block_size": payload.block_size,
+            "cached_tokens": payload.cached_tokens,
+            "tensors": descriptors,
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    if len(header) > MAX_HEADER_BYTES:
+        raise ValueError("cache transfer wire header is too large")
+
+    sock.sendall(WIRE_HEADER.pack(WIRE_MAGIC, WIRE_VERSION, len(header), body_bytes))
+    digest = hashlib.sha256()
+    _send_bytes(sock, header, digest)
+    for _, tensor in tensors:
+        _send_bytes(sock, _byte_view(tensor), digest)
+    sock.sendall(digest.digest())
+    return WIRE_HEADER.size + len(header) + body_bytes + WIRE_DIGEST_BYTES
+
+
+def _recv_exact(sock, target: memoryview) -> None:
+    offset = 0
+    while offset < len(target):
+        received = sock.recv_into(target[offset:])
+        if received == 0:
+            raise EOFError("cache transfer stream ended unexpectedly")
+        offset += received
+
+
+def _recv_bytes(sock, size: int, digest=None) -> bytearray:
+    data = bytearray(size)
+    view = memoryview(data)
+    _recv_exact(sock, view)
+    if digest is not None:
+        digest.update(view)
+    return data
+
+
+def receive_rank_cache_transfer(
+    sock,
+    *,
+    max_payload_bytes: int = DEFAULT_MAX_PAYLOAD_BYTES,
+) -> RankCacheTransfer:
+    """Receive and verify one payload into newly owned CPU tensors."""
+
+    if max_payload_bytes <= 0:
+        raise ValueError("max_payload_bytes must be positive")
+    prefix = _recv_bytes(sock, WIRE_HEADER.size)
+    magic, wire_version, header_bytes, body_bytes = WIRE_HEADER.unpack(prefix)
+    if magic != WIRE_MAGIC or wire_version != WIRE_VERSION:
+        raise ValueError("unsupported cache transfer wire format")
+    if header_bytes <= 0 or header_bytes > MAX_HEADER_BYTES:
+        raise ValueError("cache transfer wire header size is invalid")
+    if body_bytes > max_payload_bytes:
+        raise ValueError("cache transfer payload exceeds configured byte limit")
+
+    digest = hashlib.sha256()
+    raw_header = _recv_bytes(sock, header_bytes, digest)
+    try:
+        header = json.loads(raw_header)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("cache transfer wire header is invalid") from exc
+    descriptors = header.get("tensors")
+    if not isinstance(descriptors, list) or not descriptors:
+        raise ValueError("cache transfer wire tensor descriptors are invalid")
+
+    tensors: dict[str, torch.Tensor] = {}
+    described_body_bytes = 0
+    for descriptor in descriptors:
+        if not isinstance(descriptor, dict):
+            raise ValueError("cache transfer wire tensor descriptor is invalid")
+        name = descriptor.get("name")
+        dtype = _NAME_TO_DTYPE.get(descriptor.get("dtype"))
+        shape = descriptor.get("shape")
+        nbytes = descriptor.get("nbytes")
+        if (
+            not isinstance(name, str)
+            or not name
+            or name in tensors
+            or dtype is None
+            or not isinstance(shape, list)
+            or not shape
+            or any(not isinstance(dim, int) or dim <= 0 for dim in shape)
+            or not isinstance(nbytes, int)
+            or nbytes <= 0
+        ):
+            raise ValueError("cache transfer wire tensor descriptor is invalid")
+        expected_nbytes = torch.empty((), dtype=dtype).element_size()
+        for dimension in shape:
+            expected_nbytes *= dimension
+        if nbytes != expected_nbytes:
+            raise ValueError("cache transfer wire tensor byte size is invalid")
+        described_body_bytes += nbytes
+        if described_body_bytes > body_bytes:
+            raise ValueError("cache transfer wire body size is inconsistent")
+        storage = torch.empty(nbytes, dtype=torch.uint8)
+        storage_view = _byte_view(storage)
+        _recv_exact(sock, storage_view)
+        digest.update(storage_view)
+        tensors[name] = storage.view(dtype).reshape(shape)
+    if described_body_bytes != body_bytes:
+        raise ValueError("cache transfer wire body size is inconsistent")
+
+    received_digest = _recv_bytes(sock, WIRE_DIGEST_BYTES)
+    if not hmac.compare_digest(digest.digest(), received_digest):
+        raise ValueError("cache transfer payload checksum mismatch")
+
+    try:
+        kv_blocks = tensors.pop("kv_blocks")
+        kv_scales = tensors.pop("kv_scales", None)
+        recurrent = tuple(
+            tensors.pop(f"recurrent/{index}")
+            for index in range(sum(name.startswith("recurrent/") for name in tensors))
+        )
+        convolution = tuple(
+            tensors.pop(f"convolution/{index}")
+            for index in range(sum(name.startswith("convolution/") for name in tensors))
+        )
+    except KeyError as exc:
+        raise ValueError("cache transfer wire tensor names are incomplete") from exc
+    if tensors:
+        raise ValueError("cache transfer wire tensor names are invalid")
+    try:
+        return RankCacheTransfer(
+            format_version=int(header["format_version"]),
+            transfer_id=header["transfer_id"],
+            tensor_parallel_rank=int(header["tensor_parallel_rank"]),
+            tensor_parallel_size=int(header["tensor_parallel_size"]),
+            block_size=int(header["block_size"]),
+            cached_tokens=int(header["cached_tokens"]),
+            kv_blocks=kv_blocks,
+            kv_scales=kv_scales,
+            recurrent_states=recurrent,
+            convolution_states=convolution,
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("cache transfer wire metadata is invalid") from exc
