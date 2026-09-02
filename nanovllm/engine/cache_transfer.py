@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum, auto
 
 import torch
 
@@ -15,6 +16,7 @@ class RankCacheTransfer:
     """Logical request state produced by one tensor-parallel rank."""
 
     format_version: int
+    transfer_id: str
     tensor_parallel_rank: int
     tensor_parallel_size: int
     block_size: int
@@ -27,6 +29,91 @@ class RankCacheTransfer:
     @property
     def num_blocks(self) -> int:
         return self.kv_blocks.shape[2]
+
+
+class CacheTransferPhase(Enum):
+    RECEIVING = auto()
+    READY = auto()
+    COMMITTED = auto()
+    ABORTED = auto()
+    TIMED_OUT = auto()
+
+
+class CacheTransferSession:
+    """Coordinate all-rank installation before a request may decode."""
+
+    def __init__(
+        self,
+        transfer_id: str,
+        tensor_parallel_size: int,
+        *,
+        started_at: float,
+        timeout_s: float,
+    ) -> None:
+        if not transfer_id:
+            raise ValueError("cache transfer id must not be empty")
+        if tensor_parallel_size <= 0:
+            raise ValueError("cache transfer TP size must be positive")
+        if timeout_s <= 0:
+            raise ValueError("cache transfer timeout must be positive")
+        self.transfer_id = transfer_id
+        self.tensor_parallel_size = tensor_parallel_size
+        self.deadline = started_at + timeout_s
+        self.phase = CacheTransferPhase.RECEIVING
+        self.acknowledged_ranks: set[int] = set()
+        self.failure_reason: str | None = None
+
+    @property
+    def fallback_required(self) -> bool:
+        return self.phase in {
+            CacheTransferPhase.ABORTED,
+            CacheTransferPhase.TIMED_OUT,
+        }
+
+    def _expire(self, now: float) -> None:
+        if (
+            self.phase in {CacheTransferPhase.RECEIVING, CacheTransferPhase.READY}
+            and now >= self.deadline
+        ):
+            self.phase = CacheTransferPhase.TIMED_OUT
+            self.failure_reason = "cache transfer timed out"
+
+    def acknowledge(self, rank: int, *, now: float) -> None:
+        self._expire(now)
+        if self.phase not in {
+            CacheTransferPhase.RECEIVING,
+            CacheTransferPhase.READY,
+        }:
+            raise RuntimeError("cache transfer session is already terminal")
+        if not 0 <= rank < self.tensor_parallel_size:
+            raise ValueError("cache transfer acknowledgement rank is invalid")
+        self.acknowledged_ranks.add(rank)
+        if len(self.acknowledged_ranks) == self.tensor_parallel_size:
+            self.phase = CacheTransferPhase.READY
+
+    def fail(self, rank: int, reason: str, *, now: float) -> None:
+        self._expire(now)
+        if self.phase not in {
+            CacheTransferPhase.RECEIVING,
+            CacheTransferPhase.READY,
+        }:
+            raise RuntimeError("cache transfer session is already terminal")
+        if not 0 <= rank < self.tensor_parallel_size:
+            raise ValueError("cache transfer failure rank is invalid")
+        if not reason:
+            raise ValueError("cache transfer failure reason must not be empty")
+        self.phase = CacheTransferPhase.ABORTED
+        self.failure_reason = f"rank {rank}: {reason}"
+
+    def commit(self, *, now: float) -> None:
+        self._expire(now)
+        if self.phase is not CacheTransferPhase.READY:
+            raise RuntimeError("cache transfer is not ready to commit")
+        self.phase = CacheTransferPhase.COMMITTED
+
+    def poll(self, *, now: float) -> CacheTransferPhase:
+        self._expire(now)
+        return self.phase
 
 
 def _validate_cache_layout(
@@ -79,6 +166,7 @@ def export_rank_cache(
     kv_scale: torch.Tensor | None,
     block_ids: list[int],
     *,
+    transfer_id: str,
     tensor_parallel_rank: int,
     tensor_parallel_size: int,
     block_size: int,
@@ -90,6 +178,8 @@ def export_rank_cache(
 
     _validate_cache_layout(kv_cache, kv_scale)
     _validate_state_pairs(recurrent_states, convolution_states)
+    if not transfer_id:
+        raise ValueError("cache transfer id must not be empty")
     if not 0 <= tensor_parallel_rank < tensor_parallel_size:
         raise ValueError("cache transfer tensor-parallel identity is invalid")
     if block_size <= 0:
@@ -120,6 +210,7 @@ def export_rank_cache(
             kv_scales[:, :, -1, valid_last_block_tokens:].zero_()
     return RankCacheTransfer(
         format_version=TRANSFER_FORMAT_VERSION,
+        transfer_id=transfer_id,
         tensor_parallel_rank=tensor_parallel_rank,
         tensor_parallel_size=tensor_parallel_size,
         block_size=block_size,
@@ -139,6 +230,7 @@ def import_rank_cache(
     kv_scale: torch.Tensor | None,
     block_ids: list[int],
     *,
+    transfer_id: str,
     tensor_parallel_rank: int,
     tensor_parallel_size: int,
     block_size: int,
@@ -159,6 +251,8 @@ def import_rank_cache(
         raise ValueError("cache transfer block size must be positive")
     if payload.format_version != TRANSFER_FORMAT_VERSION:
         raise ValueError("unsupported cache transfer format version")
+    if payload.transfer_id != transfer_id:
+        raise ValueError("cache transfer id does not match")
     if (
         payload.tensor_parallel_rank != tensor_parallel_rank
         or payload.tensor_parallel_size != tensor_parallel_size

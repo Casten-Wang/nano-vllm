@@ -5,6 +5,8 @@ import pytest
 import torch
 
 from nanovllm.engine.cache_transfer import (
+    CacheTransferPhase,
+    CacheTransferSession,
     RankCacheTransfer,
     export_rank_cache,
     import_rank_cache,
@@ -40,6 +42,7 @@ def test_float_rank_cache_round_trip_uses_logical_block_order():
         source,
         None,
         [3, 1],
+        transfer_id="request-1/attempt-1",
         tensor_parallel_rank=0,
         tensor_parallel_size=1,
         block_size=2,
@@ -55,6 +58,7 @@ def test_float_rank_cache_round_trip_uses_logical_block_order():
         destination,
         None,
         [0, 2],
+        transfer_id="request-1/attempt-1",
         tensor_parallel_rank=0,
         tensor_parallel_size=1,
         block_size=2,
@@ -86,6 +90,7 @@ def test_int8_rank_cache_round_trip_includes_scales():
         source,
         scales,
         [2],
+        transfer_id="request-2/attempt-1",
         tensor_parallel_rank=0,
         tensor_parallel_size=1,
         block_size=2,
@@ -99,6 +104,7 @@ def test_int8_rank_cache_round_trip_includes_scales():
         destination,
         destination_scales,
         [1],
+        transfer_id="request-2/attempt-1",
         tensor_parallel_rank=0,
         tensor_parallel_size=1,
         block_size=2,
@@ -114,6 +120,7 @@ def test_import_validation_failure_does_not_modify_destination():
         source,
         None,
         [1],
+        transfer_id="request-3/attempt-1",
         tensor_parallel_rank=0,
         tensor_parallel_size=1,
         block_size=2,
@@ -121,6 +128,7 @@ def test_import_validation_failure_does_not_modify_destination():
     )
     invalid = RankCacheTransfer(
         format_version=payload.format_version,
+        transfer_id=payload.transfer_id,
         tensor_parallel_rank=payload.tensor_parallel_rank,
         tensor_parallel_size=payload.tensor_parallel_size,
         block_size=payload.block_size,
@@ -139,6 +147,7 @@ def test_import_validation_failure_does_not_modify_destination():
             destination,
             None,
             [0],
+            transfer_id="request-3/attempt-1",
             tensor_parallel_rank=0,
             tensor_parallel_size=1,
             block_size=2,
@@ -153,6 +162,7 @@ def test_import_rejects_wrong_tp_rank_before_modifying_destination():
         source,
         None,
         [1],
+        transfer_id="request-4/attempt-1",
         tensor_parallel_rank=0,
         tensor_parallel_size=2,
         block_size=2,
@@ -167,6 +177,7 @@ def test_import_rejects_wrong_tp_rank_before_modifying_destination():
             destination,
             None,
             [0],
+            transfer_id="request-4/attempt-1",
             tensor_parallel_rank=0,
             tensor_parallel_size=2,
             block_size=2,
@@ -218,8 +229,15 @@ def test_model_runner_exports_and_imports_complete_hybrid_state():
         num_cached_tokens=3,
     )
 
-    payload = source.export_sequence_cache(source_seq)
-    destination.import_sequence_cache(destination_seq, payload)
+    payload = source.export_sequence_cache(
+        source_seq,
+        transfer_id="request-5/attempt-1",
+    )
+    destination.import_sequence_cache(
+        destination_seq,
+        payload,
+        transfer_id="request-5/attempt-1",
+    )
 
     torch.testing.assert_close(
         destination.kv_cache[:, :, 0],
@@ -239,3 +257,56 @@ def test_model_runner_exports_and_imports_complete_hybrid_state():
             destination_pool.convolution[0, 0],
             source_pool.convolution[0, 1],
         )
+
+
+def test_transfer_session_commits_only_after_every_rank_acknowledges():
+    session = CacheTransferSession(
+        "request-6/attempt-1",
+        4,
+        started_at=10.0,
+        timeout_s=5.0,
+    )
+    for rank in (2, 0, 2, 1):
+        session.acknowledge(rank, now=11.0)
+    assert session.phase is CacheTransferPhase.RECEIVING
+    with pytest.raises(RuntimeError, match="not ready"):
+        session.commit(now=11.0)
+
+    session.acknowledge(3, now=12.0)
+    assert session.phase is CacheTransferPhase.READY
+    session.commit(now=12.0)
+
+    assert session.phase is CacheTransferPhase.COMMITTED
+    assert not session.fallback_required
+
+
+def test_transfer_session_timeout_requires_colocated_fallback():
+    session = CacheTransferSession(
+        "request-7/attempt-1",
+        2,
+        started_at=10.0,
+        timeout_s=2.0,
+    )
+    session.acknowledge(0, now=11.0)
+
+    assert session.poll(now=12.0) is CacheTransferPhase.TIMED_OUT
+    assert session.fallback_required
+    with pytest.raises(RuntimeError, match="terminal"):
+        session.acknowledge(1, now=12.1)
+
+
+def test_transfer_session_rank_failure_aborts_all_rank_commit():
+    session = CacheTransferSession(
+        "request-8/attempt-1",
+        2,
+        started_at=10.0,
+        timeout_s=5.0,
+    )
+    session.acknowledge(0, now=11.0)
+    session.fail(1, "checksum mismatch", now=11.5)
+
+    assert session.phase is CacheTransferPhase.ABORTED
+    assert session.failure_reason == "rank 1: checksum mismatch"
+    assert session.fallback_required
+    with pytest.raises(RuntimeError, match="not ready"):
+        session.commit(now=12.0)
