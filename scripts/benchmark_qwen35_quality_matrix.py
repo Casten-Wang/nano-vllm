@@ -397,6 +397,14 @@ def main() -> None:
     run_id = args.run_id or datetime.now(timezone.utc).strftime(
         "qwen35_quality_%Y%m%dT%H%M%S%fZ"
     )
+    if not args.dry_run:
+        required_gpus = max(args.tp_sizes)
+        available_gpus = visible_gpu_count()
+        if available_gpus < required_gpus:
+            raise SystemExit(
+                f"quality matrix requires {required_gpus} visible GPUs, "
+                f"but found {available_gpus}; checkpoint audit was not started"
+            )
     if args.checkpoint_audit:
         command = checkpoint_audit_command(args, run_id)
         print("[preflight] checkpoint mapping audit", flush=True)
@@ -404,15 +412,6 @@ def main() -> None:
             print(subprocess.list2cmdline(command))
         else:
             subprocess.run(command, cwd=ROOT, check=True)
-    if not args.dry_run:
-        required_gpus = max(args.tp_sizes)
-        available_gpus = visible_gpu_count()
-        if available_gpus < required_gpus:
-            raise SystemExit(
-                f"quality matrix requires {required_gpus} visible GPUs, "
-                f"but found {available_gpus}"
-            )
-
     results = {}
     for index, case in enumerate(cases, start=1):
         command = command_for_case(args, case, run_id)

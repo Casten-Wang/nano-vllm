@@ -218,6 +218,38 @@ def test_manifest_resumes_only_identical_run(tmp_path):
     assert resumed["completed_stages"] == ["preflight"]
 
 
+def test_manifest_preserves_hugging_face_model_id():
+    arguments = args()
+    arguments.model = "Qwen/Qwen3.5-35B-A3B"
+
+    plan = MODULE.manifest_plan(arguments, MODULE.commands(arguments))
+
+    assert plan["model"] == "Qwen/Qwen3.5-35B-A3B"
+
+
+def test_main_rejects_insufficient_gpus_before_building_stages(monkeypatch):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_qwen35_rental_validation.py",
+            "--model",
+            "Qwen/Qwen3.5-35B-A3B",
+            "--tp-sizes",
+            "4,8",
+        ],
+    )
+    monkeypatch.setattr(MODULE, "visible_gpu_count", lambda: 4)
+
+    def unexpected_commands(_):
+        raise AssertionError("stages were built before GPU validation")
+
+    monkeypatch.setattr(MODULE, "commands", unexpected_commands)
+
+    with pytest.raises(SystemExit, match="requires 8 visible GPUs.*no checkpoint"):
+        MODULE.main()
+
+
 def test_mixed_stage_collects_only_its_repeat(tmp_path):
     arguments = args()
     arguments.result_dir = str(tmp_path)

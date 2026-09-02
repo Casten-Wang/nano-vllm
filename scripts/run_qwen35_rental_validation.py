@@ -6,6 +6,7 @@ import argparse
 from datetime import datetime, timezone
 import hashlib
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -407,13 +408,33 @@ def manifest_plan(
 ) -> dict:
     return {
         "run_id": args.run_id,
-        "model": str(Path(args.model).expanduser().resolve()),
+        "model": canonical_model_reference(args.model),
         "source_tree_sha256": source_tree_sha256(),
         "stages": [
             {"name": name, "command": command}
             for name, command in stages
         ],
     }
+
+
+def canonical_model_reference(model: str) -> str:
+    """Resolve local checkpoints without rewriting Hub repository IDs."""
+
+    expanded = Path(model).expanduser()
+    if expanded.exists() or expanded.is_absolute() or model.startswith((".", "~")):
+        return str(expanded.resolve())
+    return model
+
+
+def visible_gpu_count() -> int:
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if visible is not None:
+        devices = [item.strip() for item in visible.split(",") if item.strip()]
+        return 0 if not devices or devices == ["-1"] else len(devices)
+
+    import torch
+
+    return torch.cuda.device_count()
 
 
 def write_manifest(path: Path, manifest: dict) -> None:
@@ -655,6 +676,14 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    if not args.dry_run:
+        required_gpus = max(args.tp_sizes)
+        available_gpus = visible_gpu_count()
+        if available_gpus < required_gpus:
+            raise SystemExit(
+                f"rental validation requires {required_gpus} visible GPUs, "
+                f"but found {available_gpus}; no checkpoint or benchmark work started"
+            )
     stages = commands(args)
     manifest = None
     manifest_path = Path(args.result_dir) / args.run_id / "manifest.json"

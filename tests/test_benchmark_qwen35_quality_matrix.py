@@ -241,3 +241,26 @@ def test_quality_matrix_requires_complete_checkpoint_audit():
     assert command[command.index("--output") + 1].endswith(
         "run-1_checkpoint_audit.json"
     )
+
+
+def test_main_rejects_insufficient_gpus_before_checkpoint_audit(monkeypatch):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "benchmark_qwen35_quality_matrix.py",
+            "--model",
+            "Qwen/Qwen3.5-35B-A3B",
+            "--tp-sizes",
+            "4,8",
+        ],
+    )
+    monkeypatch.setattr(MODULE, "visible_gpu_count", lambda: 4)
+
+    def unexpected_run(*_args, **_kwargs):
+        raise AssertionError("checkpoint audit started before GPU validation")
+
+    monkeypatch.setattr(MODULE.subprocess, "run", unexpected_run)
+
+    with pytest.raises(SystemExit, match="requires 8 visible GPUs.*not started"):
+        MODULE.main()
