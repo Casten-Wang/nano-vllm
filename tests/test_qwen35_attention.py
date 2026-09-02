@@ -117,6 +117,16 @@ def test_attention_shapes_include_local_query_gate_and_replicated_kv():
     assert layer.rotary_emb.cos_sin_cache.shape[-1] == 2
 
 
+def test_attention_bounds_rope_cache_to_runtime_model_length():
+    layer_config = config()
+    layer_config.max_position_embeddings = 262_144
+    layer_config.nanovllm_max_model_len = 4096
+
+    layer = make_attention(layer_config=layer_config)
+
+    assert layer.rotary_emb.cos_sin_cache.shape[0] == 4096
+
+
 def test_query_gate_is_applied_after_attention():
     layer = make_attention()
     hidden = torch.randn(3, 8)

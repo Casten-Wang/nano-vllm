@@ -37,6 +37,21 @@ def test_qwen35_moe_decode_backend_is_forwarded_to_text_config(
     assert text_config.qwen35_moe_decode_chunk_size == 4
 
 
+def test_runtime_model_length_is_forwarded_as_allocation_bound(
+    monkeypatch,
+    tmp_path,
+):
+    config, text_config = make_config(
+        monkeypatch,
+        tmp_path,
+        max_model_len=4096,
+    )
+
+    assert config.max_model_len == 4096
+    assert text_config.max_position_embeddings == 32768
+    assert text_config.nanovllm_max_model_len == 4096
+
+
 def test_invalid_qwen35_moe_decode_backend_is_rejected(monkeypatch, tmp_path):
     with pytest.raises(ValueError, match="qwen35_moe_decode_backend"):
         make_config(

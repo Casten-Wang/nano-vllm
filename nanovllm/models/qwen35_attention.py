@@ -73,7 +73,13 @@ class Qwen35Attention(nn.Module):
         self.rotary_emb = get_rope(
             self.head_dim,
             rotary_dim=rotary_dim,
-            max_position=int(config.max_position_embeddings),
+            max_position=int(
+                getattr(
+                    config,
+                    "nanovllm_max_model_len",
+                    config.max_position_embeddings,
+                )
+            ),
             base=float(rope_parameters.get("rope_theta", 10_000.0)),
         )
         self.attn = Attention(
