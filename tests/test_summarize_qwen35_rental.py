@@ -120,10 +120,14 @@ def write_long_prefill_case(root, *, max_abs_error=0.01):
                 "vectorized_prefill_convolution": measurement,
                 "grouped_delta_prefill": deepcopy(measurement),
                 "grouped_delta_prefill_chunk_sweep": {
+                    "baseline_chunk_size": 64,
                     "candidates": {
                         str(chunk_size): {
                             **deepcopy(measurement),
                             "chunk_size": chunk_size,
+                            "errors_vs_chunk64": deepcopy(
+                                measurement["errors"]
+                            ),
                             "candidate": {
                                 "median_ms": latency,
                                 "peak_extra_mib": memory,
@@ -408,7 +412,7 @@ def test_long_prefill_rejects_inaccurate_kernel():
             "prefill_tokens": 8192,
             "tp_size": 4,
             "resolved_device": "cuda:0",
-            "delta_prefill_chunk_sizes": [32],
+            "delta_prefill_chunk_sizes": [32, 64],
         },
         "results": {
             name: {
@@ -421,15 +425,17 @@ def test_long_prefill_rejects_inaccurate_kernel():
             )
         } | {
             "grouped_delta_prefill_chunk_sweep": {
+                "baseline_chunk_size": 64,
                 "candidates": {
-                    "32": {
-                        "chunk_size": 32,
+                    str(chunk_size): {
+                        "chunk_size": chunk_size,
                         "candidate": {
                             "median_ms": 1.0,
                             "peak_extra_mib": 2.0,
                         },
-                        "errors": [{"max_abs_error": 0.01}],
+                        "errors_vs_chunk64": [{"max_abs_error": 0.01}],
                     }
+                    for chunk_size in (32, 64)
                 }
             }
         },

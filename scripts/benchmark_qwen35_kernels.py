@@ -838,20 +838,83 @@ def benchmark_delta_prefill_chunk_sweep(
     local_key_heads,
     local_value_heads,
 ) -> dict:
-    candidates = {}
-    for chunk_size in sorted(set(args.delta_prefill_chunk_sizes)):
-        # Re-seeding makes each candidate use the same input distribution, so
-        # latency and peak-memory comparisons do not depend on sweep order.
-        torch.manual_seed(args.seed)
-        candidates[str(chunk_size)] = benchmark_delta_prefill_head_groups(
-            args,
-            device,
-            dtype,
-            local_key_heads,
-            local_value_heads,
+    query = torch.randn(
+        args.prefill_batch,
+        args.prefill_tokens,
+        local_key_heads,
+        args.key_head_dim,
+        device=device,
+        dtype=dtype,
+    )
+    key = torch.randn_like(query)
+    value = torch.randn(
+        args.prefill_batch,
+        args.prefill_tokens,
+        local_value_heads,
+        args.value_head_dim,
+        device=device,
+        dtype=dtype,
+    )
+    decay = -torch.rand(
+        args.prefill_batch,
+        args.prefill_tokens,
+        local_value_heads,
+        device=device,
+    )
+    beta = torch.rand(
+        args.prefill_batch,
+        args.prefill_tokens,
+        local_value_heads,
+        device=device,
+        dtype=dtype,
+    )
+    state = torch.randn(
+        args.prefill_batch,
+        local_value_heads,
+        args.key_head_dim,
+        args.value_head_dim,
+        device=device,
+        dtype=dtype,
+    )
+
+    def run(chunk_size):
+        return GDN.chunk_gated_delta_rule(
+            query,
+            key,
+            value,
+            decay,
+            beta,
+            state,
             chunk_size=chunk_size,
         )
-    return {"candidates": candidates}
+
+    baseline_chunk_size = 64
+    baseline = run(baseline_chunk_size)
+    candidates = {}
+    for chunk_size in sorted(set(args.delta_prefill_chunk_sizes)):
+        candidate = lambda chunk_size=chunk_size: run(chunk_size)
+        actual = candidate()
+        errors_vs_chunk64 = [
+            error(value, target)
+            for value, target in zip(actual, baseline)
+        ]
+        del actual
+        timing = measure(
+            candidate,
+            device=device,
+            warmup=args.warmup,
+            iterations=args.iterations,
+            repeats=args.repeats,
+        )
+        candidates[str(chunk_size)] = {
+            "chunk_size": chunk_size,
+            "candidate": timing,
+            "errors_vs_chunk64": errors_vs_chunk64,
+        }
+    return {
+        "baseline_chunk_size": baseline_chunk_size,
+        "candidates": candidates,
+    }
 
 
 def evaluate_recurrent_storage_drift(

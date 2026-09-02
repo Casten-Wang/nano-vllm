@@ -347,17 +347,22 @@ def summarize_long_prefill(result: dict, *, expected_tp_size: int) -> dict:
             "max_abs_error": max_abs_error,
         }
     configured_chunk_sizes = configuration.get("delta_prefill_chunk_sizes", [])
-    sweep = result.get("results", {}).get(
+    sweep_result = result.get("results", {}).get(
         "grouped_delta_prefill_chunk_sweep",
         {},
-    ).get("candidates", {})
+    )
+    sweep = sweep_result.get("candidates", {})
     expected_chunk_names = {str(size) for size in configured_chunk_sizes}
-    if not expected_chunk_names or set(sweep) != expected_chunk_names:
+    if (
+        sweep_result.get("baseline_chunk_size") != 64
+        or "64" not in expected_chunk_names
+        or set(sweep) != expected_chunk_names
+    ):
         raise ValueError("long-prefill chunk sweep coverage is incomplete")
     chunk_candidates = {}
     for chunk_name, item in sweep.items():
         candidate = item.get("candidate", {})
-        errors = item.get("errors", [])
+        errors = item.get("errors_vs_chunk64", [])
         max_abs_error = max(
             (error.get("max_abs_error", math.inf) for error in errors),
             default=math.inf,
@@ -409,6 +414,7 @@ def summarize_long_prefill(result: dict, *, expected_tp_size: int) -> dict:
         "cases": cases,
         "chunk_sweep": {
             "valid": sweep_valid,
+            "baseline_chunk_size": 64,
             "fastest_chunk_size": int(fastest) if fastest is not None else None,
             "lowest_memory_chunk_size": (
                 int(lowest_memory) if lowest_memory is not None else None
