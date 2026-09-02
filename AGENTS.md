@@ -52,6 +52,14 @@
 
 - Product development for this fork and contributions to upstream are separate
   lanes. Never open an upstream PR directly from a product-development branch.
+- Never create, update, reopen, or close a pull request against a repository
+  owned by someone else without the user's explicit approval for that exact
+  action. Preparing a local branch and review packet does not grant submission
+  permission.
+- Before requesting approval to open an upstream PR, present the final diff,
+  changed-file list, commit history, focused and full test results, known
+  limitations, and proposed PR title and body. Submit only the reviewed commit
+  SHA and text; any material change requires renewed approval.
 - Start an upstream contribution from `upstream/main` on an
   `upstream-fix/<topic>` branch. Reproduce the problem on unmodified upstream
   first.

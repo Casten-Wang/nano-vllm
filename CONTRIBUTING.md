@@ -73,6 +73,18 @@ and major versions contain incompatible changes.
 
 ## Contributing fixes upstream
 
+Opening or changing a pull request against a repository owned by someone else
+always requires the user's explicit approval for that exact external action.
+Do not treat permission to investigate, implement, commit, push to this fork,
+or prepare a PR as permission to submit it upstream.
+
+Before asking for submission approval, provide a review packet containing the
+final diff and changed files, exact commit SHA(s), focused and full test
+results, known limitations, and the proposed PR title and body. After approval,
+submit only that reviewed revision. If the code or PR text changes materially,
+request approval again. The same rule applies to updating, reopening, or
+closing an existing upstream PR.
+
 Upstream contribution branches must start from the upstream repository rather
 than this fork's `main`:
 
