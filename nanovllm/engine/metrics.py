@@ -36,6 +36,9 @@ class EngineMetrics:
     max_preempted_token_progress: int = 0
     reclaimed_kv_blocks: int = 0
     aborted_requests: int = 0
+    prefill_stopped_by_token_budget: int = 0
+    prefill_stopped_by_sequence_capacity: int = 0
+    prefill_stopped_by_kv_capacity: int = 0
     remote_prefill_receive_started: int = 0
     remote_prefill_receive_committed: int = 0
     remote_prefill_receive_failed: int = 0
@@ -97,6 +100,9 @@ class EngineMetrics:
         self.max_preempted_token_progress = 0
         self.reclaimed_kv_blocks = 0
         self.aborted_requests = 0
+        self.prefill_stopped_by_token_budget = 0
+        self.prefill_stopped_by_sequence_capacity = 0
+        self.prefill_stopped_by_kv_capacity = 0
         self.remote_prefill_receive_started = 0
         self.remote_prefill_receive_committed = 0
         self.remote_prefill_receive_failed = 0
@@ -183,6 +189,9 @@ class EngineMetrics:
         max_preempted_token_progress: int = 0,
         reclaimed_kv_blocks: int = 0,
         aborted_requests: int = 0,
+        prefill_stopped_by_token_budget: int = 0,
+        prefill_stopped_by_sequence_capacity: int = 0,
+        prefill_stopped_by_kv_capacity: int = 0,
     ):
         """Record queue and KV block high-water marks.
 
@@ -206,6 +215,11 @@ class EngineMetrics:
         self.max_preempted_token_progress = max_preempted_token_progress
         self.reclaimed_kv_blocks = reclaimed_kv_blocks
         self.aborted_requests = aborted_requests
+        self.prefill_stopped_by_token_budget = prefill_stopped_by_token_budget
+        self.prefill_stopped_by_sequence_capacity = (
+            prefill_stopped_by_sequence_capacity
+        )
+        self.prefill_stopped_by_kv_capacity = prefill_stopped_by_kv_capacity
 
     def record_finished_sequences(self, seqs):
         """Record request-level latency metrics for finished sequences.
@@ -447,6 +461,11 @@ class EngineMetrics:
             "max_preempted_token_progress": self.max_preempted_token_progress,
             "reclaimed_kv_blocks": self.reclaimed_kv_blocks,
             "aborted_requests": self.aborted_requests,
+            "prefill_stopped_by_token_budget": self.prefill_stopped_by_token_budget,
+            "prefill_stopped_by_sequence_capacity": (
+                self.prefill_stopped_by_sequence_capacity
+            ),
+            "prefill_stopped_by_kv_capacity": self.prefill_stopped_by_kv_capacity,
             "remote_prefill_receive_started": self.remote_prefill_receive_started,
             "remote_prefill_receive_committed": self.remote_prefill_receive_committed,
             "remote_prefill_receive_failed": self.remote_prefill_receive_failed,

@@ -82,6 +82,56 @@ class Scheduler:
         self.max_preempted_token_progress = 0
         self.reclaimed_kv_blocks = 0
         self.aborted_requests = 0
+        self.last_prefill_stop_reason: str | None = None
+        self.prefill_stopped_by_token_budget = 0
+        self.prefill_stopped_by_sequence_capacity = 0
+        self.prefill_stopped_by_kv_capacity = 0
+
+    def _mark_prefill_stop(self, reason: str) -> None:
+        """Record the first admission boundary reached in this step."""
+
+        if self.last_prefill_stop_reason is not None:
+            return
+        if reason == "token_budget":
+            self.prefill_stopped_by_token_budget += 1
+        elif reason == "sequence_capacity":
+            self.prefill_stopped_by_sequence_capacity += 1
+        elif reason == "kv_capacity":
+            self.prefill_stopped_by_kv_capacity += 1
+        else:
+            raise ValueError(f"unknown prefill stop reason: {reason}")
+        self.last_prefill_stop_reason = reason
+
+    def capacity_snapshot(self) -> dict[str, int | float | str | None]:
+        """Return scheduler-owned capacity and admission-pressure state."""
+
+        active_waiting = sum(
+            bool(seq.block_table) or seq.state_slot is not None
+            for seq in self.waiting
+        )
+        used_sequence_slots = (
+            len(self.running)
+            + len(self.remote_prefills)
+            + len(self.remote_prefill_sources)
+            + active_waiting
+        )
+        return {
+            "sequence_slots_total": self.max_num_seqs,
+            "sequence_slots_used": used_sequence_slots,
+            "sequence_slots_free": max(self.max_num_seqs - used_sequence_slots, 0),
+            "kv_blocks_total": self.block_manager.num_total_blocks,
+            "kv_blocks_used": self.block_manager.num_used_blocks,
+            "kv_blocks_free": self.block_manager.num_free_blocks,
+            "kv_block_usage": self.block_manager.usage,
+            "waiting_requests": self.num_waiting,
+            "running_requests": self.num_running,
+            "last_prefill_stop_reason": self.last_prefill_stop_reason,
+            "prefill_stopped_by_token_budget": self.prefill_stopped_by_token_budget,
+            "prefill_stopped_by_sequence_capacity": (
+                self.prefill_stopped_by_sequence_capacity
+            ),
+            "prefill_stopped_by_kv_capacity": self.prefill_stopped_by_kv_capacity,
+        }
 
     def is_finished(self):
         return (
@@ -370,6 +420,7 @@ class Scheduler:
         return seq
 
     def schedule(self) -> tuple[list[Sequence], bool] | ScheduleResult:
+        self.last_prefill_stop_reason = None
         waiting_before = len(self.waiting)
         if self.enable_dynamic_chunked_prefill:
             result = self.schedule_dynamic_chunked_prefill()
@@ -418,6 +469,7 @@ class Scheduler:
             seq = self.waiting[0]
             remaining = self.max_num_batched_tokens - num_batched_tokens
             if remaining == 0:
+                self._mark_prefill_stop("token_budget")
                 break
             if not seq.block_table:
                 num_cached_blocks = (
@@ -440,6 +492,7 @@ class Scheduler:
                         )
                         == -1
                     ):
+                        self._mark_prefill_stop("kv_capacity")
                         break
                     self.block_manager.allocate(
                         seq,
@@ -452,6 +505,7 @@ class Scheduler:
                 num_running += 1
                 continue
             if remaining < num_tokens and scheduled_seqs:  # only allow chunked prefill for the first seq
+                self._mark_prefill_stop("token_budget")
                 break
             scheduled_tokens = min(num_tokens, remaining)
             target_blocks = (
@@ -470,6 +524,7 @@ class Scheduler:
                     )
                     == -1
                 ):
+                    self._mark_prefill_stop("kv_capacity")
                     break
                 self.block_manager.allocate(
                     seq,
@@ -477,6 +532,7 @@ class Scheduler:
                     num_blocks=target_blocks,
                 )
             elif not self.block_manager.can_grow(seq, target_blocks):
+                self._mark_prefill_stop("kv_capacity")
                 break
             else:
                 self.block_manager.grow(seq, target_blocks)
@@ -487,6 +543,12 @@ class Scheduler:
                 self.waiting.popleft()
                 self.running.append(seq)
             scheduled_seqs.append(seq)
+
+        if (
+            self.waiting
+            and num_running + len(scheduled_seqs) >= self.max_num_seqs
+        ):
+            self._mark_prefill_stop("sequence_capacity")
 
         if scheduled_seqs:
             return scheduled_seqs, True
@@ -717,10 +779,12 @@ class Scheduler:
         while self.waiting and len(scheduled_seqs) < seq_budget:
             remaining = token_budget - num_batched_tokens
             if remaining <= 0:
+                self._mark_prefill_stop("token_budget")
                 break
             seq = self.waiting[0]
             owns_slot = seq.state_slot is not None or bool(seq.block_table)
             if not owns_slot and admitted_seqs >= admission_budget:
+                self._mark_prefill_stop("sequence_capacity")
                 break
             if not seq.block_table:
                 num_cached_blocks = (
@@ -742,6 +806,7 @@ class Scheduler:
                         )
                         == -1
                     ):
+                        self._mark_prefill_stop("kv_capacity")
                         break
                     self.block_manager.allocate(
                         seq,
@@ -763,6 +828,7 @@ class Scheduler:
                     num_blocks=target_blocks,
                     num_cached_blocks=num_cached_blocks,
                 ) == -1:
+                    self._mark_prefill_stop("kv_capacity")
                     break
                 self.block_manager.allocate(
                     seq,
@@ -783,6 +849,7 @@ class Scheduler:
                     seq.num_cached_tokens + scheduled_tokens + self.block_size - 1
                 ) // self.block_size
                 if not self.block_manager.can_grow(seq, target_blocks):
+                    self._mark_prefill_stop("kv_capacity")
                     break
                 self.block_manager.grow(seq, target_blocks)
 
@@ -817,6 +884,11 @@ class Scheduler:
                 self.waiting.popleft()
                 self.running.append(seq)
             scheduled_seqs.append(seq)
+        if self.waiting and self.last_prefill_stop_reason is None:
+            if token_budget - num_batched_tokens <= 0:
+                self._mark_prefill_stop("token_budget")
+            elif len(scheduled_seqs) >= seq_budget:
+                self._mark_prefill_stop("sequence_capacity")
         return scheduled_seqs
 
     def preempt(self, seq: Sequence):

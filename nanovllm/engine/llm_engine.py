@@ -835,30 +835,8 @@ class LLMEngine:
             self._remote_prefill_receive_staged_bytes.values()
         ) + sum(self._remote_prefill_send_staged_bytes.values())
         staging_limit = self.config.max_remote_prefill_staging_bytes
-        active_waiting = sum(
-            bool(seq.block_table) or seq.state_slot is not None
-            for seq in self.scheduler.waiting
-        )
-        used_sequence_slots = (
-            len(self.scheduler.running)
-            + len(self.scheduler.remote_prefills)
-            + len(self.scheduler.remote_prefill_sources)
-            + active_waiting
-        )
-        block_manager = self.scheduler.block_manager
-        return {
-            "waiting_requests": self.scheduler.num_waiting,
-            "running_requests": self.scheduler.num_running,
-            "sequence_slots_total": self.config.max_num_seqs,
-            "sequence_slots_used": used_sequence_slots,
-            "sequence_slots_free": max(
-                self.config.max_num_seqs - used_sequence_slots,
-                0,
-            ),
-            "kv_blocks_total": block_manager.num_total_blocks,
-            "kv_blocks_used": block_manager.num_used_blocks,
-            "kv_blocks_free": block_manager.num_free_blocks,
-            "kv_block_usage": block_manager.usage,
+        snapshot = self.scheduler.capacity_snapshot()
+        snapshot.update({
             "transfer_slots_total": self.config.max_remote_prefill_transfers,
             "transfer_slots_used": reserved_transfers,
             "transfer_slots_free": max(
@@ -872,7 +850,8 @@ class LLMEngine:
                 if staging_limit is None
                 else max(staging_limit - active_staging_bytes, 0)
             ),
-        }
+        })
+        return snapshot
 
     def estimate_remote_prefill_demand(
         self,
@@ -1207,6 +1186,15 @@ class LLMEngine:
             max_preempted_token_progress=self.scheduler.max_preempted_token_progress,
             reclaimed_kv_blocks=self.scheduler.reclaimed_kv_blocks,
             aborted_requests=self.scheduler.aborted_requests,
+            prefill_stopped_by_token_budget=(
+                self.scheduler.prefill_stopped_by_token_budget
+            ),
+            prefill_stopped_by_sequence_capacity=(
+                self.scheduler.prefill_stopped_by_sequence_capacity
+            ),
+            prefill_stopped_by_kv_capacity=(
+                self.scheduler.prefill_stopped_by_kv_capacity
+            ),
         )
         if not seqs:
             return [], 0, 0, 0

@@ -913,6 +913,72 @@ def test_fairness_reserve_backfills_decode_when_prefill_cannot_allocate():
     assert list(scheduler.waiting) == [waiting]
     assert waiting.block_table == []
     assert scheduler.preemption_count == 0
+    assert scheduler.last_prefill_stop_reason == "kv_capacity"
+    assert scheduler.prefill_stopped_by_kv_capacity == 1
+
+
+def test_prefill_capacity_snapshot_distinguishes_scheduler_boundaries():
+    scheduler = make_scheduler(
+        max_tokens=2,
+        max_seqs=1,
+        block_size=4,
+        num_blocks=2,
+    )
+    running = Sequence([1, 2, 3, 4])
+    scheduler.block_manager.allocate(running, 0)
+    running.status = SequenceStatus.RUNNING
+    running.is_prefill = False
+    running.num_cached_tokens = len(running)
+    scheduler.running.append(running)
+    waiting = Sequence([5, 6, 7, 8])
+    scheduler.waiting.append(waiting)
+
+    result = scheduler.schedule()
+    snapshot = scheduler.capacity_snapshot()
+
+    assert result.decode_seqs == [running]
+    assert result.prefill_seqs == []
+    # The waiting request cannot be admitted because the sole sequence slot is
+    # already owned, even though one KV block remains available.
+    assert snapshot == {
+        "sequence_slots_total": 1,
+        "sequence_slots_used": 1,
+        "sequence_slots_free": 0,
+        "kv_blocks_total": 2,
+        "kv_blocks_used": 1,
+        "kv_blocks_free": 1,
+        "kv_block_usage": 0.5,
+        "waiting_requests": 1,
+        "running_requests": 1,
+        "last_prefill_stop_reason": "sequence_capacity",
+        "prefill_stopped_by_token_budget": 0,
+        "prefill_stopped_by_sequence_capacity": 1,
+        "prefill_stopped_by_kv_capacity": 0,
+    }
+
+
+def test_prefill_stop_reason_resets_and_counts_token_budget_once_per_step():
+    scheduler = make_scheduler(
+        max_tokens=1,
+        max_seqs=3,
+        block_size=4,
+        num_blocks=8,
+    )
+    for token in (1, 2):
+        scheduler.add(Sequence([token] * 4))
+
+    first = scheduler.schedule()
+
+    assert first.num_prefill_tokens == 1
+    assert scheduler.last_prefill_stop_reason == "token_budget"
+    assert scheduler.prefill_stopped_by_token_budget == 1
+
+    scheduler.postprocess_mixed(first, [9])
+    second = scheduler.schedule()
+
+    assert second.num_prefill_tokens == 1
+    assert scheduler.last_prefill_stop_reason == "token_budget"
+    assert scheduler.prefill_stopped_by_token_budget == 2
 
 
 def test_kv_pressure_workload_preempts_and_eventually_completes():
