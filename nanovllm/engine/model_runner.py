@@ -269,6 +269,7 @@ class ModelRunner:
 
     def reset_execution_stats(self):
         self.execution_stats.reset()
+        self.sampler.reset_stats()
         for module in self.model.modules():
             reset_dispatch_stats = getattr(module, "reset_dispatch_stats", None)
             if reset_dispatch_stats is not None:
@@ -471,6 +472,7 @@ class ModelRunner:
             item["storage_bytes"] for item in qwen35_key_stats
         )
         sampler_stats = self.sampler.storage_stats()
+        sampler_runtime_stats = self.sampler.runtime_stats()
         sampler_total = sum(sampler_stats.values())
         tp_logits_total = sum(item["total_bytes"] for item in tp_logits_stats)
         return {
@@ -539,6 +541,21 @@ class ModelRunner:
             ),
             "sampling_rank_buffer_bytes": sampler_stats["rank_buffer_bytes"],
             "sampling_noise_buffer_bytes": sampler_stats["noise_buffer_bytes"],
+            "full_sampling_call_count": sampler_runtime_stats[
+                "full_sampling_call_count"
+            ],
+            "full_sampling_row_count": sampler_runtime_stats[
+                "full_sampling_row_count"
+            ],
+            "full_sampling_chunk_count": sampler_runtime_stats[
+                "full_sampling_chunk_count"
+            ],
+            "max_full_sampling_chunk_rows": sampler_runtime_stats[
+                "max_full_sampling_chunk_rows"
+            ],
+            "configured_sampling_chunk_rows": sampler_runtime_stats[
+                "configured_sampling_chunk_rows"
+            ],
             "tp_logits_local_buffer_bytes": sum(
                 item["local_bytes"] for item in tp_logits_stats
             ),

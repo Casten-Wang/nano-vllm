@@ -609,6 +609,18 @@ class SamplerTest(unittest.TestCase):
 
         self.assertEqual(tuple(tokens.shape), (5,))
         self.assertEqual(observed_shapes, [(2, 11), (2, 11), (1, 11)])
+        self.assertEqual(
+            sampler.runtime_stats(),
+            {
+                "full_sampling_call_count": 1,
+                "full_sampling_row_count": 5,
+                "full_sampling_chunk_count": 3,
+                "max_full_sampling_chunk_rows": 2,
+                "configured_sampling_chunk_rows": 2,
+            },
+        )
+        sampler.reset_stats()
+        self.assertEqual(sampler.runtime_stats()["full_sampling_call_count"], 0)
 
     def test_mixed_sampling_chunks_only_non_greedy_rows(self):
         sampler = Sampler(max_sampling_rows=2)

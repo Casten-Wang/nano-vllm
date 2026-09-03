@@ -485,6 +485,8 @@ class HybridStateContextTest(unittest.TestCase):
         reset_dispatch = unittest.mock.Mock()
         runner.execution_stats = execution_stats
         runner.execution_stats_enabled = False
+        reset_sampling = unittest.mock.Mock()
+        runner.sampler = SimpleNamespace(reset_stats=reset_sampling)
         runner.model = SimpleNamespace(
             modules=lambda: [
                 SimpleNamespace(reset_dispatch_stats=reset_dispatch),
@@ -495,6 +497,7 @@ class HybridStateContextTest(unittest.TestCase):
         runner.reset_execution_stats()
 
         execution_stats.reset.assert_called_once_with()
+        reset_sampling.assert_called_once_with()
         reset_dispatch.assert_called_once_with()
         self.assertTrue(runner.execution_stats_enabled)
 
@@ -897,7 +900,14 @@ class HybridStateContextTest(unittest.TestCase):
             storage_stats=lambda: {
                 "rank_buffer_bytes": 4,
                 "noise_buffer_bytes": 0,
-            }
+            },
+            runtime_stats=lambda: {
+                "full_sampling_call_count": 3,
+                "full_sampling_row_count": 70,
+                "full_sampling_chunk_count": 5,
+                "max_full_sampling_chunk_rows": 32,
+                "configured_sampling_chunk_rows": 32,
+            },
         )
 
         stats = runner.get_runtime_buffer_stats()
@@ -924,6 +934,11 @@ class HybridStateContextTest(unittest.TestCase):
         self.assertEqual(stats["qwen35_key_buffer_reuse_count"], 9)
         self.assertEqual(stats["sampling_rank_buffer_bytes"], 4)
         self.assertEqual(stats["sampling_noise_buffer_bytes"], 0)
+        self.assertEqual(stats["full_sampling_call_count"], 3)
+        self.assertEqual(stats["full_sampling_row_count"], 70)
+        self.assertEqual(stats["full_sampling_chunk_count"], 5)
+        self.assertEqual(stats["max_full_sampling_chunk_rows"], 32)
+        self.assertEqual(stats["configured_sampling_chunk_rows"], 32)
         self.assertEqual(stats["tp_logits_local_buffer_bytes"], 20)
         self.assertEqual(stats["tp_logits_gathered_buffer_bytes"], 28)
         self.assertEqual(stats["tp_logits_buffer_allocation_count"], 2)

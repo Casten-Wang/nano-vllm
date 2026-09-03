@@ -392,6 +392,7 @@ class Sampler(nn.Module):
             raise ValueError("max_compact_top_k must be positive")
         self.max_sampling_rows = max_sampling_rows
         self.max_compact_top_k = max_compact_top_k
+        self.reset_stats()
         self.register_buffer(
             "_rank_buffer",
             torch.empty(0, dtype=torch.long),
@@ -415,6 +416,30 @@ class Sampler(nn.Module):
             ),
             "noise_buffer_bytes": 0,
         }
+
+    def reset_stats(self) -> None:
+        self.full_sampling_call_count = 0
+        self.full_sampling_row_count = 0
+        self.full_sampling_chunk_count = 0
+        self.max_full_sampling_chunk_rows = 0
+
+    def runtime_stats(self) -> dict[str, int]:
+        return {
+            "full_sampling_call_count": self.full_sampling_call_count,
+            "full_sampling_row_count": self.full_sampling_row_count,
+            "full_sampling_chunk_count": self.full_sampling_chunk_count,
+            "max_full_sampling_chunk_rows": self.max_full_sampling_chunk_rows,
+            "configured_sampling_chunk_rows": self.max_sampling_rows,
+        }
+
+    def _record_full_sampling(self, rows: int, chunks: int) -> None:
+        self.full_sampling_call_count += 1
+        self.full_sampling_row_count += rows
+        self.full_sampling_chunk_count += chunks
+        self.max_full_sampling_chunk_rows = max(
+            self.max_full_sampling_chunk_rows,
+            min(rows, self.max_sampling_rows),
+        )
 
     def _sample_full(
         self,
@@ -474,6 +499,10 @@ class Sampler(nn.Module):
         top_ps: torch.Tensor,
         metadata: SamplingBatchMetadata,
     ) -> torch.Tensor:
+        chunk_count = (
+            logits.size(0) + self.max_sampling_rows - 1
+        ) // self.max_sampling_rows
+        self._record_full_sampling(logits.size(0), chunk_count)
         if logits.size(0) <= self.max_sampling_rows:
             return self._sample_full(
                 logits, temperatures, top_ks, top_ps, metadata
@@ -640,6 +669,8 @@ class Sampler(nn.Module):
                 None,
             )
         )
+        if metadata is None:
+            self._record_full_sampling(sample_source.size(0), 1)
         if all_sampling:
             return sample_tokens
         greedy_tokens = logits.argmax(dim=-1)
