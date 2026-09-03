@@ -399,6 +399,115 @@ class PendingRankCacheReceive:
         self._receiver.close()
 
 
+class PendingRankCacheSend:
+    """Send one host-staged rank payload without blocking model scheduling."""
+
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        payload: RankCacheTransfer,
+        *,
+        timeout_s: float = 30.0,
+    ) -> None:
+        if not isinstance(host, str) or not host:
+            raise ValueError("cache transfer endpoint host must not be empty")
+        if not isinstance(port, int) or isinstance(port, bool) or not 1 <= port <= 65535:
+            raise ValueError("cache transfer endpoint port must be in [1, 65535]")
+        if timeout_s <= 0:
+            raise ValueError("cache transfer endpoint timeout must be positive")
+        self._host = host
+        self._port = port
+        self._payload = payload
+        self._timeout_s = timeout_s
+        self._lock = Lock()
+        self._connection: socket.socket | None = None
+        self._sent_bytes: int | None = None
+        self._error: BaseException | None = None
+        self._terminal = False
+        self._thread = Thread(target=self._run, daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def _run(self) -> None:
+        connection = None
+        try:
+            deadline = monotonic() + self._timeout_s
+            while True:
+                with self._lock:
+                    if self._terminal:
+                        return
+                try:
+                    connection = socket.create_connection(
+                        (self._host, self._port),
+                        timeout=max(deadline - monotonic(), 0.001),
+                    )
+                    break
+                except (ConnectionRefusedError, TimeoutError, socket.timeout):
+                    remaining = deadline - monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError(
+                            "cache transfer endpoint connection timed out"
+                        )
+                    sleep(min(0.01, remaining))
+            with self._lock:
+                if self._terminal:
+                    connection.close()
+                    return
+                self._connection = connection
+            connection.settimeout(self._timeout_s)
+            sent_bytes = send_rank_cache_transfer(connection, self._payload)
+            acknowledgement = _recv_bytes(connection, 1)
+            if acknowledgement != _TRANSFER_ACK:
+                raise RuntimeError("cache transfer receiver rejected the payload")
+            with self._lock:
+                if not self._terminal:
+                    self._sent_bytes = sent_bytes
+                    self._payload = None
+        except BaseException as exc:
+            with self._lock:
+                if not self._terminal:
+                    self._error = exc
+                    self._payload = None
+        finally:
+            if connection is not None:
+                connection.close()
+            with self._lock:
+                self._connection = None
+
+    def poll(self) -> tuple[str, str | None]:
+        with self._lock:
+            if self._terminal:
+                return "closed", None
+            if self._error is not None:
+                return "failed", str(self._error)
+            if self._sent_bytes is not None:
+                return "ready", None
+            return "sending", None
+
+    def result(self) -> int:
+        with self._lock:
+            if self._terminal:
+                raise RuntimeError("cache send is already closed")
+            if self._error is not None:
+                raise RuntimeError(f"cache send failed: {self._error}")
+            if self._sent_bytes is None:
+                raise RuntimeError("cache send is not ready")
+            return self._sent_bytes
+
+    def finish(self) -> None:
+        with self._lock:
+            if self._terminal:
+                return
+            self._terminal = True
+            connection = self._connection
+            self._connection = None
+            self._payload = None
+        if connection is not None:
+            connection.close()
+
+
 def send_rank_cache_to_endpoint(
     host: str,
     port: int,

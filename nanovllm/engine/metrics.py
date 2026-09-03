@@ -44,6 +44,14 @@ class EngineMetrics:
     max_remote_prefill_receive_time: float = 0.0
     remote_prefill_poll_calls: int = 0
     remote_prefill_requests_polled: int = 0
+    remote_prefill_send_started: int = 0
+    remote_prefill_send_committed: int = 0
+    remote_prefill_send_failed: int = 0
+    remote_prefill_send_cancelled: int = 0
+    remote_prefill_send_time: float = 0.0
+    max_remote_prefill_send_time: float = 0.0
+    remote_prefill_send_poll_calls: int = 0
+    remote_prefill_send_requests_polled: int = 0
     request_ttfts: list[float] | None = None
     request_tpots: list[float] | None = None
     request_latencies: list[float] | None = None
@@ -85,6 +93,14 @@ class EngineMetrics:
         self.max_remote_prefill_receive_time = 0.0
         self.remote_prefill_poll_calls = 0
         self.remote_prefill_requests_polled = 0
+        self.remote_prefill_send_started = 0
+        self.remote_prefill_send_committed = 0
+        self.remote_prefill_send_failed = 0
+        self.remote_prefill_send_cancelled = 0
+        self.remote_prefill_send_time = 0.0
+        self.max_remote_prefill_send_time = 0.0
+        self.remote_prefill_send_poll_calls = 0
+        self.remote_prefill_send_requests_polled = 0
         self.request_ttfts.clear()
         self.request_tpots.clear()
         self.request_latencies.clear()
@@ -221,6 +237,38 @@ class EngineMetrics:
             elapsed,
         )
 
+    def record_remote_prefill_send_started(self) -> None:
+        self.remote_prefill_send_started += 1
+
+    def record_remote_prefill_send_poll(self, request_count: int) -> None:
+        if request_count <= 0:
+            raise ValueError("remote prefill send poll request count must be positive")
+        self.remote_prefill_send_poll_calls += 1
+        self.remote_prefill_send_requests_polled += request_count
+
+    def record_remote_prefill_send_finished(
+        self,
+        elapsed: float,
+        *,
+        outcome: str,
+    ) -> None:
+        if elapsed < 0.0:
+            raise ValueError("remote prefill send elapsed time must be non-negative")
+        counters = {
+            "committed": "remote_prefill_send_committed",
+            "failed": "remote_prefill_send_failed",
+            "cancelled": "remote_prefill_send_cancelled",
+        }
+        counter = counters.get(outcome)
+        if counter is None:
+            raise ValueError("remote prefill send outcome is invalid")
+        setattr(self, counter, getattr(self, counter) + 1)
+        self.remote_prefill_send_time += elapsed
+        self.max_remote_prefill_send_time = max(
+            self.max_remote_prefill_send_time,
+            elapsed,
+        )
+
     @staticmethod
     def _avg(values: list[float]) -> float:
         if not values:
@@ -275,6 +323,17 @@ class EngineMetrics:
         return self.remote_prefill_receive_time / finished
 
     @property
+    def avg_remote_prefill_send_time(self) -> float:
+        finished = (
+            self.remote_prefill_send_committed
+            + self.remote_prefill_send_failed
+            + self.remote_prefill_send_cancelled
+        )
+        if finished == 0:
+            return 0.0
+        return self.remote_prefill_send_time / finished
+
+    @property
     def prefill_throughput(self) -> float:
         """Compatibility alias for the pure-prefill progress display."""
 
@@ -322,6 +381,15 @@ class EngineMetrics:
             "max_remote_prefill_receive_time_s": self.max_remote_prefill_receive_time,
             "remote_prefill_poll_calls": self.remote_prefill_poll_calls,
             "remote_prefill_requests_polled": self.remote_prefill_requests_polled,
+            "remote_prefill_send_started": self.remote_prefill_send_started,
+            "remote_prefill_send_committed": self.remote_prefill_send_committed,
+            "remote_prefill_send_failed": self.remote_prefill_send_failed,
+            "remote_prefill_send_cancelled": self.remote_prefill_send_cancelled,
+            "remote_prefill_send_time_s": self.remote_prefill_send_time,
+            "avg_remote_prefill_send_time_s": self.avg_remote_prefill_send_time,
+            "max_remote_prefill_send_time_s": self.max_remote_prefill_send_time,
+            "remote_prefill_send_poll_calls": self.remote_prefill_send_poll_calls,
+            "remote_prefill_send_requests_polled": self.remote_prefill_send_requests_polled,
             "num_finished_requests": len(self.request_latencies),
             "avg_ttft_s": self._avg(self.request_ttfts),
             "p50_ttft_s": self._percentile(self.request_ttfts, 0.50),

@@ -320,6 +320,90 @@ def test_remote_prefill_terminal_first_token_releases_resources(
     assert scheduler.is_finished()
 
 
+def test_remote_prefill_source_reservation_counts_capacity_and_restores_order():
+    scheduler = make_scheduler(
+        max_tokens=8,
+        max_seqs=2,
+        block_size=4,
+        num_blocks=4,
+        hybrid=True,
+    )
+    first = Sequence([1, 2, 3, 4])
+    second = Sequence([5, 6, 7, 8])
+    for seq in (first, second):
+        scheduler.block_manager.allocate(seq, 0)
+        seq.state_slot = scheduler.state_manager.acquire(seq.seq_id)
+        seq.status = SequenceStatus.RUNNING
+        seq.is_prefill = False
+        seq.num_cached_tokens = seq.num_prompt_tokens
+        seq.append_token(9)
+        scheduler.running.append(seq)
+
+    scheduler.reserve_remote_prefill_source(first, "request/attempt-1")
+
+    assert first.status is SequenceStatus.TRANSFERRING
+    assert list(scheduler.running) == [second]
+    assert scheduler.num_running == 2
+    assert not scheduler.is_finished()
+    scheduler.abort_remote_prefill_source("request/attempt-1")
+    assert list(scheduler.running) == [first, second]
+    assert first.status is SequenceStatus.RUNNING
+
+
+def test_multiple_remote_prefill_sources_restore_fcfs_in_reverse_order():
+    scheduler = make_scheduler(
+        max_tokens=8,
+        max_seqs=3,
+        block_size=4,
+        num_blocks=4,
+        hybrid=True,
+    )
+    seqs = [Sequence([token, 2, 3, 4]) for token in (1, 5, 6)]
+    for seq in seqs:
+        scheduler.block_manager.allocate(seq, 0)
+        seq.state_slot = scheduler.state_manager.acquire(seq.seq_id)
+        seq.status = SequenceStatus.RUNNING
+        seq.is_prefill = False
+        seq.num_cached_tokens = seq.num_prompt_tokens
+        seq.append_token(9)
+        scheduler.running.append(seq)
+
+    scheduler.reserve_remote_prefill_source(seqs[0], "request/attempt-1")
+    scheduler.reserve_remote_prefill_source(seqs[1], "request/attempt-2")
+    scheduler.abort_remote_prefill_source("request/attempt-2")
+    scheduler.abort_remote_prefill_source("request/attempt-1")
+
+    assert list(scheduler.running) == seqs
+
+
+def test_remote_prefill_source_commit_releases_cache_and_state():
+    scheduler = make_scheduler(
+        max_tokens=8,
+        max_seqs=1,
+        block_size=4,
+        num_blocks=2,
+        hybrid=True,
+    )
+    seq = Sequence([1, 2, 3, 4])
+    scheduler.block_manager.allocate(seq, 0)
+    seq.state_slot = scheduler.state_manager.acquire(seq.seq_id)
+    seq.status = SequenceStatus.RUNNING
+    seq.is_prefill = False
+    seq.num_cached_tokens = seq.num_prompt_tokens
+    seq.append_token(9)
+    scheduler.running.append(seq)
+    scheduler.reserve_remote_prefill_source(seq, "request/attempt-1")
+
+    committed = scheduler.commit_remote_prefill_source("request/attempt-1")
+
+    assert committed is seq
+    assert seq.status is SequenceStatus.TRANSFERRED
+    assert seq.state_slot is None
+    assert scheduler.block_manager.num_used_blocks == 0
+    assert scheduler.state_manager.num_used_slots == 0
+    assert scheduler.is_finished()
+
+
 def test_dynamic_schedule_decodes_first_and_uses_remaining_budget_for_prefill():
     scheduler = make_scheduler(max_tokens=8, max_seqs=8, block_size=4)
     running = Sequence([1, 2, 3, 4])

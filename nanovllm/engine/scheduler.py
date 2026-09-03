@@ -72,6 +72,7 @@ class Scheduler:
         self.waiting: deque[Sequence] = deque()
         self.running: deque[Sequence] = deque()
         self.remote_prefills: dict[str, tuple[Sequence, object]] = {}
+        self.remote_prefill_sources: dict[str, tuple[Sequence, int]] = {}
         self.schedule_steps = 0
         self.prefill_starved_steps = 0
         self.current_prefill_starvation_steps = 0
@@ -82,7 +83,12 @@ class Scheduler:
         self.reclaimed_kv_blocks = 0
 
     def is_finished(self):
-        return not self.waiting and not self.running and not self.remote_prefills
+        return (
+            not self.waiting
+            and not self.running
+            and not self.remote_prefills
+            and not self.remote_prefill_sources
+        )
 
     @property
     def num_waiting(self):
@@ -90,7 +96,7 @@ class Scheduler:
 
     @property
     def num_running(self):
-        return len(self.running)
+        return len(self.running) + len(self.remote_prefill_sources)
 
     def add(self, seq: Sequence):
         self.waiting.append(seq)
@@ -99,13 +105,21 @@ class Scheduler:
         """Reserve destination cache/state without making ``seq`` runnable."""
 
         transfer_id = session.transfer_id
-        if transfer_id in self.remote_prefills:
+        if (
+            transfer_id in self.remote_prefills
+            or transfer_id in self.remote_prefill_sources
+        ):
             raise ValueError("cache transfer id is already reserved")
         if seq not in self.waiting:
             raise ValueError("remote prefill sequence must be waiting")
         if seq.block_table or seq.state_slot is not None:
             raise ValueError("remote prefill sequence already owns cache state")
-        if len(self.running) + len(self.remote_prefills) >= self.max_num_seqs:
+        if (
+            len(self.running)
+            + len(self.remote_prefills)
+            + len(self.remote_prefill_sources)
+            >= self.max_num_seqs
+        ):
             raise RuntimeError("no sequence slot is available for remote prefill")
         target_blocks = (
             seq.num_prompt_tokens + self.block_size - 1
@@ -232,6 +246,56 @@ class Scheduler:
             seq.state_slot = None
         seq.status = SequenceStatus.TRANSFERRED
 
+    def reserve_remote_prefill_source(
+        self,
+        seq: Sequence,
+        transfer_id: str,
+    ) -> None:
+        """Pause a handoff source so decode cannot mutate it while sending."""
+
+        if transfer_id in self.remote_prefill_sources:
+            raise ValueError("cache transfer source id is already active")
+        if transfer_id in self.remote_prefills:
+            raise ValueError("cache transfer id is already reserved as a destination")
+        if seq not in self.running:
+            raise ValueError("remote prefill source sequence is not running")
+        if (
+            seq.num_cached_tokens != seq.num_prompt_tokens
+            or seq.num_completion_tokens != 1
+            or seq.num_scheduled_tokens != 0
+        ):
+            raise ValueError("remote prefill source is not ready for handoff")
+        position = self.running.index(seq)
+        for _pending_seq, pending_position in sorted(
+            self.remote_prefill_sources.values(),
+            key=lambda item: item[1],
+        ):
+            if pending_position <= position:
+                position += 1
+        self.running.remove(seq)
+        seq.status = SequenceStatus.TRANSFERRING
+        self.remote_prefill_sources[transfer_id] = (seq, position)
+
+    def abort_remote_prefill_source(self, transfer_id: str) -> Sequence:
+        seq, position = self.remote_prefill_sources.pop(transfer_id)
+        seq.status = SequenceStatus.RUNNING
+        pending_before = sum(
+            pending_position < position
+            for _pending_seq, pending_position in self.remote_prefill_sources.values()
+        )
+        running_position = position - pending_before
+        self.running.insert(min(running_position, len(self.running)), seq)
+        return seq
+
+    def commit_remote_prefill_source(self, transfer_id: str) -> Sequence:
+        seq, _position = self.remote_prefill_sources.pop(transfer_id)
+        self.block_manager.deallocate(seq)
+        if self.state_manager is not None:
+            self.state_manager.release(seq.seq_id)
+            seq.state_slot = None
+        seq.status = SequenceStatus.TRANSFERRED
+        return seq
+
     def schedule(self) -> tuple[list[Sequence], bool] | ScheduleResult:
         waiting_before = len(self.waiting)
         if self.enable_dynamic_chunked_prefill:
@@ -267,7 +331,11 @@ class Scheduler:
     def schedule_legacy(self) -> tuple[list[Sequence], bool]:
         scheduled_seqs = []
         num_batched_tokens = 0
-        num_running = len(self.running) + len(self.remote_prefills)
+        num_running = (
+            len(self.running)
+            + len(self.remote_prefills)
+            + len(self.remote_prefill_sources)
+        )
 
         # prefill
         while (
@@ -326,7 +394,7 @@ class Scheduler:
                 self.block_manager.may_append(seq)
                 scheduled_seqs.append(seq)
         if not scheduled_seqs:
-            if self.remote_prefills:
+            if self.remote_prefills or self.remote_prefill_sources:
                 return [], False
             raise RuntimeError("scheduler has no runnable sequence")
         self.running.extendleft(reversed(scheduled_seqs))
@@ -347,7 +415,10 @@ class Scheduler:
             or bool(self.waiting[0].block_table)
         )
         has_prefill_slot = (
-            len(self.running) + len(self.remote_prefills) + active_waiting
+            len(self.running)
+            + len(self.remote_prefills)
+            + len(self.remote_prefill_sources)
+            + active_waiting
             < self.max_num_seqs
             or waiting_head_is_active
         )
@@ -384,7 +455,10 @@ class Scheduler:
         # current token budget. They continue to own KV/state slots and must be
         # counted before admitting new prefill requests.
         active_decode_seqs = (
-            len(self.running) + len(decode_seqs) + len(self.remote_prefills)
+            len(self.running)
+            + len(decode_seqs)
+            + len(self.remote_prefills)
+            + len(self.remote_prefill_sources)
         )
         prefill_slots = max(self.max_num_seqs - active_decode_seqs, 0)
         running_before_prefill = len(self.running)
@@ -419,7 +493,7 @@ class Scheduler:
             self.running.extend(decode_seqs)
         self.running.extend(newly_admitted)
         if not decode_seqs and not prefill_seqs:
-            if self.remote_prefills:
+            if self.remote_prefills or self.remote_prefill_sources:
                 return ScheduleResult(prefill_seqs=[], decode_seqs=[])
             if self.waiting:
                 seq = self.waiting[0]

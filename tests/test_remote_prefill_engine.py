@@ -28,6 +28,7 @@ def make_engine(*, tensor_parallel_size=1):
     engine.config = config
     engine.scheduler = Scheduler(config)
     async_state = {"value": "receiving", "error": None}
+    send_state = {"value": "sending", "error": None}
 
     def rank_results(method_name, *args):
         if method_name == "start_sequence_cache_receive":
@@ -72,6 +73,53 @@ def make_engine(*, tensor_parallel_size=1):
                 {"rank": rank, "aborted": 1}
                 for rank in range(tensor_parallel_size)
             ]
+        if method_name == "start_sequence_cache_send":
+            return [
+                {"rank": rank, "started": 1}
+                for rank in range(tensor_parallel_size)
+            ]
+        if method_name == "poll_sequence_cache_send":
+            return [
+                {
+                    "rank": rank,
+                    "state": send_state["value"],
+                    **(
+                        {"error": send_state["error"]}
+                        if send_state["error"] is not None
+                        else {}
+                    ),
+                }
+                for rank in range(tensor_parallel_size)
+            ]
+        if method_name == "poll_sequence_cache_sends":
+            transfer_ids = args[0]
+            return [
+                {
+                    "rank": rank,
+                    "sends": {
+                        transfer_id: {
+                            "state": send_state["value"],
+                            **(
+                                {"error": send_state["error"]}
+                                if send_state["error"] is not None
+                                else {}
+                            ),
+                        }
+                        for transfer_id in transfer_ids
+                    },
+                }
+                for rank in range(tensor_parallel_size)
+            ]
+        if method_name == "finish_sequence_cache_send":
+            return [
+                {"rank": rank, "sent_bytes": 1}
+                for rank in range(tensor_parallel_size)
+            ]
+        if method_name == "abort_sequence_cache_send":
+            return [
+                {"rank": rank, "aborted": 1}
+                for rank in range(tensor_parallel_size)
+            ]
         seq = args[0]
         value_name = (
             "cached_tokens"
@@ -94,7 +142,10 @@ def make_engine(*, tensor_parallel_size=1):
     engine._remote_prefill_receive_tokens = {}
     engine._remote_prefill_receive_started_at = {}
     engine._remote_prefill_receive_errors = {}
+    engine._remote_prefill_send_started_at = {}
+    engine._remote_prefill_send_errors = {}
     engine._test_async_state = async_state
+    engine._test_send_state = send_state
     engine.metrics = EngineMetrics()
     return engine
 
@@ -388,3 +439,105 @@ def test_engine_keeps_prefill_source_when_receiver_rejects_payload():
     assert list(engine.scheduler.running) == [seq]
     assert engine.scheduler.block_manager.num_used_blocks == 1
     assert engine.scheduler.state_manager.num_used_slots == 1
+
+
+def _prepare_remote_prefill_source(engine, prompt_token: int):
+    seq = Sequence([prompt_token, 2, 3, 4], SamplingParams(max_tokens=4))
+    engine.scheduler.block_manager.allocate(seq, 0)
+    seq.state_slot = engine.scheduler.state_manager.acquire(seq.seq_id)
+    seq.status = SequenceStatus.RUNNING
+    seq.is_prefill = False
+    seq.num_cached_tokens = seq.num_prompt_tokens
+    seq.append_token(9)
+    engine.scheduler.running.append(seq)
+    return seq
+
+
+def test_async_send_pauses_decode_until_every_rank_acknowledges():
+    engine = make_engine(tensor_parallel_size=2)
+    seq = _prepare_remote_prefill_source(engine, 1)
+
+    assert engine.start_remote_prefill_send(
+        seq.seq_id,
+        "request/attempt-1",
+        [("127.0.0.1", 20001), ("127.0.0.1", 20002)],
+    ) == 9
+    assert seq.status is SequenceStatus.TRANSFERRING
+    assert seq not in engine.scheduler.running
+    assert engine.poll_remote_prefill_send("request/attempt-1") is None
+    assert engine.scheduler.block_manager.num_used_blocks == 1
+
+    engine._test_send_state["value"] = "ready"
+    assert engine.poll_remote_prefill_send("request/attempt-1") == seq.seq_id
+    assert seq.status is SequenceStatus.TRANSFERRED
+    assert seq.state_slot is None
+    assert engine.scheduler.block_manager.num_used_blocks == 0
+    metrics = engine.metrics.to_dict()
+    assert metrics["remote_prefill_send_started"] == 1
+    assert metrics["remote_prefill_send_committed"] == 1
+    assert metrics["remote_prefill_send_poll_calls"] == 2
+
+
+def test_async_send_failure_restores_source_at_original_running_position():
+    engine = make_engine(tensor_parallel_size=2)
+    first = _prepare_remote_prefill_source(engine, 1)
+    second = _prepare_remote_prefill_source(engine, 5)
+    assert list(engine.scheduler.running) == [first, second]
+    engine.start_remote_prefill_send(
+        first.seq_id,
+        "request/attempt-1",
+        [("127.0.0.1", 20001), ("127.0.0.1", 20002)],
+    )
+    engine._test_send_state.update(value="failed", error="receiver rejected")
+
+    with pytest.raises(RuntimeError, match="receiver rejected"):
+        engine.poll_remote_prefill_send("request/attempt-1")
+
+    assert first.status is SequenceStatus.RUNNING
+    assert list(engine.scheduler.running) == [first, second]
+    assert first.block_table
+    assert first.state_slot is not None
+    assert engine.metrics.to_dict()["remote_prefill_send_failed"] == 1
+
+
+def test_async_send_can_be_cancelled_without_releasing_source_state():
+    engine = make_engine()
+    seq = _prepare_remote_prefill_source(engine, 1)
+    engine.start_remote_prefill_send(
+        seq.seq_id,
+        "request/attempt-1",
+        [("127.0.0.1", 20001)],
+    )
+
+    assert engine.abort_remote_prefill_send("request/attempt-1") == seq.seq_id
+    assert seq.status is SequenceStatus.RUNNING
+    assert list(engine.scheduler.running) == [seq]
+    assert seq.block_table
+    assert seq.state_slot is not None
+    assert engine.metrics.to_dict()["remote_prefill_send_cancelled"] == 1
+
+
+def test_step_batches_multiple_async_send_polls_into_one_tp_command():
+    engine = make_engine()
+    first = _prepare_remote_prefill_source(engine, 1)
+    second = _prepare_remote_prefill_source(engine, 5)
+    engine.start_remote_prefill_send(
+        first.seq_id,
+        "request/attempt-1",
+        [("127.0.0.1", 20001)],
+    )
+    engine.start_remote_prefill_send(
+        second.seq_id,
+        "request/attempt-2",
+        [("127.0.0.1", 20002)],
+    )
+    engine.model_runner.call_rank_results.reset_mock()
+
+    assert engine.step() == ([], 0, 0, 0)
+    engine.model_runner.call_rank_results.assert_called_once_with(
+        "poll_sequence_cache_sends",
+        ["request/attempt-1", "request/attempt-2"],
+    )
+    metrics = engine.metrics.to_dict()
+    assert metrics["remote_prefill_send_poll_calls"] == 1
+    assert metrics["remote_prefill_send_requests_polled"] == 2

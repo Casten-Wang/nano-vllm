@@ -129,6 +129,7 @@ class ModelRunner:
         self.event = event
         self.worker_control_failed = False
         self._pending_cache_receives = {}
+        self._pending_cache_sends = {}
         self._resources_released = False
         self.execution_stats = ExecutionStats()
         self.execution_stats_enabled = False
@@ -213,6 +214,10 @@ class ModelRunner:
         for receive in pending_receives.values():
             receive.finish(accepted=False)
         pending_receives.clear()
+        pending_sends = getattr(self, "_pending_cache_sends", {})
+        for send in pending_sends.values():
+            send.finish()
+        pending_sends.clear()
         if self.world_size > 1 and hasattr(self, "shm"):
             self.shm.close()
             if self.rank == 0:
@@ -1083,6 +1088,85 @@ class ModelRunner:
             timeout_s=timeout_s,
         )
         return {"rank": self.rank, "sent_bytes": sent_bytes}
+
+    def start_sequence_cache_send(
+        self,
+        seq: Sequence,
+        transfer_id: str,
+        endpoints: list[tuple[str, int]],
+        timeout_s: float = 30.0,
+    ) -> dict:
+        """Stage rank-local cache on host, then send it in the background."""
+
+        from nanovllm.engine.cache_transfer_wire import PendingRankCacheSend
+
+        if transfer_id in self._pending_cache_sends:
+            raise ValueError("cache send id is already active")
+        host, port = self._rank_cache_endpoint(endpoints)
+        payload = self.export_sequence_cache(
+            seq,
+            transfer_id=transfer_id,
+            to_host=True,
+        )
+        send = PendingRankCacheSend(
+            host,
+            port,
+            payload,
+            timeout_s=timeout_s,
+        )
+        self._pending_cache_sends[transfer_id] = send
+        try:
+            send.start()
+        except BaseException:
+            self._pending_cache_sends.pop(transfer_id, None)
+            send.finish()
+            raise
+        return {"rank": self.rank, "started": 1}
+
+    def poll_sequence_cache_send(self, transfer_id: str) -> dict:
+        send = self._pending_cache_sends.get(transfer_id)
+        if send is None:
+            raise ValueError("cache send id is not active")
+        state, error = send.poll()
+        result = {"rank": self.rank, "state": state}
+        if error is not None:
+            result["error"] = error
+        return result
+
+    def poll_sequence_cache_sends(self, transfer_ids: list[str]) -> dict:
+        """Poll multiple host-side sends in one TP control command."""
+
+        if (
+            not isinstance(transfer_ids, list)
+            or not transfer_ids
+            or any(not isinstance(item, str) or not item for item in transfer_ids)
+            or len(set(transfer_ids)) != len(transfer_ids)
+        ):
+            raise ValueError("cache send ids must be unique non-empty strings")
+        sends = {}
+        for transfer_id in transfer_ids:
+            result = self.poll_sequence_cache_send(transfer_id)
+            sends[transfer_id] = {
+                key: value for key, value in result.items() if key != "rank"
+            }
+        return {"rank": self.rank, "sends": sends}
+
+    def finish_sequence_cache_send(self, transfer_id: str) -> dict:
+        send = self._pending_cache_sends.get(transfer_id)
+        if send is None:
+            raise ValueError("cache send id is not active")
+        try:
+            sent_bytes = send.result()
+        finally:
+            send.finish()
+            self._pending_cache_sends.pop(transfer_id, None)
+        return {"rank": self.rank, "sent_bytes": sent_bytes}
+
+    def abort_sequence_cache_send(self, transfer_id: str) -> dict:
+        send = self._pending_cache_sends.pop(transfer_id, None)
+        if send is not None:
+            send.finish()
+        return {"rank": self.rank, "aborted": 1}
 
     def receive_sequence_cache_from_endpoint(
         self,

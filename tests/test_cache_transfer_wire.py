@@ -368,3 +368,67 @@ def test_model_runner_batches_receive_states_in_one_result():
 
     with pytest.raises(ValueError, match="unique non-empty"):
         runner.poll_sequence_cache_receives(["ready", "ready"])
+
+
+def test_model_runner_async_send_waits_for_receiver_ack():
+    probe = socket.socket()
+    probe.bind(("127.0.0.1", 0))
+    port = probe.getsockname()[1]
+    probe.close()
+    endpoints = [("127.0.0.1", port)]
+    payload = make_payload()
+    source = object.__new__(ModelRunner)
+    source.rank = 0
+    source.world_size = 1
+    source._pending_cache_sends = {}
+    source.export_sequence_cache = lambda *_args, **_kwargs: payload
+    receiver = PendingRankCacheReceive("127.0.0.1", port, timeout_s=2.0)
+    receiver.start()
+
+    assert source.start_sequence_cache_send(
+        "source-seq",
+        payload.transfer_id,
+        endpoints,
+        timeout_s=2.0,
+    ) == {"rank": 0, "started": 1}
+    deadline = monotonic() + 2.0
+    receive_state, _ = receiver.poll()
+    while receive_state == "receiving" and monotonic() < deadline:
+        sleep(0.001)
+        receive_state, _ = receiver.poll()
+    assert receive_state == "ready"
+    assert source.poll_sequence_cache_send(payload.transfer_id) == {
+        "rank": 0,
+        "state": "sending",
+    }
+
+    receiver.finish(accepted=True)
+    send_poll = source.poll_sequence_cache_send(payload.transfer_id)
+    while send_poll["state"] == "sending" and monotonic() < deadline:
+        sleep(0.001)
+        send_poll = source.poll_sequence_cache_send(payload.transfer_id)
+    assert send_poll == {"rank": 0, "state": "ready"}
+    result = source.finish_sequence_cache_send(payload.transfer_id)
+    assert result["rank"] == 0
+    assert result["sent_bytes"] > 0
+    assert payload.transfer_id not in source._pending_cache_sends
+
+
+def test_model_runner_batches_send_states_in_one_result():
+    runner = object.__new__(ModelRunner)
+    runner.rank = 2
+    runner._pending_cache_sends = {
+        "ready": SimpleNamespace(poll=lambda: ("ready", None)),
+        "failed": SimpleNamespace(poll=lambda: ("failed", "receiver rejected")),
+    }
+
+    assert runner.poll_sequence_cache_sends(["ready", "failed"]) == {
+        "rank": 2,
+        "sends": {
+            "ready": {"state": "ready"},
+            "failed": {"state": "failed", "error": "receiver rejected"},
+        },
+    }
+
+    with pytest.raises(ValueError, match="unique non-empty"):
+        runner.poll_sequence_cache_sends(["ready", "ready"])

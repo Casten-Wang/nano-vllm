@@ -103,6 +103,45 @@ def _validate_rank_receive_polls(
     return by_transfer
 
 
+def _validate_rank_send_polls(
+    results: list[object],
+    tensor_parallel_size: int,
+    transfer_ids: tuple[str, ...],
+) -> dict[str, list[dict]]:
+    """Validate one batched send-state snapshot from every TP rank."""
+
+    expected_ids = set(transfer_ids)
+    if len(expected_ids) != len(transfer_ids):
+        raise RuntimeError("cache send batch ids must be unique")
+    by_transfer = {transfer_id: [] for transfer_id in transfer_ids}
+    seen_ranks = set()
+    for result in results:
+        if not isinstance(result, dict):
+            raise RuntimeError("cache send batch result must be a dictionary")
+        rank = result.get("rank")
+        sends = result.get("sends")
+        if (
+            not isinstance(rank, int)
+            or isinstance(rank, bool)
+            or not 0 <= rank < tensor_parallel_size
+            or rank in seen_ranks
+        ):
+            raise RuntimeError("cache send batch result has an invalid rank")
+        if not isinstance(sends, dict) or set(sends) != expected_ids:
+            raise RuntimeError("cache send batch result has incomplete ids")
+        seen_ranks.add(rank)
+        for transfer_id, status in sends.items():
+            if (
+                not isinstance(status, dict)
+                or not set(status).issubset({"state", "error"})
+            ):
+                raise RuntimeError("cache send batch status must be a dictionary")
+            by_transfer[transfer_id].append({"rank": rank, **status})
+    if seen_ranks != set(range(tensor_parallel_size)):
+        raise RuntimeError("cache send batch results are incomplete")
+    return by_transfer
+
+
 class LLMEngine:
 
     def __init__(self, model, **kwargs):
@@ -152,6 +191,8 @@ class LLMEngine:
         self._remote_prefill_receive_tokens: dict[str, int] = {}
         self._remote_prefill_receive_started_at: dict[str, float] = {}
         self._remote_prefill_receive_errors: dict[str, str] = {}
+        self._remote_prefill_send_started_at: dict[str, float] = {}
+        self._remote_prefill_send_errors: dict[str, str] = {}
         atexit.register(self.exit)
 
     def exit(self):
@@ -593,8 +634,199 @@ class LLMEngine:
         self.scheduler.complete_remote_prefill_source(seq)
         return first_token_id
 
+    def start_remote_prefill_send(
+        self,
+        seq_id: int,
+        transfer_id: str,
+        endpoints: list[tuple[str, int]],
+        *,
+        timeout_s: float = 30.0,
+    ) -> int:
+        """Stage a source on every rank and send it without blocking scheduling."""
+
+        seq = next(
+            (candidate for candidate in self.scheduler.running if candidate.seq_id == seq_id),
+            None,
+        )
+        if seq is None:
+            raise ValueError("remote prefill source sequence is not running")
+        started_at = getattr(self, "_remote_prefill_send_started_at", None)
+        if started_at is None:
+            started_at = self._remote_prefill_send_started_at = {}
+        if transfer_id in started_at:
+            raise ValueError("cache send id is already active")
+        self.scheduler.reserve_remote_prefill_source(seq, transfer_id)
+        try:
+            rank_results = self.model_runner.call_rank_results(
+                "start_sequence_cache_send",
+                seq,
+                transfer_id,
+                endpoints,
+                timeout_s,
+            )
+            _validate_rank_results(
+                rank_results,
+                self.config.tensor_parallel_size,
+                "started",
+                expected_value=1,
+            )
+        except BaseException:
+            try:
+                self.model_runner.call_rank_results(
+                    "abort_sequence_cache_send",
+                    transfer_id,
+                )
+            except BaseException:
+                pass
+            if transfer_id in self.scheduler.remote_prefill_sources:
+                self.scheduler.abort_remote_prefill_source(transfer_id)
+            raise
+        started_at[transfer_id] = perf_counter()
+        errors = getattr(self, "_remote_prefill_send_errors", None)
+        if errors is None:
+            errors = self._remote_prefill_send_errors = {}
+        errors.pop(transfer_id, None)
+        self.metrics.record_remote_prefill_send_started()
+        return seq.completion_token_ids[0]
+
+    def _abort_remote_prefill_send(
+        self,
+        transfer_id: str,
+        *,
+        outcome: str,
+    ) -> Sequence | None:
+        try:
+            self.model_runner.call_rank_results(
+                "abort_sequence_cache_send",
+                transfer_id,
+            )
+        except BaseException:
+            pass
+        started_at = getattr(self, "_remote_prefill_send_started_at", {}).pop(
+            transfer_id,
+            None,
+        )
+        if started_at is not None:
+            self.metrics.record_remote_prefill_send_finished(
+                perf_counter() - started_at,
+                outcome=outcome,
+            )
+        if transfer_id in self.scheduler.remote_prefill_sources:
+            return self.scheduler.abort_remote_prefill_source(transfer_id)
+        return None
+
+    def abort_remote_prefill_send(self, transfer_id: str) -> int:
+        """Cancel a source send while retaining its local KV and decode state."""
+
+        if transfer_id not in getattr(self, "_remote_prefill_send_started_at", {}):
+            raise ValueError("cache send id is not active")
+        seq, _position = self.scheduler.remote_prefill_sources[transfer_id]
+        self._abort_remote_prefill_send(transfer_id, outcome="cancelled")
+        return seq.seq_id
+
+    def _advance_remote_prefill_send(
+        self,
+        transfer_id: str,
+        rank_results: list[object],
+    ) -> int | None:
+        if transfer_id not in getattr(self, "_remote_prefill_send_started_at", {}):
+            raise ValueError("cache send id is not active")
+        states = {}
+        failures = []
+        try:
+            for result in rank_results:
+                if not isinstance(result, dict):
+                    raise RuntimeError("cache send poll result must be a dictionary")
+                rank = result.get("rank")
+                state = result.get("state")
+                if (
+                    not isinstance(rank, int)
+                    or isinstance(rank, bool)
+                    or not 0 <= rank < self.config.tensor_parallel_size
+                    or rank in states
+                ):
+                    raise RuntimeError("cache send poll result has an invalid rank")
+                if state not in {"sending", "ready", "failed"}:
+                    raise RuntimeError("cache send poll result has an invalid state")
+                states[rank] = state
+                if state == "failed":
+                    failures.append(f"rank {rank}: {result.get('error', 'unknown error')}")
+            if set(states) != set(range(self.config.tensor_parallel_size)):
+                raise RuntimeError("cache send poll results are incomplete")
+            if failures:
+                raise RuntimeError("; ".join(failures))
+            if any(state == "sending" for state in states.values()):
+                return None
+            finished = self.model_runner.call_rank_results(
+                "finish_sequence_cache_send",
+                transfer_id,
+            )
+            _validate_rank_results(
+                finished,
+                self.config.tensor_parallel_size,
+                "sent_bytes",
+            )
+        except BaseException:
+            self._abort_remote_prefill_send(transfer_id, outcome="failed")
+            raise
+        seq = self.scheduler.commit_remote_prefill_source(transfer_id)
+        started_at = self._remote_prefill_send_started_at.pop(transfer_id)
+        self.metrics.record_remote_prefill_send_finished(
+            perf_counter() - started_at,
+            outcome="committed",
+        )
+        return seq.seq_id
+
+    def poll_remote_prefill_send(self, transfer_id: str) -> int | None:
+        """Progress one source send and commit only after every rank ACKs."""
+
+        if transfer_id not in getattr(self, "_remote_prefill_send_started_at", {}):
+            raise ValueError("cache send id is not active")
+        self.metrics.record_remote_prefill_send_poll(1)
+        try:
+            rank_results = self.model_runner.call_rank_results(
+                "poll_sequence_cache_send",
+                transfer_id,
+            )
+            return self._advance_remote_prefill_send(transfer_id, rank_results)
+        except BaseException as exc:
+            if transfer_id in getattr(self, "_remote_prefill_send_started_at", {}):
+                self._abort_remote_prefill_send(transfer_id, outcome="failed")
+            getattr(self, "_remote_prefill_send_errors", {})[transfer_id] = str(exc)
+            raise
+
+    def _poll_remote_prefill_sends(self) -> None:
+        transfer_ids = tuple(getattr(self, "_remote_prefill_send_started_at", {}))
+        if not transfer_ids:
+            return
+        self.metrics.record_remote_prefill_send_poll(len(transfer_ids))
+        try:
+            rank_results = self.model_runner.call_rank_results(
+                "poll_sequence_cache_sends",
+                list(transfer_ids),
+            )
+            by_transfer = _validate_rank_send_polls(
+                rank_results,
+                self.config.tensor_parallel_size,
+                transfer_ids,
+            )
+        except Exception as exc:
+            for transfer_id in transfer_ids:
+                self._abort_remote_prefill_send(transfer_id, outcome="failed")
+                self._remote_prefill_send_errors[transfer_id] = str(exc)
+            return
+        for transfer_id in transfer_ids:
+            try:
+                self._advance_remote_prefill_send(
+                    transfer_id,
+                    by_transfer[transfer_id],
+                )
+            except Exception as exc:
+                self._remote_prefill_send_errors[transfer_id] = str(exc)
+
     def step(self):
         self._poll_remote_prefill_receives()
+        self._poll_remote_prefill_sends()
         self.scheduler.poll_remote_prefills(now=perf_counter())
         schedule_result = self.scheduler.schedule()
         if isinstance(schedule_result, ScheduleResult):
