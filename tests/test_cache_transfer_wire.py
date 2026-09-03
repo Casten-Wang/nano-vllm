@@ -8,7 +8,7 @@ from unittest.mock import Mock
 import pytest
 import torch
 
-from nanovllm.engine.cache_transfer import RankCacheTransfer
+from nanovllm.engine.cache_transfer import HostStagingBufferPool, RankCacheTransfer
 from nanovllm.engine.model_runner import ModelRunner
 from nanovllm.engine.cache_transfer_wire import (
     _aligned_storage_offsets,
@@ -147,6 +147,54 @@ def test_receive_allocates_one_tensor_storage_for_complete_payload(monkeypatch):
     assert received.nbytes == payload.nbytes
 
 
+def test_receive_reuses_released_host_staging_storage():
+    payload = make_payload(int8=True)
+    sink = BufferSocket()
+    send_rank_cache_transfer(sink, payload)
+    frame = bytes(sink.data)
+    pool = HostStagingBufferPool()
+
+    first = receive_rank_cache_transfer(
+        BufferSocket(frame),
+        host_staging_pool=pool,
+    )
+    first_ptr = first.kv_blocks.untyped_storage().data_ptr()
+    first.release_host_staging()
+    second = receive_rank_cache_transfer(
+        BufferSocket(frame),
+        host_staging_pool=pool,
+    )
+
+    assert second.kv_blocks.untyped_storage().data_ptr() == first_ptr
+    assert pool.storage_stats()["reuse_count"] == 1
+    second.release_host_staging()
+
+
+def test_receive_pool_never_aliases_concurrent_payloads():
+    payload = make_payload()
+    sink = BufferSocket()
+    send_rank_cache_transfer(sink, payload)
+    frame = bytes(sink.data)
+    pool = HostStagingBufferPool()
+
+    first = receive_rank_cache_transfer(
+        BufferSocket(frame),
+        host_staging_pool=pool,
+    )
+    second = receive_rank_cache_transfer(
+        BufferSocket(frame),
+        host_staging_pool=pool,
+    )
+
+    assert (
+        first.kv_blocks.untyped_storage().data_ptr()
+        != second.kv_blocks.untyped_storage().data_ptr()
+    )
+    assert pool.storage_stats()["transient_allocation_count"] == 1
+    second.release_host_staging()
+    first.release_host_staging()
+
+
 def test_socket_wire_rejects_payload_above_receiver_limit():
     sender, receiver = socket.socketpair()
     sender.sendall(WIRE_HEADER.pack(WIRE_MAGIC, WIRE_VERSION, 1, 2))
@@ -169,9 +217,14 @@ def test_socket_wire_rejects_corrupted_tensor_bytes():
     sink = BufferSocket()
     send_rank_cache_transfer(sink, make_payload())
     sink.data[-33] ^= 1
+    pool = HostStagingBufferPool()
 
     with pytest.raises(ValueError, match="checksum mismatch"):
-        receive_rank_cache_transfer(BufferSocket(sink.data))
+        receive_rank_cache_transfer(
+            BufferSocket(sink.data),
+            host_staging_pool=pool,
+        )
+    assert pool.storage_stats()["leased"] == 0
 
 
 def test_tcp_endpoint_acknowledges_only_after_payload_validation():
@@ -223,7 +276,13 @@ def test_tcp_endpoint_rejects_when_install_callback_fails():
 
 def test_pending_receive_defers_sender_ack_until_install_commit():
     payload = make_payload()
-    receiver = PendingRankCacheReceive("127.0.0.1", 0, timeout_s=2.0)
+    pool = HostStagingBufferPool()
+    receiver = PendingRankCacheReceive(
+        "127.0.0.1",
+        0,
+        timeout_s=2.0,
+        host_staging_pool=pool,
+    )
     sender_result = []
     sender_failure = []
     receiver.start()
@@ -249,9 +308,11 @@ def test_pending_receive_defers_sender_ack_until_install_commit():
     assert receiver.poll() == ("ready", None)
     assert thread.is_alive()
     torch.testing.assert_close(receiver.payload().kv_blocks, payload.kv_blocks)
+    assert pool.storage_stats()["leased"] == 1
 
     receiver.finish(accepted=True)
     thread.join()
+    assert pool.storage_stats()["leased"] == 0
     assert not sender_failure
     assert sender_result
 

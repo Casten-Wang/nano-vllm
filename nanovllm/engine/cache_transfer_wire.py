@@ -13,7 +13,10 @@ from collections.abc import Callable, Iterable
 
 import torch
 
-from nanovllm.engine.cache_transfer import RankCacheTransfer
+from nanovllm.engine.cache_transfer import (
+    HostStagingBufferPool,
+    RankCacheTransfer,
+)
 
 
 WIRE_MAGIC = b"NVCT"
@@ -147,6 +150,7 @@ def receive_rank_cache_transfer(
     sock,
     *,
     max_payload_bytes: int = DEFAULT_MAX_PAYLOAD_BYTES,
+    host_staging_pool: HostStagingBufferPool | None = None,
 ) -> RankCacheTransfer:
     """Receive and verify one payload into newly owned CPU tensors."""
 
@@ -207,23 +211,34 @@ def receive_rank_cache_transfer(
         raise ValueError("cache transfer wire body size is inconsistent")
 
     offsets, storage_bytes = _aligned_storage_offsets(tensor_descriptors)
-    storage = torch.empty(storage_bytes, dtype=torch.uint8)
-    tensors: dict[str, torch.Tensor] = {}
-    for (name, dtype, shape, nbytes), offset in zip(
-        tensor_descriptors,
-        offsets,
-    ):
-        tensor_storage = storage[offset : offset + nbytes]
-        storage_view = _byte_view(tensor_storage)
-        _recv_exact(sock, storage_view)
-        digest.update(storage_view)
-        tensors[name] = tensor_storage.view(dtype).reshape(shape)
-
-    received_digest = _recv_bytes(sock, WIRE_DIGEST_BYTES)
-    if not hmac.compare_digest(digest.digest(), received_digest):
-        raise ValueError("cache transfer payload checksum mismatch")
-
+    lease = (
+        host_staging_pool.acquire(storage_bytes, pin_memory=False)
+        if host_staging_pool is not None
+        else None
+    )
+    storage = (
+        lease.storage
+        if lease is not None
+        else torch.empty(storage_bytes, dtype=torch.uint8)
+    )
+    if storage is None:
+        raise RuntimeError("host staging lease was released before receive")
     try:
+        tensors: dict[str, torch.Tensor] = {}
+        for (name, dtype, shape, nbytes), offset in zip(
+            tensor_descriptors,
+            offsets,
+        ):
+            tensor_storage = storage[offset : offset + nbytes]
+            storage_view = _byte_view(tensor_storage)
+            _recv_exact(sock, storage_view)
+            digest.update(storage_view)
+            tensors[name] = tensor_storage.view(dtype).reshape(shape)
+
+        received_digest = _recv_bytes(sock, WIRE_DIGEST_BYTES)
+        if not hmac.compare_digest(digest.digest(), received_digest):
+            raise ValueError("cache transfer payload checksum mismatch")
+
         kv_blocks = tensors.pop("kv_blocks")
         kv_scales = tensors.pop("kv_scales", None)
         recurrent = tuple(
@@ -234,11 +249,8 @@ def receive_rank_cache_transfer(
             tensors.pop(f"convolution/{index}")
             for index in range(sum(name.startswith("convolution/") for name in tensors))
         )
-    except KeyError as exc:
-        raise ValueError("cache transfer wire tensor names are incomplete") from exc
-    if tensors:
-        raise ValueError("cache transfer wire tensor names are invalid")
-    try:
+        if tensors:
+            raise ValueError("cache transfer wire tensor names are invalid")
         return RankCacheTransfer(
             format_version=int(header["format_version"]),
             transfer_id=header["transfer_id"],
@@ -250,9 +262,20 @@ def receive_rank_cache_transfer(
             kv_scales=kv_scales,
             recurrent_states=recurrent,
             convolution_states=convolution,
+            host_staging_lease=lease,
         )
-    except (KeyError, TypeError, ValueError) as exc:
-        raise ValueError("cache transfer wire metadata is invalid") from exc
+    except KeyError as exc:
+        if lease is not None:
+            lease.release()
+        raise ValueError("cache transfer wire data is incomplete") from exc
+    except (TypeError, ValueError):
+        if lease is not None:
+            lease.release()
+        raise
+    except BaseException:
+        if lease is not None:
+            lease.release()
+        raise
 
 
 class RankCacheReceiver:
@@ -265,6 +288,7 @@ class RankCacheReceiver:
         *,
         timeout_s: float = 30.0,
         max_payload_bytes: int = DEFAULT_MAX_PAYLOAD_BYTES,
+        host_staging_pool: HostStagingBufferPool | None = None,
     ) -> None:
         if not isinstance(host, str) or not host:
             raise ValueError("cache transfer receiver host must not be empty")
@@ -275,6 +299,7 @@ class RankCacheReceiver:
         if max_payload_bytes <= 0:
             raise ValueError("max_payload_bytes must be positive")
         self.max_payload_bytes = max_payload_bytes
+        self.host_staging_pool = host_staging_pool
         self._listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self._listener.settimeout(timeout_s)
@@ -305,10 +330,13 @@ class RankCacheReceiver:
                 payload = receive_rank_cache_transfer(
                     connection,
                     max_payload_bytes=self.max_payload_bytes,
+                    host_staging_pool=self.host_staging_pool,
                 )
                 if on_verified is not None:
                     on_verified(payload)
             except BaseException:
+                if "payload" in locals():
+                    payload.release_host_staging()
                 try:
                     connection.sendall(_TRANSFER_NACK)
                 except OSError:
@@ -337,12 +365,14 @@ class PendingRankCacheReceive:
         *,
         timeout_s: float = 30.0,
         max_payload_bytes: int = DEFAULT_MAX_PAYLOAD_BYTES,
+        host_staging_pool: HostStagingBufferPool | None = None,
     ) -> None:
         self._receiver = RankCacheReceiver(
             host,
             port,
             timeout_s=timeout_s,
             max_payload_bytes=max_payload_bytes,
+            host_staging_pool=host_staging_pool,
         )
         self._timeout_s = timeout_s
         self._deadline = monotonic() + timeout_s
@@ -387,10 +417,16 @@ class PendingRankCacheReceive:
             payload = receive_rank_cache_transfer(
                 connection,
                 max_payload_bytes=self._receiver.max_payload_bytes,
+                host_staging_pool=self._receiver.host_staging_pool,
             )
+            release_payload = False
             with self._lock:
                 if not self._terminal:
                     self._payload = payload
+                else:
+                    release_payload = True
+            if release_payload:
+                payload.release_host_staging()
         except BaseException as exc:
             with self._lock:
                 if not self._terminal:
@@ -430,13 +466,17 @@ class PendingRankCacheReceive:
             return self._payload
 
     def finish(self, *, accepted: bool) -> None:
+        payload = None
         with self._lock:
             if self._terminal:
                 return
             self._terminal = True
             connection = self._connection
             self._connection = None
+            payload = self._payload
             self._payload = None
+        if payload is not None:
+            payload.release_host_staging()
         if connection is not None:
             try:
                 connection.sendall(_TRANSFER_ACK if accepted else _TRANSFER_NACK)

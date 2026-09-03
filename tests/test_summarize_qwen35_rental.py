@@ -1704,6 +1704,7 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
                     "state_dtype": state_dtype,
                 },
                 "workload": {
+                    "warmup": 2,
                     "repeats": 10,
                     "components_bytes": components,
                     "payload_frame_bytes_sent": components["total"] + 400,
@@ -1717,6 +1718,15 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
                     "effective_payload_gib_s_p50": 1.0,
                     "receiver_storage_count": 1,
                     "receiver_storage_coalesced": True,
+                    "receiver_host_staging_pool": {
+                        "storage_bytes": components["total"],
+                        "allocation_count": 1,
+                        "reuse_count": 11,
+                        "expected_reuse_count": 11,
+                        "transient_allocation_count": 0,
+                        "leased": 0,
+                        "valid": True,
+                    },
                 },
                 "cuda_install": {
                     "enabled": True,
@@ -1823,6 +1833,9 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
         "host_staging_pool"
     ]["valid"]
     assert report["pd_transfer"]["by_tp"]["tp4"]["int8-model"]["valid"]
+    assert report["pd_transfer"]["by_tp"]["tp4"]["int8-model"][
+        "receiver_host_staging_pool"
+    ]["valid"]
     install = report["pd_transfer"]["by_tp"]["tp4"]["int8-model"][
         "cuda_install"
     ]
@@ -1844,6 +1857,19 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     assert not invalid_transfer_report["evidence"]["pd_transfer_baseline_valid"]
     assert not invalid_transfer_report["valid"]
     transfer_result["workload"]["components_bytes"]["kv"] -= 1
+    write(transfer_path, transfer_result)
+    transfer_result["results"]["receiver_host_staging_pool"][
+        "reuse_count"
+    ] = 10
+    write(transfer_path, transfer_result)
+    invalid_receive_reuse_report = MODULE.summarize(tmp_path, run_id)
+    assert not invalid_receive_reuse_report["evidence"][
+        "pd_transfer_baseline_valid"
+    ]
+    assert not invalid_receive_reuse_report["valid"]
+    transfer_result["results"]["receiver_host_staging_pool"][
+        "reuse_count"
+    ] = 11
     write(transfer_path, transfer_result)
     export_path = tmp_path / "pd_export/tp4/int8-model.json"
     export_result = json.loads(export_path.read_text())

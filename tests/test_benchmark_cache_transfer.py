@@ -39,6 +39,13 @@ def test_cache_transfer_benchmark_records_raw_samples_and_limitations():
     assert result["workload"]["payload_tensor_count"] == 4
     assert result["results"]["receiver_storage_count"] == 1
     assert result["results"]["receiver_storage_coalesced"] is True
+    receive_pool = result["results"]["receiver_host_staging_pool"]
+    assert receive_pool["valid"]
+    assert receive_pool["allocation_count"] == 1
+    assert receive_pool["reuse_count"] == 3
+    assert receive_pool["expected_reuse_count"] == 3
+    assert receive_pool["transient_allocation_count"] == 0
+    assert receive_pool["leased"] == 0
     if torch.cuda.is_available():
         assert result["cuda_install"]["enabled"]
         assert result["cuda_install"]["valid"]

@@ -19,7 +19,11 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from nanovllm.engine.cache_transfer import RankCacheTransfer, import_rank_cache
+from nanovllm.engine.cache_transfer import (
+    HostStagingBufferPool,
+    RankCacheTransfer,
+    import_rank_cache,
+)
 from nanovllm.engine.cache_transfer_wire import (
     RankCacheReceiver,
     send_rank_cache_to_endpoint,
@@ -205,10 +209,16 @@ def _peak_rss_bytes() -> int:
 def transfer_once(
     payload: RankCacheTransfer,
     timeout_s: float,
+    receive_staging_pool: HostStagingBufferPool | None = None,
 ) -> tuple[float, int, int]:
     received = []
     failures = []
-    with RankCacheReceiver("127.0.0.1", 0, timeout_s=timeout_s) as receiver:
+    with RankCacheReceiver(
+        "127.0.0.1",
+        0,
+        timeout_s=timeout_s,
+        host_staging_pool=receive_staging_pool,
+    ) as receiver:
         def receive():
             try:
                 received.append(receiver.receive(timeout_s=timeout_s))
@@ -231,9 +241,13 @@ def transfer_once(
         raise RuntimeError("cache transfer benchmark receiver failed") from failures[0]
     if len(received) != 1:
         raise RuntimeError("cache transfer benchmark did not receive one payload")
-    if not torch.equal(received[0].kv_blocks, payload.kv_blocks):
-        raise RuntimeError("cache transfer benchmark KV round-trip mismatch")
-    return elapsed_ms, wire_bytes, payload_storage_count(received[0])
+    received_payload = received[0]
+    try:
+        if not torch.equal(received_payload.kv_blocks, payload.kv_blocks):
+            raise RuntimeError("cache transfer benchmark KV round-trip mismatch")
+        return elapsed_ms, wire_bytes, payload_storage_count(received_payload)
+    finally:
+        received_payload.release_host_staging()
 
 
 def benchmark_cuda_install(
@@ -357,8 +371,9 @@ def run_benchmark(
 ) -> dict:
     if warmup < 0 or repeats <= 0 or timeout_s <= 0:
         raise ValueError("warmup, repeats, and timeout must be valid")
+    receive_staging_pool = HostStagingBufferPool()
     for _ in range(warmup):
-        transfer_once(payload, timeout_s)
+        transfer_once(payload, timeout_s, receive_staging_pool)
     samples = []
     wire_bytes = None
     receiver_storage_count = None
@@ -367,6 +382,7 @@ def run_benchmark(
         elapsed_ms, current_wire_bytes, current_storage_count = transfer_once(
             payload,
             timeout_s,
+            receive_staging_pool,
         )
         samples.append(elapsed_ms)
         if wire_bytes is None:
@@ -382,6 +398,17 @@ def run_benchmark(
     components = payload_bytes(payload)
     tensor_count = len(payload_tensors(payload))
     median_ms = median(samples)
+    receive_pool_stats = receive_staging_pool.storage_stats()
+    expected_receive_reuse = warmup + repeats - 1
+    receive_pool_valid = (
+        receive_pool_stats["allocation_count"] == 1
+        and receive_pool_stats["reuse_count"] == expected_receive_reuse
+        and receive_pool_stats["transient_allocation_count"] == 0
+        and receive_pool_stats["leased"] == 0
+        and receive_pool_stats["storage_bytes"] >= components["total"]
+    )
+    if not receive_pool_valid:
+        raise RuntimeError("receive host staging pool was not reused as expected")
     return {
         "schema_version": 1,
         "scope": "single-rank synchronous TCP loopback correctness baseline",
@@ -413,6 +440,11 @@ def run_benchmark(
             "receiver_storage_coalesced": (
                 tensor_count > 1 and receiver_storage_count == 1
             ),
+            "receiver_host_staging_pool": {
+                **receive_pool_stats,
+                "expected_reuse_count": expected_receive_reuse,
+                "valid": receive_pool_valid,
+            },
         },
         "cuda_install": benchmark_cuda_install(
             payload,

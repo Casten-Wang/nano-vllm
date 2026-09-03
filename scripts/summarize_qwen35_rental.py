@@ -1988,6 +1988,7 @@ def summarize_pd_transfer(
     profile = result.get("profile", {})
     workload = result.get("workload", {})
     measurements = result.get("results", {})
+    receive_pool = measurements.get("receiver_host_staging_pool", {})
     cuda_install = result.get("cuda_install", {})
     samples = measurements.get("latency_ms_samples", [])
     repeats = workload.get("repeats")
@@ -1996,6 +1997,24 @@ def summarize_pd_transfer(
     candidate_install = cuda_install.get("candidate_direct_block_install", {})
     reference_install_samples = reference_install.get("latency_ms_samples", [])
     candidate_install_samples = candidate_install.get("latency_ms_samples", [])
+    expected_receive_reuse = (
+        repeats + workload.get("warmup") - 1
+        if isinstance(repeats, int)
+        and not isinstance(repeats, bool)
+        and isinstance(workload.get("warmup"), int)
+        and not isinstance(workload.get("warmup"), bool)
+        else None
+    )
+    receive_pool_valid = (
+        receive_pool.get("valid") is True
+        and receive_pool.get("allocation_count") == 1
+        and receive_pool.get("reuse_count") == expected_receive_reuse
+        and receive_pool.get("expected_reuse_count") == expected_receive_reuse
+        and receive_pool.get("transient_allocation_count") == 0
+        and receive_pool.get("leased") == 0
+        and isinstance(receive_pool.get("storage_bytes"), int)
+        and receive_pool["storage_bytes"] >= expected_components["total"]
+    )
     install_valid = (
         cuda_install.get("enabled") is True
         and cuda_install.get("valid") is True
@@ -2046,6 +2065,7 @@ def summarize_pd_transfer(
         and workload["payload_tensor_count"] > 1
         and measurements.get("receiver_storage_count") == 1
         and measurements.get("receiver_storage_coalesced") is True
+        and receive_pool_valid
         and workload.get("payload_frame_bytes_sent", 0)
         > expected_components["total"]
         and install_valid
@@ -2065,6 +2085,10 @@ def summarize_pd_transfer(
         "receiver_storage_coalesced": measurements.get(
             "receiver_storage_coalesced"
         ),
+        "receiver_host_staging_pool": {
+            **receive_pool,
+            "valid": receive_pool_valid,
+        },
         "cuda_install": {
             "valid": install_valid,
             "peak_device_bytes_reduction": cuda_install.get(

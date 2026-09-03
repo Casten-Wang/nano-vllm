@@ -131,6 +131,7 @@ class ModelRunner:
         self._pending_cache_receives = {}
         self._pending_cache_sends = {}
         self._cache_send_staging_pool = None
+        self._cache_receive_staging_pool = None
         self._resources_released = False
         self.execution_stats = ExecutionStats()
         self.execution_stats_enabled = False
@@ -502,6 +503,22 @@ class ModelRunner:
                 "leased": 0,
             }
         )
+        receive_staging_pool = getattr(
+            self,
+            "_cache_receive_staging_pool",
+            None,
+        )
+        receive_staging_stats = (
+            receive_staging_pool.storage_stats()
+            if receive_staging_pool is not None
+            else {
+                "storage_bytes": 0,
+                "allocation_count": 0,
+                "reuse_count": 0,
+                "transient_allocation_count": 0,
+                "leased": 0,
+            }
+        )
         return {
             "int8_partitioned_decode_pool_count": len(stats),
             "int8_partitioned_workspace_bytes": sum(
@@ -636,6 +653,19 @@ class ModelRunner:
                 host_staging_stats["transient_allocation_count"]
             ),
             "pd_send_host_staging_leased": host_staging_stats["leased"],
+            "pd_receive_host_staging_bytes": receive_staging_stats[
+                "storage_bytes"
+            ],
+            "pd_receive_host_staging_allocation_count": receive_staging_stats[
+                "allocation_count"
+            ],
+            "pd_receive_host_staging_reuse_count": receive_staging_stats[
+                "reuse_count"
+            ],
+            "pd_receive_host_staging_transient_allocation_count": (
+                receive_staging_stats["transient_allocation_count"]
+            ),
+            "pd_receive_host_staging_leased": receive_staging_stats["leased"],
             "total_bytes_local_rank": (
                 partitioned_total
                 + dequant_total
@@ -1291,6 +1321,13 @@ class ModelRunner:
             self._cache_send_staging_pool = HostStagingBufferPool()
         return self._cache_send_staging_pool
 
+    def _host_receive_staging_pool(self):
+        from nanovllm.engine.cache_transfer import HostStagingBufferPool
+
+        if getattr(self, "_cache_receive_staging_pool", None) is None:
+            self._cache_receive_staging_pool = HostStagingBufferPool()
+        return self._cache_receive_staging_pool
+
     def estimate_sequence_cache_bytes(self, seq: Sequence) -> dict:
         """Estimate rank-local host staging bytes without copying tensors."""
 
@@ -1547,16 +1584,22 @@ class ModelRunner:
             port,
             timeout_s=timeout_s,
             max_payload_bytes=max_payload_bytes,
+            host_staging_pool=self._host_receive_staging_pool(),
         ) as receiver:
             payload = receiver.receive(
                 timeout_s=timeout_s,
                 on_verified=install_verified,
             )
-        return {
-            "rank": self.rank,
-            "cached_tokens": payload.cached_tokens,
-            "received_bytes": payload.nbytes,
-        }
+        cached_tokens = payload.cached_tokens
+        received_bytes = payload.nbytes
+        try:
+            return {
+                "rank": self.rank,
+                "cached_tokens": cached_tokens,
+                "received_bytes": received_bytes,
+            }
+        finally:
+            payload.release_host_staging()
 
     def start_sequence_cache_receive(
         self,
@@ -1593,6 +1636,7 @@ class ModelRunner:
             port,
             timeout_s=timeout_s,
             max_payload_bytes=max_payload_bytes,
+            host_staging_pool=self._host_receive_staging_pool(),
         )
         self._pending_cache_receives[transfer_id] = receive
         try:
@@ -1662,6 +1706,8 @@ class ModelRunner:
                         "cache receive payload bytes differ from the preflight estimate"
                     )
             self.import_sequence_cache(seq, payload, transfer_id=transfer_id)
+            cached_tokens = payload.cached_tokens
+            received_bytes = payload.nbytes
         except BaseException:
             receive.finish(accepted=False)
             self._pending_cache_receives.pop(transfer_id, None)
@@ -1670,8 +1716,8 @@ class ModelRunner:
         self._pending_cache_receives.pop(transfer_id, None)
         return {
             "rank": self.rank,
-            "cached_tokens": payload.cached_tokens,
-            "received_bytes": payload.nbytes,
+            "cached_tokens": cached_tokens,
+            "received_bytes": received_bytes,
         }
 
     def abort_sequence_cache_receive(self, transfer_id: str) -> dict:
