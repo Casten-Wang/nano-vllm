@@ -128,6 +128,21 @@ def _recv_bytes(sock, size: int, digest=None) -> bytearray:
     return data
 
 
+def _aligned_storage_offsets(
+    tensors: list[tuple[str, torch.dtype, list[int], int]],
+) -> tuple[list[int], int]:
+    """Lay out heterogeneous tensor bytes in one aligned host storage."""
+
+    offsets = []
+    end = 0
+    for _name, dtype, _shape, nbytes in tensors:
+        alignment = dtype.itemsize
+        end = (end + alignment - 1) // alignment * alignment
+        offsets.append(end)
+        end += nbytes
+    return offsets, end
+
+
 def receive_rank_cache_transfer(
     sock,
     *,
@@ -156,7 +171,8 @@ def receive_rank_cache_transfer(
     if not isinstance(descriptors, list) or not descriptors:
         raise ValueError("cache transfer wire tensor descriptors are invalid")
 
-    tensors: dict[str, torch.Tensor] = {}
+    tensor_descriptors: list[tuple[str, torch.dtype, list[int], int]] = []
+    tensor_names: set[str] = set()
     described_body_bytes = 0
     for descriptor in descriptors:
         if not isinstance(descriptor, dict):
@@ -168,7 +184,7 @@ def receive_rank_cache_transfer(
         if (
             not isinstance(name, str)
             or not name
-            or name in tensors
+            or name in tensor_names
             or dtype is None
             or not isinstance(shape, list)
             or not shape
@@ -177,7 +193,7 @@ def receive_rank_cache_transfer(
             or nbytes <= 0
         ):
             raise ValueError("cache transfer wire tensor descriptor is invalid")
-        expected_nbytes = torch.empty((), dtype=dtype).element_size()
+        expected_nbytes = dtype.itemsize
         for dimension in shape:
             expected_nbytes *= dimension
         if nbytes != expected_nbytes:
@@ -185,13 +201,23 @@ def receive_rank_cache_transfer(
         described_body_bytes += nbytes
         if described_body_bytes > body_bytes:
             raise ValueError("cache transfer wire body size is inconsistent")
-        storage = torch.empty(nbytes, dtype=torch.uint8)
-        storage_view = _byte_view(storage)
-        _recv_exact(sock, storage_view)
-        digest.update(storage_view)
-        tensors[name] = storage.view(dtype).reshape(shape)
+        tensor_names.add(name)
+        tensor_descriptors.append((name, dtype, shape, nbytes))
     if described_body_bytes != body_bytes:
         raise ValueError("cache transfer wire body size is inconsistent")
+
+    offsets, storage_bytes = _aligned_storage_offsets(tensor_descriptors)
+    storage = torch.empty(storage_bytes, dtype=torch.uint8)
+    tensors: dict[str, torch.Tensor] = {}
+    for (name, dtype, shape, nbytes), offset in zip(
+        tensor_descriptors,
+        offsets,
+    ):
+        tensor_storage = storage[offset : offset + nbytes]
+        storage_view = _byte_view(tensor_storage)
+        _recv_exact(sock, storage_view)
+        digest.update(storage_view)
+        tensors[name] = tensor_storage.view(dtype).reshape(shape)
 
     received_digest = _recv_bytes(sock, WIRE_DIGEST_BYTES)
     if not hmac.compare_digest(digest.digest(), received_digest):

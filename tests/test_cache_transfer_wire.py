@@ -10,6 +10,7 @@ import torch
 from nanovllm.engine.cache_transfer import RankCacheTransfer
 from nanovllm.engine.model_runner import ModelRunner
 from nanovllm.engine.cache_transfer_wire import (
+    _aligned_storage_offsets,
     PendingRankCacheReceive,
     PendingRankCacheSend,
     RankCacheReceiver,
@@ -97,6 +98,52 @@ def test_socket_wire_round_trip_preserves_rank_payload(int8):
     torch.testing.assert_close(
         received.convolution_states[0], payload.convolution_states[0]
     )
+    received_tensors = [
+        received.kv_blocks,
+        *((received.kv_scales,) if received.kv_scales is not None else ()),
+        *received.recurrent_states,
+        *received.convolution_states,
+    ]
+    storage_pointers = {
+        tensor.untyped_storage().data_ptr() for tensor in received_tensors
+    }
+    assert len(storage_pointers) == 1
+    assert all(
+        tensor.data_ptr() % tensor.element_size() == 0
+        for tensor in received_tensors
+    )
+
+
+def test_receive_storage_layout_aligns_heterogeneous_tensor_views():
+    offsets, storage_bytes = _aligned_storage_offsets(
+        [
+            ("bytes", torch.int8, [3], 3),
+            ("words", torch.float32, [1], 4),
+            ("halves", torch.bfloat16, [1], 2),
+        ]
+    )
+
+    assert offsets == [0, 4, 8]
+    assert storage_bytes == 10
+
+
+def test_receive_allocates_one_tensor_storage_for_complete_payload(monkeypatch):
+    sink = BufferSocket()
+    payload = make_payload(int8=True)
+    send_rank_cache_transfer(sink, payload)
+    original_empty = torch.empty
+    allocations = []
+
+    def tracked_empty(*args, **kwargs):
+        allocations.append((args, kwargs))
+        return original_empty(*args, **kwargs)
+
+    monkeypatch.setattr(torch, "empty", tracked_empty)
+    received = receive_rank_cache_transfer(BufferSocket(sink.data))
+
+    assert len(allocations) == 1
+    assert allocations[0][1]["dtype"] == torch.uint8
+    assert received.nbytes == payload.nbytes
 
 
 def test_socket_wire_rejects_payload_above_receiver_limit():
