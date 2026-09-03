@@ -157,18 +157,21 @@ def write_fp8_summary_inputs(
             "valid": True,
             "repo": MODULE.OFFICIAL_FP8_CHECKPOINT_REPO,
             "resolved_revision": MODULE.OFFICIAL_FP8_CHECKPOINT_REVISION,
+            "config_sha256": MODULE.OFFICIAL_FP8_CONFIG_SHA256,
+            "index_sha256": MODULE.OFFICIAL_FP8_INDEX_SHA256,
+            "headers_sha256": MODULE.OFFICIAL_FP8_HEADERS_SHA256,
             "semantic_contract": MODULE.expected_checkpoint_semantic_contract(
                 "fp8_block"
             ),
             "fp8_runtime_backend": requested_backend,
-            "config_sha256": "e" * 64,
-            "index_sha256": "f" * 64,
             "shard_count": 1,
             "checkpoint_shards": shards,
             "quantization": {"format": "fp8_block", "valid": True},
             "results": {
                 "tp4": {
                     "valid": True,
+                    "skipped_by_prefix": MODULE.OFFICIAL_SKIPPED_WEIGHT_PREFIXES,
+                    "unclassified_skipped_weights": [],
                     "local_parameter_bytes": 1000,
                     "local_parameter_and_resident_runtime_bytes": (
                         76_536 if backend == "resident" else 1000
@@ -196,6 +199,8 @@ def write_fp8_summary_inputs(
                 },
                 "tp8": {
                     "valid": True,
+                    "skipped_by_prefix": MODULE.OFFICIAL_SKIPPED_WEIGHT_PREFIXES,
+                    "unclassified_skipped_weights": [],
                     "local_parameter_bytes": 500,
                     "local_parameter_and_resident_runtime_bytes": (
                         76_036 if backend == "resident" else 500
@@ -245,8 +250,8 @@ def write_fp8_summary_inputs(
                 },
             },
             "checkpoint_manifest": {
-                "config_sha256": "e" * 64,
-                "index_sha256": "f" * 64,
+                "config_sha256": MODULE.OFFICIAL_FP8_CONFIG_SHA256,
+                "index_sha256": MODULE.OFFICIAL_FP8_INDEX_SHA256,
                 "shard_count": 1,
                 "present_shard_count": 1,
                 "missing_shards": [],
@@ -419,6 +424,9 @@ def test_optional_fp8_audit_reports_tp_alignment_without_execution_claim(
             "valid": True,
             "repo": MODULE.OFFICIAL_FP8_CHECKPOINT_REPO,
             "resolved_revision": MODULE.OFFICIAL_FP8_CHECKPOINT_REVISION,
+            "config_sha256": MODULE.OFFICIAL_FP8_CONFIG_SHA256,
+            "index_sha256": MODULE.OFFICIAL_FP8_INDEX_SHA256,
+            "headers_sha256": MODULE.OFFICIAL_FP8_HEADERS_SHA256,
             "semantic_contract": MODULE.expected_checkpoint_semantic_contract(
                 "fp8_block"
             ),
@@ -426,6 +434,8 @@ def test_optional_fp8_audit_reports_tp_alignment_without_execution_claim(
             "results": {
                 "tp4": {
                     "valid": True,
+                    "skipped_by_prefix": MODULE.OFFICIAL_SKIPPED_WEIGHT_PREFIXES,
+                    "unclassified_skipped_weights": [],
                     "local_parameter_bytes": 17_372_983_712,
                     "quantized_tp_layout": {
                         "valid": True,
@@ -435,6 +445,8 @@ def test_optional_fp8_audit_reports_tp_alignment_without_execution_claim(
                 },
                 "tp8": {
                     "valid": True,
+                    "skipped_by_prefix": MODULE.OFFICIAL_SKIPPED_WEIGHT_PREFIXES,
+                    "unclassified_skipped_weights": [],
                     "local_parameter_bytes": 8_718_380_752,
                     "quantized_tp_layout": {
                         "valid": True,
@@ -446,7 +458,9 @@ def test_optional_fp8_audit_reports_tp_alignment_without_execution_claim(
         },
     )
 
-    report = MODULE.summarize_optional_fp8_audit(tmp_path)
+    report = MODULE.summarize_optional_fp8_audit(
+        tmp_path, "run", fp8_baseline_rows()
+    )
 
     assert report["valid"]
     assert not report["executable"]
@@ -456,6 +470,42 @@ def test_optional_fp8_audit_reports_tp_alignment_without_execution_claim(
         report["tensor_parallel"]["tp8"]["partial_quantization_unit_count"]
         == 30_860
     )
+
+
+@pytest.mark.parametrize(
+    "field",
+    ("config_sha256", "index_sha256", "headers_sha256"),
+)
+def test_optional_fp8_audit_rejects_checkpoint_identity_drift(tmp_path, field):
+    write_fp8_summary_inputs(tmp_path, "run")
+    path = tmp_path / "fp8/official_checkpoint_header_audit.json"
+    audit = json.loads(path.read_text())
+    audit[field] = "0" * 64
+    write(path, audit)
+
+    report = MODULE.summarize_optional_fp8_audit(
+        tmp_path, "run", fp8_baseline_rows()
+    )
+
+    assert not report["valid"]
+    assert report["executable"]
+    assert not report["execution_validated"]
+
+
+def test_optional_fp8_audit_rejects_unexpected_text_only_skips(tmp_path):
+    write_fp8_summary_inputs(tmp_path, "run")
+    path = tmp_path / "fp8/official_checkpoint_header_audit.json"
+    audit = json.loads(path.read_text())
+    audit["results"]["tp4"]["unclassified_skipped_weights"] = ["model.unknown"]
+    write(path, audit)
+
+    report = MODULE.summarize_optional_fp8_audit(
+        tmp_path, "run", fp8_baseline_rows()
+    )
+
+    assert not report["valid"]
+    assert report["executable"]
+    assert not report["execution_validated"]
 
 
 def test_optional_fp8_summary_requires_reference_execution_and_quality(tmp_path):

@@ -56,6 +56,15 @@ OFFICIAL_GPTQ_CHECKPOINT_REPO = "Qwen/Qwen3.5-35B-A3B-GPTQ-Int4"
 OFFICIAL_GPTQ_CHECKPOINT_REVISION = "3af5ca2972faf6de1fd6f4efc4d8d319ca751e8b"
 OFFICIAL_FP8_CHECKPOINT_REPO = "Qwen/Qwen3.6-35B-A3B-FP8"
 OFFICIAL_FP8_CHECKPOINT_REVISION = "95a723d08a9490559dae23d0cff1d9466213d989"
+OFFICIAL_FP8_CONFIG_SHA256 = (
+    "570ef7ea45a7e1d3de2b1d3c70c4ac3562d0e768acdc195778cb4f4d95025845"
+)
+OFFICIAL_FP8_INDEX_SHA256 = (
+    "6f176f344e41d35b17af12904e33401da5ebff3b49fccb8bfa0185bc2d50f9d6"
+)
+OFFICIAL_FP8_HEADERS_SHA256 = (
+    "eee3953b23b7dd1df38209d1fd39b1b9eaa875a28b724628d4183cef46f8e78f"
+)
 OFFICIAL_CONFIG_SHA256 = (
     "93a4693fa9d8392fbfccd4b3c9873f4bfdcb14fdede978b123d07d19675efe99"
 )
@@ -400,10 +409,19 @@ def summarize_optional_fp8_audit(
         audit.get("valid") is True
         and audit.get("repo") == OFFICIAL_FP8_CHECKPOINT_REPO
         and audit.get("resolved_revision") == OFFICIAL_FP8_CHECKPOINT_REVISION
+        and audit.get("config_sha256") == OFFICIAL_FP8_CONFIG_SHA256
+        and audit.get("index_sha256") == OFFICIAL_FP8_INDEX_SHA256
+        and audit.get("headers_sha256") == OFFICIAL_FP8_HEADERS_SHA256
         and checkpoint_semantic_contract_matches(audit, "fp8_block")
         and audit.get("quantization", {}).get("format") == "fp8_block"
         and bool(results)
-        and all(result.get("valid") is True for result in results.values())
+        and all(
+            result.get("valid") is True
+            and result.get("skipped_by_prefix")
+            == OFFICIAL_SKIPPED_WEIGHT_PREFIXES
+            and not result.get("unclassified_skipped_weights")
+            for result in results.values()
+        )
     )
     report = {
         "enabled": True,
