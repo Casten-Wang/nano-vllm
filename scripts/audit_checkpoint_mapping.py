@@ -417,12 +417,15 @@ def instantiate_meta_model(
     model_path: str,
     tp_size: int,
     quantization=None,
+    weight_quant_backend: str | None = None,
 ) -> torch.nn.Module:
     config = AutoConfig.from_pretrained(model_path)
     model_spec = resolve_model_spec(config)
     model_config = model_spec.text_config
     if quantization is not None and quantization.is_quantized:
         model_config.nanovllm_quantization_spec = quantization
+    if weight_quant_backend is not None:
+        model_config.nanovllm_weight_quant_backend = weight_quant_backend
     if not hasattr(model_config, "dtype"):
         torch_dtype = getattr(model_config, "torch_dtype", None)
         model_config.dtype = (

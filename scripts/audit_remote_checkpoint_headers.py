@@ -786,6 +786,12 @@ def main() -> None:
     parser.add_argument("--tp-sizes", type=parse_tp_sizes, default=(4, 8))
     parser.add_argument("--max-header-mib", type=float, default=16.0)
     parser.add_argument(
+        "--fp8-runtime-backend",
+        choices=("reference", "resident"),
+        default="reference",
+        help="Instantiate the matching FP8 expert storage layout.",
+    )
+    parser.add_argument(
         "--output",
         type=Path,
         default=Path("benchmark_results/remote_checkpoint_header_audit.json"),
@@ -874,6 +880,11 @@ def main() -> None:
                 str(model_dir),
                 tp_size,
                 quantization if executable_layout else None,
+                (
+                    args.fp8_runtime_backend
+                    if quantization.format == "fp8_block"
+                    else None
+                ),
             )
             result = audit_model_headers(
                 model,
@@ -895,17 +906,39 @@ def main() -> None:
                     )
                     result["checkpoint_loading"] = None
                 if quantization.format == "fp8_block":
+                    resident_stats = []
+                    for module in model.modules():
+                        storage_stats = getattr(
+                            module, "resident_fp8_storage_stats", None
+                        )
+                        if storage_stats is None:
+                            continue
+                        item = storage_stats()
+                        if item["total_bytes"]:
+                            resident_stats.append(item)
+                    result["fp8_runtime_backend"] = args.fp8_runtime_backend
+                    result["resident_fp8_expert_storage"] = {
+                        "layer_count": len(resident_stats),
+                        "weight_bytes": sum(item["weight_bytes"] for item in resident_stats),
+                        "scale_bytes": sum(item["scale_bytes"] for item in resident_stats),
+                        "total_bytes": sum(item["total_bytes"] for item in resident_stats),
+                    }
+                    result["local_parameter_and_resident_scale_bytes"] = (
+                        result["local_parameter_bytes"]
+                        + result["resident_fp8_expert_storage"]["scale_bytes"]
+                    )
                     result["fp8_loader_coverage"] = audit_fp8_loader_coverage(
                         model,
                         headers,
                         quantization.weight_block_size,
                     )
-                    result["native_fp8_storage_projection"] = (
-                        project_native_fp8_parameter_storage(
-                            result["local_parameter_bytes"],
-                            result["fp8_loader_coverage"],
+                    if args.fp8_runtime_backend == "reference":
+                        result["native_fp8_storage_projection"] = (
+                            project_native_fp8_parameter_storage(
+                                result["local_parameter_bytes"],
+                                result["fp8_loader_coverage"],
+                            )
                         )
-                    )
                 result["quantized_tp_layout"] = audit_quantized_tp_layout(
                     unstacked_logical_headers,
                     quantization,
@@ -937,6 +970,7 @@ def main() -> None:
             ).encode()
         ).hexdigest(),
         "tensor_parallel_sizes": list(args.tp_sizes),
+        "fp8_runtime_backend": args.fp8_runtime_backend,
         "shard_count": len(shards),
         "checkpoint_shards": checkpoint_shards,
         "source_tensor_count": len(headers),
