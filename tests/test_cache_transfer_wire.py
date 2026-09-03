@@ -411,6 +411,19 @@ def test_model_runner_batches_receive_states_in_one_result():
         runner.poll_sequence_cache_receives(["ready", "ready"])
 
 
+def test_pending_receive_finish_joins_listener_thread_without_waiting_for_deadline():
+    receive = PendingRankCacheReceive(
+        "127.0.0.1",
+        0,
+        timeout_s=30.0,
+    )
+    receive.start()
+
+    receive.finish(accepted=False)
+
+    assert not receive._thread.is_alive()
+
+
 def test_model_runner_async_receive_nacks_payload_smaller_than_preflight():
     probe = socket.socket()
     probe.bind(("127.0.0.1", 0))
@@ -540,3 +553,27 @@ def test_model_runner_batches_send_states_in_one_result():
 
     with pytest.raises(ValueError, match="unique non-empty"):
         runner.poll_sequence_cache_sends(["ready", "ready"])
+
+
+def test_pending_send_finish_joins_thread_waiting_for_ack():
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    host, port = listener.getsockname()
+    send = PendingRankCacheSend(
+        host,
+        port,
+        make_payload(),
+        timeout_s=30.0,
+    )
+    try:
+        send.start()
+        deadline = monotonic() + 2.0
+        while send.staged_bytes and monotonic() < deadline:
+            sleep(0.001)
+
+        send.finish()
+
+        assert not send._thread.is_alive()
+    finally:
+        listener.close()

@@ -7,7 +7,7 @@ import hmac
 import json
 import socket
 import struct
-from threading import Lock, Thread
+from threading import Lock, Thread, current_thread
 from time import monotonic, sleep
 from collections.abc import Callable, Iterable
 
@@ -326,6 +326,8 @@ class PendingRankCacheReceive:
         self._error: BaseException | None = None
         self._terminal = False
         self._thread = Thread(target=self._run, daemon=True)
+        self._thread_started = False
+        self._receiver._listener.settimeout(min(timeout_s, 0.05))
 
     @property
     def address(self) -> tuple[str, int]:
@@ -333,11 +335,23 @@ class PendingRankCacheReceive:
 
     def start(self) -> None:
         self._thread.start()
+        self._thread_started = True
 
     def _run(self) -> None:
         connection = None
         try:
-            connection, _peer = self._receiver._listener.accept()
+            while True:
+                with self._lock:
+                    if self._terminal:
+                        return
+                try:
+                    connection, _peer = self._receiver._listener.accept()
+                    break
+                except socket.timeout:
+                    if monotonic() >= self._deadline:
+                        raise TimeoutError(
+                            "cache transfer receive deadline expired"
+                        )
             connection.settimeout(self._timeout_s)
             with self._lock:
                 if self._terminal:
@@ -401,8 +415,14 @@ class PendingRankCacheReceive:
             try:
                 connection.sendall(_TRANSFER_ACK if accepted else _TRANSFER_NACK)
             finally:
+                try:
+                    connection.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
                 connection.close()
         self._receiver.close()
+        if self._thread_started and current_thread() is not self._thread:
+            self._thread.join()
 
 
 class PendingRankCacheSend:
@@ -433,9 +453,11 @@ class PendingRankCacheSend:
         self._error: BaseException | None = None
         self._terminal = False
         self._thread = Thread(target=self._run, daemon=True)
+        self._thread_started = False
 
     def start(self) -> None:
         self._thread.start()
+        self._thread_started = True
 
     def _run(self) -> None:
         connection = None
@@ -447,7 +469,10 @@ class PendingRankCacheSend:
                 try:
                     connection = socket.create_connection(
                         (self._host, self._port),
-                        timeout=max(self._deadline - monotonic(), 0.001),
+                        timeout=min(
+                            max(self._deadline - monotonic(), 0.001),
+                            0.05,
+                        ),
                     )
                     break
                 except (ConnectionRefusedError, TimeoutError, socket.timeout):
@@ -537,7 +562,13 @@ class PendingRankCacheSend:
             self._payload = None
             self._staged_bytes = 0
         if connection is not None:
+            try:
+                connection.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
             connection.close()
+        if self._thread_started and current_thread() is not self._thread:
+            self._thread.join()
 
 
 def send_rank_cache_to_endpoint(
