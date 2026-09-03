@@ -397,6 +397,76 @@ def test_default_export_keeps_source_device_and_owns_storage():
     torch.testing.assert_close(payload.kv_blocks, before)
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("transfer_id", 1),
+        ("tensor_parallel_rank", False),
+        ("tensor_parallel_size", True),
+        ("block_size", True),
+        ("cached_tokens", True),
+    ],
+)
+def test_export_rejects_noncanonical_transfer_metadata(field, value):
+    metadata = {
+        "transfer_id": "request-metadata/attempt-1",
+        "tensor_parallel_rank": 0,
+        "tensor_parallel_size": 1,
+        "block_size": 2,
+        "cached_tokens": 2,
+    }
+    metadata[field] = value
+
+    with pytest.raises(ValueError):
+        export_rank_cache(
+            make_float_cache(),
+            None,
+            [0],
+            **metadata,
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("format_version", True),
+        ("transfer_id", 1),
+        ("tensor_parallel_rank", False),
+        ("tensor_parallel_size", True),
+        ("block_size", True),
+        ("cached_tokens", True),
+    ],
+)
+def test_import_rejects_noncanonical_payload_metadata(field, value):
+    source = make_float_cache()
+    payload = export_rank_cache(
+        source,
+        None,
+        [1],
+        transfer_id="request-metadata/attempt-2",
+        tensor_parallel_rank=0,
+        tensor_parallel_size=1,
+        block_size=2,
+        cached_tokens=2,
+    )
+    destination = torch.full_like(source, -1)
+    before = destination.clone()
+
+    with pytest.raises(ValueError):
+        import_rank_cache(
+            replace(payload, **{field: value}),
+            destination,
+            None,
+            [0],
+            transfer_id="request-metadata/attempt-2",
+            tensor_parallel_rank=0,
+            tensor_parallel_size=1,
+            block_size=2,
+        )
+
+    torch.testing.assert_close(destination, before)
+
+
 def test_import_validation_failure_does_not_modify_destination():
     source = make_float_cache()
     payload = export_rank_cache(

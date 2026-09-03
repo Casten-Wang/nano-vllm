@@ -87,6 +87,31 @@ def replace_wire_header_field(frame: bytes, name: str, value) -> bytes:
     )
 
 
+def replace_wire_tensor_field(
+    frame: bytes,
+    tensor_index: int,
+    name: str,
+    value,
+) -> bytes:
+    prefix_end = WIRE_HEADER.size
+    magic, version, header_bytes, body_bytes = WIRE_HEADER.unpack(
+        frame[:prefix_end]
+    )
+    body_start = prefix_end + header_bytes
+    header = json.loads(frame[prefix_end:body_start])
+    header["tensors"][tensor_index][name] = value
+    encoded = json.dumps(
+        header,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return (
+        WIRE_HEADER.pack(magic, version, len(encoded), body_bytes)
+        + encoded
+        + frame[body_start:]
+    )
+
+
 @pytest.mark.parametrize("int8", [False, True])
 def test_socket_wire_round_trip_preserves_rank_payload(int8):
     sender, receiver = socket.socketpair()
@@ -263,6 +288,21 @@ def test_receive_rejects_malformed_header_metadata_before_payload(
     pool = HostStagingBufferPool()
 
     with pytest.raises(ValueError, match="header metadata is invalid"):
+        receive_rank_cache_transfer(source, host_staging_pool=pool)
+
+    assert source.offset < len(source.data)
+    assert pool.storage_stats()["allocation_count"] == 0
+
+
+def test_receive_rejects_boolean_tensor_dimension_before_payload_allocation():
+    sink = BufferSocket()
+    send_rank_cache_transfer(sink, make_payload())
+    shape = [2, 2, 2, 3, True, 2]
+    frame = replace_wire_tensor_field(bytes(sink.data), 0, "shape", shape)
+    source = BufferSocket(frame)
+    pool = HostStagingBufferPool()
+
+    with pytest.raises(ValueError, match="tensor descriptor is invalid"):
         receive_rank_cache_transfer(source, host_staging_pool=pool)
 
     assert source.offset < len(source.data)

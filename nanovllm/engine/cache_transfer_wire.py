@@ -246,8 +246,14 @@ def receive_rank_cache_transfer(
             or dtype is None
             or not isinstance(shape, list)
             or not shape
-            or any(not isinstance(dim, int) or dim <= 0 for dim in shape)
+            or any(
+                not isinstance(dim, int)
+                or isinstance(dim, bool)
+                or dim <= 0
+                for dim in shape
+            )
             or not isinstance(nbytes, int)
+            or isinstance(nbytes, bool)
             or nbytes <= 0
         ):
             raise ValueError("cache transfer wire tensor descriptor is invalid")

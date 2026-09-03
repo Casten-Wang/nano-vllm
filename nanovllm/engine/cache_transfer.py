@@ -12,6 +12,12 @@ import torch
 TRANSFER_FORMAT_VERSION = 1
 
 
+def _is_plain_int(value: object) -> bool:
+    """Reject bools at transfer boundaries even though bool subclasses int."""
+
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
 class HostStagingLease:
     """Exclusive ownership of one contiguous host staging allocation."""
 
@@ -443,14 +449,21 @@ def export_rank_cache(
 
     _validate_cache_layout(kv_cache, kv_scale)
     _validate_state_pairs(recurrent_states, convolution_states)
-    if not transfer_id:
+    if not isinstance(transfer_id, str) or not transfer_id:
         raise ValueError("cache transfer id must not be empty")
-    if not 0 <= tensor_parallel_rank < tensor_parallel_size:
+    if (
+        not _is_plain_int(tensor_parallel_rank)
+        or not _is_plain_int(tensor_parallel_size)
+        or tensor_parallel_size <= 0
+        or not 0 <= tensor_parallel_rank < tensor_parallel_size
+    ):
         raise ValueError("cache transfer tensor-parallel identity is invalid")
-    if block_size <= 0:
+    if not _is_plain_int(block_size) or block_size <= 0:
         raise ValueError("cache transfer block size must be positive")
+    if not _is_plain_int(cached_tokens) or cached_tokens <= 0:
+        raise ValueError("cache transfer cached token count must be a positive integer")
     expected_blocks = (cached_tokens + block_size - 1) // block_size
-    if cached_tokens <= 0 or len(block_ids) != expected_blocks:
+    if len(block_ids) != expected_blocks:
         raise ValueError(
             "cache transfer block count does not match cached token count"
         )
@@ -571,22 +584,43 @@ def import_rank_cache(
         payload.recurrent_states,
         payload.convolution_states,
     )
-    if not 0 <= tensor_parallel_rank < tensor_parallel_size:
+    if (
+        not _is_plain_int(tensor_parallel_rank)
+        or not _is_plain_int(tensor_parallel_size)
+        or tensor_parallel_size <= 0
+        or not 0 <= tensor_parallel_rank < tensor_parallel_size
+    ):
         raise ValueError("cache transfer tensor-parallel identity is invalid")
-    if block_size <= 0:
+    if not _is_plain_int(block_size) or block_size <= 0:
         raise ValueError("cache transfer block size must be positive")
-    if payload.format_version != TRANSFER_FORMAT_VERSION:
+    if (
+        not _is_plain_int(payload.format_version)
+        or payload.format_version != TRANSFER_FORMAT_VERSION
+    ):
         raise ValueError("unsupported cache transfer format version")
-    if payload.transfer_id != transfer_id:
+    if (
+        not isinstance(payload.transfer_id, str)
+        or not payload.transfer_id
+        or not isinstance(transfer_id, str)
+        or not transfer_id
+        or payload.transfer_id != transfer_id
+    ):
         raise ValueError("cache transfer id does not match")
     if (
-        payload.tensor_parallel_rank != tensor_parallel_rank
+        not _is_plain_int(payload.tensor_parallel_rank)
+        or not _is_plain_int(payload.tensor_parallel_size)
+        or payload.tensor_parallel_size <= 0
+        or payload.tensor_parallel_rank != tensor_parallel_rank
         or payload.tensor_parallel_size != tensor_parallel_size
     ):
         raise ValueError("cache transfer tensor-parallel identity does not match")
-    if payload.block_size != block_size:
+    if (
+        not _is_plain_int(payload.block_size)
+        or payload.block_size <= 0
+        or payload.block_size != block_size
+    ):
         raise ValueError("source and destination KV block sizes differ")
-    if not isinstance(payload.cached_tokens, int):
+    if not _is_plain_int(payload.cached_tokens):
         raise ValueError("cache transfer cached token count must be an integer")
     expected_blocks = (
         payload.cached_tokens + payload.block_size - 1
