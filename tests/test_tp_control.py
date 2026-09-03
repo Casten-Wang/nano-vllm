@@ -623,6 +623,21 @@ class HybridStateContextTest(unittest.TestCase):
 
         self.assertIsNone(reset_slots)
 
+    def test_contiguous_state_reset_span_uses_only_new_sequences(self):
+        runner = self.make_hybrid_runner()
+        seqs = [
+            SimpleNamespace(state_slot=2, num_cached_tokens=3),
+            SimpleNamespace(state_slot=5, num_cached_tokens=0),
+            SimpleNamespace(state_slot=6, num_cached_tokens=0),
+        ]
+
+        self.assertEqual(runner.contiguous_state_reset_span(seqs), (5, 2))
+        seqs[-1].state_slot = 8
+        self.assertIsNone(runner.contiguous_state_reset_span(seqs))
+        seqs[1].num_cached_tokens = 1
+        seqs[2].num_cached_tokens = 1
+        self.assertIsNone(runner.contiguous_state_reset_span(seqs))
+
     def test_mixed_context_orders_decode_before_prefill_slots(self):
         runner = self.make_hybrid_runner()
         runner.block_size = 256
@@ -685,6 +700,7 @@ class HybridStateContextTest(unittest.TestCase):
             state_metadata_calls.append(("reset", seqs))
             or FakeTensor([3])
         )
+        runner.contiguous_state_reset_span = lambda seqs: (3, 1)
         captured = {}
         original = model_runner_module.set_context
         model_runner_module.set_context = lambda *args, **kwargs: captured.update(kwargs)
@@ -699,6 +715,7 @@ class HybridStateContextTest(unittest.TestCase):
             [3],
         )
         self.assertEqual(captured["state_token_ranges"], ((2, 4),))
+        self.assertEqual(captured["state_reset_span"], (3, 1))
         self.assertEqual(
             metadata_options,
             [

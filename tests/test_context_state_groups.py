@@ -138,8 +138,10 @@ def test_set_context_prefers_precomputed_reset_slots():
             state_slots=torch.tensor([3, 7], dtype=torch.int64),
             state_reset_mask=torch.tensor([True, False]),
             state_reset_slots=explicit,
+            state_reset_span=(7, 1),
         )
 
         assert get_context().state_reset_slots is explicit
+        assert get_context().state_reset_span == (7, 1)
     finally:
         reset_context()

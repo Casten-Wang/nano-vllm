@@ -1835,6 +1835,27 @@ class ModelRunner:
             pin_memory=True,
         ).cuda(non_blocking=True)
 
+    def contiguous_state_reset_span(
+        self,
+        seqs: list[Sequence],
+    ) -> tuple[int, int] | None:
+        """Describe reset slots on the host without inspecting device tensors."""
+
+        model_spec = self.config.model_spec
+        if model_spec is None or not model_spec.is_hybrid:
+            return None
+        slots = [
+            warmup_slot if seq.state_slot is None else seq.state_slot
+            for warmup_slot, seq in enumerate(seqs)
+            if seq.num_cached_tokens == 0
+        ]
+        if not slots:
+            return None
+        start = slots[0]
+        if slots == list(range(start, start + len(slots))):
+            return start, len(slots)
+        return None
+
     def prepare_prefill(self, seqs: list[Sequence]):
         input_ids = []
         positions = []
@@ -1918,6 +1939,7 @@ class ModelRunner:
                 seqs,
                 reuse_decode_buffer=True,
             ),
+            state_reset_span=self.contiguous_state_reset_span(seqs),
             state_token_ranges=state_token_ranges,
             state_prefill_spans=self.contiguous_prefill_state_spans(seqs),
             logits_indices=logits_indices,
@@ -2101,6 +2123,7 @@ class ModelRunner:
                 seqs,
                 reuse_decode_buffer=True,
             ),
+            state_reset_span=self.contiguous_state_reset_span(seqs),
             state_token_ranges=(),
             decode_state_span=self.contiguous_state_span(seqs),
         )
@@ -2169,6 +2192,7 @@ class ModelRunner:
                 mixed_seqs,
                 reuse_decode_buffer=True,
             ),
+            state_reset_span=self.contiguous_state_reset_span(mixed_seqs),
             state_token_ranges=tuple(
                 (
                     len(decode_seqs) + start,

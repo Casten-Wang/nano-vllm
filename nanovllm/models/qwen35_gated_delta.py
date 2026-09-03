@@ -841,6 +841,12 @@ class Qwen35RecurrentStatePool:
         self.recurrent[:, slots] = 0
         self.convolution[:, slots] = 0
 
+    def reset_contiguous(self, start: int, count: int) -> None:
+        if start < 0 or count <= 0 or start + count > self.recurrent.shape[1]:
+            raise ValueError("contiguous reset span is out of bounds")
+        self.recurrent.narrow(1, start, count).zero_()
+        self.convolution.narrow(1, start, count).zero_()
+
 
 class Qwen35GatedRMSNorm(nn.Module):
     def __init__(self, hidden_size: int, eps: float = 1e-6) -> None:
@@ -1324,7 +1330,11 @@ class Qwen35GatedDeltaNet(nn.Module):
         if reset_slots is None and context.state_reset_mask is not None:
             reset_slots = context.state_slots[context.state_reset_mask]
         if reset_slots is not None and reset_slots.numel():
-            self.state_pool.reset(reset_slots)
+            reset_span = getattr(context, "state_reset_span", None)
+            if reset_span is not None:
+                self.state_pool.reset_contiguous(*reset_span)
+            else:
+                self.state_pool.reset(reset_slots)
 
         mixed_qkv = self.in_proj_qkv(hidden_states)
         z, beta, a = self.in_proj_zba(hidden_states).split(

@@ -118,6 +118,7 @@ class Context:
     prefill_dequant_block_tables: torch.Tensor | None = None
     state_reset_mask: torch.Tensor | None = None
     state_reset_slots: torch.Tensor | None = None
+    state_reset_span: tuple[int, int] | None = None
     state_token_ranges: tuple[tuple[int, int], ...] = ()
     state_prefill_groups: tuple[StatePrefillGroup, ...] = ()
     decode_state_span: tuple[int, int] | None = None
@@ -158,6 +159,7 @@ def set_context(
     state_slots=None,
     state_reset_mask=None,
     state_reset_slots=None,
+    state_reset_span=None,
     state_token_ranges=(),
     state_prefill_spans=(),
     decode_state_span=None,
@@ -207,6 +209,7 @@ def set_context(
         prefill_dequant_block_tables=prefill_dequant_block_tables,
         state_reset_mask=state_reset_mask,
         state_reset_slots=state_reset_slots,
+        state_reset_span=state_reset_span,
         state_token_ranges=state_token_ranges,
         state_prefill_groups=state_prefill_groups,
         decode_state_span=decode_state_span,

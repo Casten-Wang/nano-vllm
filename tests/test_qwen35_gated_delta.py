@@ -1012,12 +1012,28 @@ def test_state_pool_contiguous_get_returns_writable_cache_views():
     assert torch.all(pool.convolution[0, 1:3] == 2)
 
 
+def test_state_pool_contiguous_reset_clears_only_requested_span():
+    pool = Qwen35RecurrentStatePool(2, 4, 2, 3, 4, 5, 2, device="cpu")
+    pool.recurrent.fill_(1)
+    pool.convolution.fill_(2)
+
+    pool.reset_contiguous(1, 2)
+
+    assert torch.count_nonzero(pool.recurrent[:, 1:3]) == 0
+    assert torch.count_nonzero(pool.convolution[:, 1:3]) == 0
+    assert torch.all(pool.recurrent[:, (0, 3)] == 1)
+    assert torch.all(pool.convolution[:, (0, 3)] == 2)
+
+
 @pytest.mark.parametrize("start,count", [(-1, 1), (0, 0), (3, 2)])
 def test_state_pool_rejects_invalid_contiguous_spans(start, count):
     pool = Qwen35RecurrentStatePool(1, 4, 2, 3, 4, 5, 2, device="cpu")
 
     with pytest.raises(ValueError, match="contiguous state span is out of bounds"):
         pool.get_contiguous(0, start, count)
+
+    with pytest.raises(ValueError, match="contiguous reset span is out of bounds"):
+        pool.reset_contiguous(start, count)
 
 
 def test_state_pool_can_store_recurrent_state_in_model_dtype():
@@ -1889,6 +1905,38 @@ def test_gated_delta_reuses_precomputed_reset_slots():
 
     assert reset.call_count == 1
     assert reset.call_args.args[0] is context.state_reset_slots
+
+
+def test_gated_delta_uses_contiguous_reset_span_without_indexed_reset():
+    layer = make_layer()
+    layer.allocate_state_cache(3, "cpu")
+    layer.state_pool.recurrent.fill_(1)
+    layer.state_pool.convolution.fill_(2)
+    context = SimpleNamespace(
+        is_mixed=False,
+        is_prefill=False,
+        state_slots=torch.tensor([1], dtype=torch.int64),
+        state_reset_mask=None,
+        state_reset_slots=torch.tensor([1], dtype=torch.int64),
+        state_reset_span=(1, 1),
+        state_token_ranges=(),
+    )
+    context_module = types.ModuleType("nanovllm.utils.context")
+    context_module.get_context = lambda: context
+
+    with (
+        patch.dict(sys.modules, {"nanovllm.utils.context": context_module}),
+        patch.object(layer.state_pool, "reset") as reset,
+        patch.object(
+            layer.state_pool,
+            "reset_contiguous",
+            wraps=layer.state_pool.reset_contiguous,
+        ) as reset_contiguous,
+    ):
+        layer(torch.randn(1, 4))
+
+    reset.assert_not_called()
+    reset_contiguous.assert_called_once_with(1, 1)
 
 
 def test_gated_delta_reuses_beta_projection_during_inference():
