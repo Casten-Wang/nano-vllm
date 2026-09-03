@@ -522,14 +522,15 @@ class Qwen35Experts(nn.Module):
                     self._resident_weight("gate_up", expert_id, hidden_states.dtype)
                     if self.resident_fp8 else self.gate_up_proj[expert_id]
                 )
+                gate_up = F.linear(hidden_states, gate_up_weight)
+                gate, up = gate_up.chunk(2, dim=-1)
+                intermediate = F.silu(gate) * up
                 down_weight = (
                     self._resident_weight("down", expert_id, hidden_states.dtype)
                     if self.resident_fp8 else self.down_proj[expert_id]
                 )
-                gate_up = F.linear(hidden_states, gate_up_weight)
-                gate, up = gate_up.chunk(2, dim=-1)
                 expert_output = F.linear(
-                    F.silu(gate) * up,
+                    intermediate,
                     down_weight,
                 )
                 output.add_(
@@ -574,14 +575,15 @@ class Qwen35Experts(nn.Module):
                 self._resident_weight("gate_up", expert_id, hidden_states.dtype)
                 if self.resident_fp8 else self.gate_up_proj[expert_id]
             )
+            gate_up = F.linear(expert_input, gate_up_weight)
+            gate, up = gate_up.chunk(2, dim=-1)
+            intermediate = F.silu(gate) * up
             down_weight = (
                 self._resident_weight("down", expert_id, hidden_states.dtype)
                 if self.resident_fp8 else self.down_proj[expert_id]
             )
-            gate_up = F.linear(expert_input, gate_up_weight)
-            gate, up = gate_up.chunk(2, dim=-1)
             expert_output = F.linear(
-                F.silu(gate) * up,
+                intermediate,
                 down_weight,
             )
             expert_output = weight_expert_output(

@@ -256,7 +256,7 @@ def test_resident_fp8_experts_keep_quantized_storage_and_match_reference():
         )
     gate = torch.eye(4, dtype=torch.float8_e4m3fn)
     up = (torch.eye(4) * 2).to(torch.float8_e4m3fn)
-    down = torch.eye(4, dtype=torch.float8_e4m3fn)
+    down = (torch.eye(4) * 3).to(torch.float8_e4m3fn)
     scale = torch.ones(2, 2)
     experts._load_gate_up_fp8_slice(
         experts.gate_up_proj, gate, scale, (0, "gate"), (2, 2)
@@ -275,7 +275,7 @@ def test_resident_fp8_experts_keep_quantized_storage_and_match_reference():
         torch.zeros(1, 1, dtype=torch.long),
         torch.ones(1, 1),
     )
-    expected = torch.nn.functional.silu(hidden) * (2.0 * hidden)
+    expected = torch.nn.functional.silu(hidden) * (6.0 * hidden)
 
     assert experts.gate_up_proj.dtype == torch.float8_e4m3fn
     assert experts.down_proj.dtype == torch.float8_e4m3fn
