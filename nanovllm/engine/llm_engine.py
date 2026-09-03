@@ -199,6 +199,7 @@ class LLMEngine:
         self._remote_prefill_send_started_at: dict[str, float] = {}
         self._remote_prefill_send_staged_bytes: dict[str, int] = {}
         self._remote_prefill_send_errors: dict[str, str] = {}
+        self._heterogeneous_remote_prefill_send_ids: set[str] = set()
         atexit.register(self.exit)
 
     def exit(self):
@@ -1197,9 +1198,8 @@ class LLMEngine:
     ) -> dict[str, object]:
         """Plan heterogeneous-TP capacity without reserving or moving state.
 
-        This is a control-plane preflight for placement and admission.  It
-        does not make the current remote-prefill transport capable of moving
-        cache state between different tensor-parallel sizes.
+        This is the read-only control-plane counterpart to the heterogeneous
+        send and receive lifecycle used for placement and admission.
         """
 
         num_blocks = self._remote_prefill_block_count(num_prompt_tokens)
@@ -1327,19 +1327,129 @@ class LLMEngine:
         self.metrics.record_remote_prefill_send_started(staged_bytes)
         return seq.completion_token_ids[0]
 
+    def start_heterogeneous_remote_prefill_send(
+        self,
+        seq_id: int,
+        transfer_id: str,
+        destination_tp_size: int,
+        destination_endpoints: list[tuple[str, int]],
+        *,
+        timeout_s: float = 30.0,
+    ) -> int:
+        """Stage routed source slices and start every destination peer."""
+
+        seq = next(
+            (
+                candidate
+                for candidate in self.scheduler.running
+                if candidate.seq_id == seq_id
+            ),
+            None,
+        )
+        if seq is None:
+            raise ValueError("remote prefill source sequence is not running")
+        started_at = getattr(self, "_remote_prefill_send_started_at", None)
+        if started_at is None:
+            started_at = self._remote_prefill_send_started_at = {}
+        if transfer_id in started_at:
+            raise ValueError("cache send id is already active")
+        self._ensure_remote_prefill_transfer_capacity(direction="send")
+        plan = self.model_runner.build_heterogeneous_cache_transfer_plan_for_blocks(
+            len(seq.block_table),
+            destination_tp_size,
+        )
+        estimated_by_rank = dict(enumerate(plan.profile.source_bytes))
+        staged_bytes = sum(estimated_by_rank.values())
+        self._ensure_remote_prefill_staging_capacity(staged_bytes)
+        self.scheduler.reserve_remote_prefill_source(seq, transfer_id)
+        try:
+            prepared = self.model_runner.call_rank_results(
+                "prepare_heterogeneous_sequence_cache_send",
+                seq,
+                transfer_id,
+                destination_tp_size,
+            )
+            _validate_rank_results(
+                prepared,
+                self.config.tensor_parallel_size,
+                "started",
+                expected_value=1,
+            )
+            prepared_by_rank = _validate_rank_results(
+                prepared,
+                self.config.tensor_parallel_size,
+                "staged_bytes",
+            )
+            if prepared_by_rank != estimated_by_rank:
+                raise RuntimeError(
+                    "heterogeneous cache send staged bytes differ from the "
+                    "preflight estimate"
+                )
+            started = self.model_runner.call_rank_results(
+                "start_heterogeneous_sequence_cache_send",
+                transfer_id,
+                destination_endpoints,
+                timeout_s,
+            )
+            _validate_rank_results(
+                started,
+                self.config.tensor_parallel_size,
+                "started",
+                expected_value=1,
+            )
+            started_by_rank = _validate_rank_results(
+                started,
+                self.config.tensor_parallel_size,
+                "staged_bytes",
+            )
+            if started_by_rank != estimated_by_rank:
+                raise RuntimeError(
+                    "heterogeneous cache send retained bytes differ from the "
+                    "preflight estimate"
+                )
+        except BaseException:
+            try:
+                self.model_runner.call_rank_results(
+                    "abort_heterogeneous_sequence_cache_send",
+                    transfer_id,
+                )
+            except BaseException:
+                pass
+            if transfer_id in self.scheduler.remote_prefill_sources:
+                self.scheduler.abort_remote_prefill_source(transfer_id)
+            raise
+        started_at[transfer_id] = perf_counter()
+        self._remote_prefill_send_staged_bytes[transfer_id] = staged_bytes
+        self._remote_prefill_send_errors.pop(transfer_id, None)
+        self._heterogeneous_remote_prefill_send_ids.add(transfer_id)
+        self.metrics.record_remote_prefill_send_started(staged_bytes)
+        return seq.completion_token_ids[0]
+
     def _abort_remote_prefill_send(
         self,
         transfer_id: str,
         *,
         outcome: str,
     ) -> Sequence | None:
+        heterogeneous = transfer_id in getattr(
+            self,
+            "_heterogeneous_remote_prefill_send_ids",
+            set(),
+        )
         try:
             self.model_runner.call_rank_results(
-                "abort_sequence_cache_send",
+                (
+                    "abort_heterogeneous_sequence_cache_send"
+                    if heterogeneous
+                    else "abort_sequence_cache_send"
+                ),
                 transfer_id,
             )
         except BaseException:
             pass
+        getattr(self, "_heterogeneous_remote_prefill_send_ids", set()).discard(
+            transfer_id
+        )
         started_at = getattr(self, "_remote_prefill_send_started_at", {}).pop(
             transfer_id,
             None,
@@ -1425,8 +1535,17 @@ class LLMEngine:
                 raise RuntimeError("; ".join(failures))
             if any(state == "sending" for state in states.values()):
                 return None
+            heterogeneous = transfer_id in getattr(
+                self,
+                "_heterogeneous_remote_prefill_send_ids",
+                set(),
+            )
             finished = self.model_runner.call_rank_results(
-                "finish_sequence_cache_send",
+                (
+                    "finish_heterogeneous_sequence_cache_send"
+                    if heterogeneous
+                    else "finish_sequence_cache_send"
+                ),
                 transfer_id,
             )
             sent_by_rank = _validate_rank_results(
@@ -1438,6 +1557,9 @@ class LLMEngine:
             self._abort_remote_prefill_send(transfer_id, outcome="failed")
             raise
         seq = self.scheduler.commit_remote_prefill_source(transfer_id)
+        getattr(self, "_heterogeneous_remote_prefill_send_ids", set()).discard(
+            transfer_id
+        )
         started_at = self._remote_prefill_send_started_at.pop(transfer_id)
         staged_bytes = self._remote_prefill_send_staged_bytes.pop(transfer_id)
         self.metrics.record_remote_prefill_send_finished(
@@ -1455,8 +1577,17 @@ class LLMEngine:
             raise ValueError("cache send id is not active")
         self.metrics.record_remote_prefill_send_poll(1)
         try:
+            heterogeneous = transfer_id in getattr(
+                self,
+                "_heterogeneous_remote_prefill_send_ids",
+                set(),
+            )
             rank_results = self.model_runner.call_rank_results(
-                "poll_sequence_cache_send",
+                (
+                    "poll_heterogeneous_sequence_cache_send"
+                    if heterogeneous
+                    else "poll_sequence_cache_send"
+                ),
                 transfer_id,
             )
             return self._advance_remote_prefill_send(transfer_id, rank_results)
@@ -1471,28 +1602,55 @@ class LLMEngine:
         if not transfer_ids:
             return
         self.metrics.record_remote_prefill_send_poll(len(transfer_ids))
-        try:
-            rank_results = self.model_runner.call_rank_results(
-                "poll_sequence_cache_sends",
-                list(transfer_ids),
-            )
-            by_transfer = _validate_rank_send_polls(
-                rank_results,
-                self.config.tensor_parallel_size,
-                transfer_ids,
-            )
-        except Exception as exc:
-            for transfer_id in transfer_ids:
-                self._abort_remote_prefill_send(transfer_id, outcome="failed")
-                self._remote_prefill_send_errors[transfer_id] = str(exc)
-            return
-        for transfer_id in transfer_ids:
+        heterogeneous_ids = frozenset(
+            getattr(self, "_heterogeneous_remote_prefill_send_ids", set())
+        )
+        regular_ids = tuple(
+            transfer_id
+            for transfer_id in transfer_ids
+            if transfer_id not in heterogeneous_ids
+        )
+        by_transfer = {}
+        if regular_ids:
             try:
-                self._advance_remote_prefill_send(
-                    transfer_id,
-                    by_transfer[transfer_id],
+                rank_results = self.model_runner.call_rank_results(
+                    "poll_sequence_cache_sends",
+                    list(regular_ids),
+                )
+                by_transfer.update(
+                    _validate_rank_send_polls(
+                        rank_results,
+                        self.config.tensor_parallel_size,
+                        regular_ids,
+                    )
                 )
             except Exception as exc:
+                for transfer_id in regular_ids:
+                    self._abort_remote_prefill_send(
+                        transfer_id,
+                        outcome="failed",
+                    )
+                    self._remote_prefill_send_errors[transfer_id] = str(exc)
+        for transfer_id in transfer_ids:
+            if transfer_id not in getattr(self, "_remote_prefill_send_started_at", {}):
+                continue
+            try:
+                rank_results = by_transfer.get(transfer_id)
+                if transfer_id in heterogeneous_ids:
+                    rank_results = self.model_runner.call_rank_results(
+                        "poll_heterogeneous_sequence_cache_send",
+                        transfer_id,
+                    )
+                self._advance_remote_prefill_send(
+                    transfer_id,
+                    rank_results,
+                )
+            except Exception as exc:
+                if transfer_id in getattr(self, "_remote_prefill_send_started_at", {}):
+                    self._abort_remote_prefill_send(
+                        transfer_id,
+                        outcome="failed",
+                    )
                 self._remote_prefill_send_errors[transfer_id] = str(exc)
 
     def step(self):
