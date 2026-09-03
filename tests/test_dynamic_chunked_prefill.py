@@ -1,4 +1,5 @@
 import importlib.util
+import random
 import sys
 import types
 from dataclasses import dataclass
@@ -1156,6 +1157,53 @@ def test_mixed_postprocess_rejects_sample_count_before_mutating_sequences():
             (seq.num_tokens, seq.num_cached_tokens, seq.last_token)
             for seq in result.seqs
         ] == before
+
+
+def test_randomized_dynamic_scheduler_preserves_hard_capacity_invariants():
+    for seed in range(50):
+        rng = random.Random(seed)
+        max_seqs = rng.randint(1, 6)
+        max_tokens = rng.randint(1, 12)
+        scheduler = make_scheduler(
+            max_tokens=max_tokens,
+            max_seqs=max_seqs,
+            block_size=4,
+            num_blocks=256,
+            starvation_token_budget=rng.randint(1, max_tokens),
+            hybrid=True,
+        )
+        scheduler.prefill_starvation_threshold = rng.randint(0, 4)
+        requests = [
+            Sequence([request_id + 1] * rng.randint(1, 24))
+            for request_id in range(rng.randint(2, 16))
+        ]
+        for seq in requests:
+            scheduler.add(seq)
+
+        for _step in range(2_000):
+            if scheduler.is_finished():
+                break
+            result = scheduler.schedule()
+            assert isinstance(result, ScheduleResult)
+            assert len(result.seqs) <= max_seqs
+            assert (
+                result.num_prefill_tokens + result.num_decode_tokens
+                <= max_tokens
+            )
+            assert len({seq.seq_id for seq in result.seqs}) == len(result.seqs)
+            active_waiting = sum(
+                seq.state_slot is not None or bool(seq.block_table)
+                for seq in scheduler.waiting
+            )
+            assert len(scheduler.running) + active_waiting <= max_seqs
+            assert scheduler.state_manager.num_used_slots <= max_seqs
+            scheduler.postprocess_mixed(result, [1] * len(result.seqs))
+        else:
+            raise AssertionError(f"scheduler did not drain for seed {seed}")
+
+        assert scheduler.is_finished()
+        assert scheduler.block_manager.num_used_blocks == 0
+        assert scheduler.state_manager.num_used_slots == 0
 
 
 if __name__ == "__main__":
