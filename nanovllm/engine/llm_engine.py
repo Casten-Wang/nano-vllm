@@ -1358,7 +1358,7 @@ class LLMEngine:
             len(seq.block_table),
             destination_tp_size,
         )
-        estimated_by_rank = dict(enumerate(plan.profile.source_bytes))
+        estimated_by_rank = dict(enumerate(plan.profile.source_staging_bytes))
         staged_bytes = sum(estimated_by_rank.values())
         self._ensure_remote_prefill_staging_capacity(staged_bytes)
         self.scheduler.reserve_remote_prefill_source(seq, transfer_id)

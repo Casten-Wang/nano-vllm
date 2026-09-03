@@ -216,8 +216,11 @@ def make_engine(*, tensor_parallel_size=1):
             return_value=SimpleNamespace(
                 profile=SimpleNamespace(
                     source_bytes=tuple(
+                        200 + 2 * rank for rank in range(tensor_parallel_size)
+                    ),
+                    source_staging_bytes=tuple(
                         100 + rank for rank in range(tensor_parallel_size)
-                    )
+                    ),
                 )
             )
         ),
@@ -906,6 +909,7 @@ def test_heterogeneous_send_commits_only_after_every_source_rank_acknowledges():
         [("127.0.0.1", 20001 + rank) for rank in range(4)],
     ) == 9
     assert seq.status is SequenceStatus.TRANSFERRING
+    assert engine.remote_prefill_capacity_snapshot()["staging_bytes_active"] == 201
     assert engine.poll_remote_prefill_send("request/attempt-1") is None
     assert seq.block_table
 
@@ -926,6 +930,27 @@ def test_heterogeneous_send_commits_only_after_every_source_rank_acknowledges():
         "poll_heterogeneous_sequence_cache_send",
         "finish_heterogeneous_sequence_cache_send",
     ]
+
+
+def test_heterogeneous_send_capacity_counts_shared_staging_not_fanout_bytes():
+    engine = make_engine(tensor_parallel_size=2)
+    engine.config.max_remote_prefill_staging_bytes = 300
+    seq = _prepare_remote_prefill_source(engine, 1)
+
+    engine.start_heterogeneous_remote_prefill_send(
+        seq.seq_id,
+        "request/attempt-1",
+        4,
+        [("127.0.0.1", 20001 + rank) for rank in range(4)],
+    )
+
+    profile = (
+        engine.model_runner.build_heterogeneous_cache_transfer_plan_for_blocks
+        .return_value.profile
+    )
+    assert sum(profile.source_staging_bytes) == 201
+    assert sum(profile.source_bytes) == 402
+    assert engine.remote_prefill_capacity_snapshot()["staging_bytes_active"] == 201
 
 
 def test_heterogeneous_send_failure_restores_source_and_releases_capacity():
