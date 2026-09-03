@@ -19,7 +19,11 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from nanovllm.engine.cache_transfer import RankCacheTransfer, export_rank_cache
+from nanovllm.engine.cache_transfer import (
+    HostStagingBufferPool,
+    RankCacheTransfer,
+    export_rank_cache,
+)
 
 
 BLOCK_SIZE = 256
@@ -175,6 +179,7 @@ def _export(
     profile: dict,
     *,
     direct_host: bool,
+    host_staging_pool: HostStagingBufferPool | None = None,
 ) -> RankCacheTransfer:
     kv_cache, kv_scale, recurrent, convolution = source
     payload = export_rank_cache(
@@ -189,13 +194,28 @@ def _export(
         recurrent_states=recurrent,
         convolution_states=convolution,
         to_host=direct_host,
+        host_staging_pool=host_staging_pool,
     )
     return payload if direct_host else _host_payload(payload)
 
 
-def _measure(source, profile: dict, *, direct_host: bool, warmup: int, repeats: int) -> dict:
+def _measure(
+    source,
+    profile: dict,
+    *,
+    direct_host: bool,
+    warmup: int,
+    repeats: int,
+    host_staging_pool: HostStagingBufferPool | None = None,
+) -> dict:
     for _ in range(warmup):
-        _export(source, profile, direct_host=direct_host)
+        payload = _export(
+            source,
+            profile,
+            direct_host=direct_host,
+            host_staging_pool=host_staging_pool,
+        )
+        payload.release_host_staging()
     torch.cuda.synchronize()
     samples = []
     peaks = []
@@ -206,17 +226,37 @@ def _measure(source, profile: dict, *, direct_host: bool, warmup: int, repeats: 
         baseline = torch.cuda.memory_allocated()
         torch.cuda.reset_peak_memory_stats()
         start = perf_counter_ns()
-        payload = _export(source, profile, direct_host=direct_host)
+        payload = _export(
+            source,
+            profile,
+            direct_host=direct_host,
+            host_staging_pool=host_staging_pool,
+        )
         torch.cuda.synchronize()
         samples.append((perf_counter_ns() - start) / 1e6)
         peaks.append(torch.cuda.max_memory_allocated() - baseline)
+        payload.release_host_staging()
         del payload
-    return {
+    result = {
         "latency_ms_samples": samples,
         "latency_ms_p50": median(samples),
         "peak_extra_device_bytes_samples": peaks,
         "peak_extra_device_bytes_max": max(peaks),
     }
+    if host_staging_pool is not None:
+        stats = host_staging_pool.storage_stats()
+        expected_reuse = warmup + repeats - 1
+        result["host_staging_pool"] = {
+            **stats,
+            "expected_reuse_count": expected_reuse,
+            "valid": (
+                stats["allocation_count"] == 1
+                and stats["reuse_count"] == expected_reuse
+                and stats["transient_allocation_count"] == 0
+                and stats["leased"] == 0
+            ),
+        }
+    return result
 
 
 def _assert_payload_equal(
@@ -277,9 +317,17 @@ def main() -> None:
     reference = _measure(
         source, profile, direct_host=False, warmup=args.warmup, repeats=args.repeats
     )
+    candidate_pool = HostStagingBufferPool()
     candidate = _measure(
-        source, profile, direct_host=True, warmup=args.warmup, repeats=args.repeats
+        source,
+        profile,
+        direct_host=True,
+        warmup=args.warmup,
+        repeats=args.repeats,
+        host_staging_pool=candidate_pool,
     )
+    if not candidate["host_staging_pool"]["valid"]:
+        raise RuntimeError("direct-host staging pool was not reused as expected")
     reference["host_layout"] = reference_layout
     candidate["host_layout"] = candidate_layout
     result = {

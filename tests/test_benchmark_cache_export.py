@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 import torch
 
+from nanovllm.engine.cache_transfer import HostStagingBufferPool
 from scripts.benchmark_cache_export import (
     _export,
     _payload_host_layout,
@@ -74,6 +75,38 @@ def test_profile_builds_exact_qwen35_cpu_source(tmp_path):
         "all_cpu": True,
         "all_pinned": False,
     }
+
+
+def test_direct_host_export_reuses_a_released_pool_buffer(tmp_path):
+    path = tmp_path / "preflight.json"
+    write_preflight(path)
+    profile = _profile(path, 4, "int8", "model")
+    source = make_source(
+        profile,
+        kv_dtype="int8",
+        state_dtype="model",
+        device=torch.device("cpu"),
+    )
+    pool = HostStagingBufferPool()
+
+    first = _export(
+        source,
+        profile,
+        direct_host=True,
+        host_staging_pool=pool,
+    )
+    first_ptr = first.kv_blocks.untyped_storage().data_ptr()
+    first.release_host_staging()
+    second = _export(
+        source,
+        profile,
+        direct_host=True,
+        host_staging_pool=pool,
+    )
+
+    assert second.kv_blocks.untyped_storage().data_ptr() == first_ptr
+    assert pool.storage_stats()["reuse_count"] == 1
+    second.release_host_staging()
 
 
 def test_profile_builds_exact_int8_scale_and_model_state_source(tmp_path):

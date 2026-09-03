@@ -2093,7 +2093,29 @@ def summarize_pd_export(
     reference = result.get("reference_gpu_gather_then_host_copy", {})
     candidate = result.get("candidate_direct_host_staging", {})
     candidate_layout = candidate.get("host_layout", {})
+    staging_pool = candidate.get("host_staging_pool", {})
     repeats = profile.get("repeats")
+    warmup = profile.get("warmup")
+    expected_reuse_count = (
+        warmup + repeats - 1
+        if isinstance(warmup, int)
+        and not isinstance(warmup, bool)
+        and warmup >= 0
+        and isinstance(repeats, int)
+        and not isinstance(repeats, bool)
+        and repeats > 0
+        else None
+    )
+    staging_pool_valid = (
+        staging_pool.get("valid") is True
+        and staging_pool.get("allocation_count") == 1
+        and staging_pool.get("reuse_count") == expected_reuse_count
+        and staging_pool.get("expected_reuse_count") == expected_reuse_count
+        and staging_pool.get("transient_allocation_count") == 0
+        and staging_pool.get("leased") == 0
+        and isinstance(staging_pool.get("storage_bytes"), int)
+        and staging_pool["storage_bytes"] >= expected_components["total"]
+    )
 
     def measurements_valid(item: dict) -> bool:
         latency = item.get("latency_ms_samples", [])
@@ -2137,6 +2159,7 @@ def summarize_pd_export(
         and candidate_layout.get("storage_count") == 1
         and candidate_layout.get("all_cpu") is True
         and candidate_layout.get("all_pinned") is True
+        and staging_pool_valid
         and candidate["peak_extra_device_bytes_max"]
         < reference["peak_extra_device_bytes_max"]
     )
@@ -2146,6 +2169,10 @@ def summarize_pd_export(
         "reference": reference,
         "candidate": candidate,
         "candidate_host_layout": candidate_layout,
+        "host_staging_pool": {
+            **staging_pool,
+            "valid": staging_pool_valid,
+        },
         "avoided_peak_device_bytes": (
             reference.get("peak_extra_device_bytes_max", 0)
             - candidate.get("peak_extra_device_bytes_max", 0)

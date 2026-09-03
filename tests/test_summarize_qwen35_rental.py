@@ -1769,6 +1769,15 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
                         "all_cpu": True,
                         "all_pinned": True,
                     },
+                    "host_staging_pool": {
+                        "storage_bytes": components["total"],
+                        "allocation_count": 1,
+                        "reuse_count": 11,
+                        "expected_reuse_count": 11,
+                        "transient_allocation_count": 0,
+                        "leased": 0,
+                        "valid": True,
+                    },
                 },
                 "limitations": ["synthetic export benchmark"],
             },
@@ -1810,6 +1819,9 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     assert report["pd_export"]["by_tp"]["tp4"]["int8-model"][
         "candidate_host_layout"
     ]["storage_count"] == 1
+    assert report["pd_export"]["by_tp"]["tp4"]["int8-model"][
+        "host_staging_pool"
+    ]["valid"]
     assert report["pd_transfer"]["by_tp"]["tp4"]["int8-model"]["valid"]
     install = report["pd_transfer"]["by_tp"]["tp4"]["int8-model"][
         "cuda_install"
@@ -1845,6 +1857,22 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     invalid_export_report = MODULE.summarize(tmp_path, run_id)
     assert not invalid_export_report["evidence"]["pd_export_memory_evidence"]
     assert not invalid_export_report["valid"]
+    export_result["candidate_direct_host_staging"][
+        "peak_extra_device_bytes_samples"
+    ] = [1024] * 10
+    export_result["candidate_direct_host_staging"][
+        "peak_extra_device_bytes_max"
+    ] = 1024
+    export_result["candidate_direct_host_staging"]["host_staging_pool"][
+        "reuse_count"
+    ] = 10
+    write(export_path, export_result)
+    invalid_reuse_report = MODULE.summarize(tmp_path, run_id)
+    assert not invalid_reuse_report["evidence"]["pd_export_memory_evidence"]
+    assert not invalid_reuse_report["pd_export"]["by_tp"]["tp4"][
+        "int8-model"
+    ]["host_staging_pool"]["valid"]
+    assert not invalid_reuse_report["valid"]
     assert report["long_prefill"]["by_tp"]["tp4"]["valid"]
     chunk_sweep = report["long_prefill"]["by_tp"]["tp4"]["chunk_sweep"]
     assert chunk_sweep["fastest_chunk_size"] == 64
