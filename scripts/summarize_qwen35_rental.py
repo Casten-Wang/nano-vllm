@@ -321,10 +321,18 @@ def summarize_optional_fp8_audit(
     local_checkpoint_valid = (
         local_audit.get("valid") is True
         and local_audit.get("complete") is True
+        and local_audit.get("fp8_runtime_backend") == runtime_backend
         and set(local_audit.get("results", {})) == tp_names
         and checkpoint_manifest_matches_remote(
             local_audit.get("checkpoint_manifest", {}),
             audit,
+        )
+        and all(
+            local_audit["results"][name].get(
+                "local_parameter_and_resident_runtime_bytes"
+            )
+            == results[name].get("local_parameter_and_resident_runtime_bytes")
+            for name in tp_names
         )
     )
     memory_valid = (

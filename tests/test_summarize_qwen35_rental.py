@@ -150,6 +150,9 @@ def write_fp8_summary_inputs(
                 "tp4": {
                     "valid": True,
                     "local_parameter_bytes": 1000,
+                    "local_parameter_and_resident_runtime_bytes": (
+                        76_536 if backend == "resident" else 1000
+                    ),
                     "resident_fp8_expert_storage": {
                         "layer_count": 40 if backend == "resident" else 0,
                         "weight_bytes": 1_000_000 if backend == "resident" else 0,
@@ -174,6 +177,9 @@ def write_fp8_summary_inputs(
                 "tp8": {
                     "valid": True,
                     "local_parameter_bytes": 500,
+                    "local_parameter_and_resident_runtime_bytes": (
+                        76_036 if backend == "resident" else 500
+                    ),
                     "resident_fp8_expert_storage": {
                         "layer_count": 40 if backend == "resident" else 0,
                         "weight_bytes": 1_000_000 if backend == "resident" else 0,
@@ -203,7 +209,21 @@ def write_fp8_summary_inputs(
         {
             "valid": True,
             "complete": True,
-            "results": {"tp4": {"valid": True}, "tp8": {"valid": True}},
+            "fp8_runtime_backend": requested_backend,
+            "results": {
+                "tp4": {
+                    "valid": True,
+                    "local_parameter_and_resident_runtime_bytes": (
+                        76_536 if backend == "resident" else 1000
+                    ),
+                },
+                "tp8": {
+                    "valid": True,
+                    "local_parameter_and_resident_runtime_bytes": (
+                        76_036 if backend == "resident" else 500
+                    ),
+                },
+            },
             "checkpoint_manifest": {
                 "config_sha256": "e" * 64,
                 "index_sha256": "f" * 64,
@@ -490,6 +510,22 @@ def test_optional_fp8_summary_accepts_resident_execution_without_native_claim(tm
     ]
     assert not mismatch["runtime_storage_valid"]
     assert not mismatch["valid"]
+
+    write_fp8_summary_inputs(
+        tmp_path,
+        "run",
+        backend="resident",
+        requested_backend="resident",
+    )
+    local_audit_path = tmp_path / "fp8/preflight/checkpoint_mapping_audit.json"
+    local_audit = json.loads(local_audit_path.read_text())
+    local_audit["fp8_runtime_backend"] = "reference"
+    write(local_audit_path, local_audit)
+    wrong_preflight = MODULE.summarize_optional_fp8_audit(
+        tmp_path, "run", fp8_baseline_rows()
+    )
+    assert not wrong_preflight["local_checkpoint_matches_official"]
+    assert not wrong_preflight["valid"]
 
 
 def test_resident_fp8_summary_rejects_missing_or_regressed_bf16_comparison(tmp_path):

@@ -174,6 +174,40 @@ def test_resident_fp8_runtime_storage_counts_shared_workspace_once():
     }
 
 
+@pytest.mark.parametrize(
+    ("quantization_format", "requested", "expected"),
+    [
+        ("bf16", "auto", "auto"),
+        ("gptq_int4", "auto", "triton"),
+        ("gptq_int4", "reference", "reference"),
+        ("fp8_block", "auto", "reference"),
+        ("fp8_block", "resident", "resident"),
+    ],
+)
+def test_audit_resolves_runtime_weight_backend(
+    quantization_format,
+    requested,
+    expected,
+):
+    quantization = type("Quantization", (), {"format": quantization_format})()
+
+    assert MODULE.resolve_weight_quant_backend(quantization, requested) == expected
+
+
+@pytest.mark.parametrize(
+    ("quantization_format", "requested"),
+    [("bf16", "resident"), ("gptq_int4", "resident"), ("fp8_block", "triton")],
+)
+def test_audit_rejects_incompatible_weight_backend(
+    quantization_format,
+    requested,
+):
+    quantization = type("Quantization", (), {"format": quantization_format})()
+
+    with pytest.raises(ValueError, match="backend"):
+        MODULE.resolve_weight_quant_backend(quantization, requested)
+
+
 @pytest.mark.parametrize("value", ["", "0", "4,-1", "four"])
 def test_invalid_tp_sizes_are_rejected(value):
     with pytest.raises((ValueError, MODULE.argparse.ArgumentTypeError)):

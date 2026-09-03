@@ -504,6 +504,31 @@ def instantiate_meta_model(
         torch.set_default_dtype(original_dtype)
 
 
+def resolve_weight_quant_backend(quantization, requested: str) -> str:
+    """Mirror runtime backend selection for shape-only model construction."""
+
+    quantization_format = getattr(quantization, "format", "bf16")
+    if requested == "auto":
+        if quantization_format == "gptq_int4":
+            return "triton"
+        if quantization_format == "fp8_block":
+            return "reference"
+        return "auto"
+    if quantization_format == "gptq_int4" and requested not in (
+        "reference",
+        "triton",
+    ):
+        raise ValueError("GPTQ checkpoints require the reference or triton backend")
+    if quantization_format == "fp8_block" and requested not in (
+        "reference",
+        "resident",
+    ):
+        raise ValueError("FP8 checkpoints require the reference or resident backend")
+    if quantization_format == "bf16" and requested != "auto":
+        raise ValueError("a quantized weight backend requires a quantized checkpoint")
+    return requested
+
+
 def parse_tp_sizes(value: str) -> tuple[int, ...]:
     sizes = tuple(int(item.strip()) for item in value.split(",") if item.strip())
     if not sizes or any(size <= 0 for size in sizes):
@@ -549,6 +574,10 @@ def main() -> None:
     if not isinstance(model_dtype, torch.dtype):
         model_dtype = torch.bfloat16
     model_dtype_bytes = torch.empty((), dtype=model_dtype).element_size()
+    weight_quant_backend = resolve_weight_quant_backend(
+        model_spec.quantization,
+        args.weight_quant_backend,
+    )
     initial_checkpoint_manifest = checkpoint_manifest_metadata(
         args.model,
         require_shards=args.require_shards,
@@ -559,7 +588,7 @@ def main() -> None:
             args.model,
             tp_size,
             model_spec.quantization,
-            args.weight_quant_backend,
+            weight_quant_backend,
         )
         result = audit_checkpoint_mapping(model, args.model)
         result["local_parameter_bytes"] = parameter_storage_bytes(model)
@@ -568,7 +597,7 @@ def main() -> None:
                 model,
                 model_dtype_bytes,
             )
-            result["fp8_runtime_backend"] = args.weight_quant_backend
+            result["fp8_runtime_backend"] = weight_quant_backend
             result["resident_fp8_expert_storage"] = resident_storage
             result["local_parameter_and_resident_scale_bytes"] = (
                 result["local_parameter_bytes"]
