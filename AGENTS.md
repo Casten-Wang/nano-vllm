@@ -86,6 +86,13 @@
   target project's current main, contribution guide, open issues, open PRs,
   and maintainer feedback before implementation and again before requesting
   submission approval.
+- A target repository's contribution and AI-use policy can be stricter than
+  the user's approval and always takes precedence. In particular, MLX-LM
+  permits understood and disclosed AI-assisted code but forbids an agent from
+  writing public issue or PR text, replying to maintainers, pushing a branch,
+  or creating a PR. For MLX-LM, limit work to local research, reproduction,
+  implementation, tests, and explanations that let the user author and perform
+  every public action personally; never automate submission even if requested.
 - Never publicly claim an issue, comment, push a contribution branch, or open,
   update, close, or reopen a pull request in any third-party repository without
   the user's explicit approval for that exact action. Local investigation,
