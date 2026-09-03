@@ -20,6 +20,8 @@ from nanovllm.engine.heterogeneous_cache_transfer import (
     stage_qwen35_sequence_cache_for_peers,
 )
 from nanovllm.engine.cache_transfer_wire import (
+    PendingPeerCacheReceiveGroup,
+    PendingPeerCacheSend,
     PendingPeerCacheSendGroup,
     receive_peer_cache_fragment,
     receive_rank_cache_transfer,
@@ -749,3 +751,98 @@ def test_model_runner_drives_peer_send_group_lifecycle():
     send.finish.assert_called_once_with()
     assert not runner._pending_heterogeneous_cache_sends
     staged.release()
+
+
+def test_multi_peer_receiver_defers_ack_until_atomic_assembly():
+    src_tp = 8
+    dst_tp = 4
+    plan = build_qwen35_cache_transfer_plan(
+        src_tp_size=src_tp,
+        dst_tp_size=dst_tp,
+        total_kv_heads=2,
+        kv_bytes_per_head=2 * 2 * 2 * 4 * 2 * 4,
+        kv_scale_bytes_per_head=0,
+        recurrent_heads=32,
+        recurrent_bytes_per_head=2 * 2 * 4,
+        convolution_group_widths=(16, 16, 32),
+        convolution_bytes_per_channel=3 * 2,
+    )
+    expected_peer_bytes = {
+        src_rank: byte_count
+        for src_rank, dst_rank, byte_count in plan.profile.peer_bytes
+        if dst_rank == 0
+    }
+    receiver = PendingPeerCacheReceiveGroup(
+        "127.0.0.1",
+        0,
+        transfer_id="request/attempt-1",
+        dst_rank=0,
+        dst_tp_size=dst_tp,
+        expected_peer_bytes=expected_peer_bytes,
+        timeout_s=2.0,
+    )
+    endpoint = receiver.address
+    receiver.start()
+    staged_sources = []
+    senders = []
+    for src_rank in expected_peer_bytes:
+        staged = stage_qwen35_peer_cache_fragments(
+            build_qwen35_peer_cache_fragments(
+                make_payload(src_rank, src_tp, with_scales=False),
+                plan,
+            ),
+            plan,
+        )
+        fragment = next(
+            item for item in staged.fragments if item.dst_rank == 0
+        )
+        sender = PendingPeerCacheSend(
+            endpoint[0],
+            endpoint[1],
+            fragment,
+            timeout_s=2.0,
+        )
+        staged_sources.append(staged)
+        senders.append(sender)
+        sender.start()
+
+    deadline = monotonic() + 2.0
+    while receiver.poll()[0] != "ready":
+        assert monotonic() < deadline
+        sleep(0.005)
+    assert all(sender.poll()[0] == "sending" for sender in senders)
+    fragments = receiver.fragments()
+    payload = assemble_qwen35_peer_cache_fragments(fragments, plan)
+    assert payload.nbytes == plan.profile.destination_bytes[0]
+
+    receiver.finish(accepted=True)
+    for sender, staged in zip(senders, staged_sources):
+        deadline = monotonic() + 2.0
+        while sender.poll()[0] != "ready":
+            assert monotonic() < deadline
+            sleep(0.005)
+        assert sender.result() > 0
+        sender.finish()
+        staged.release()
+
+
+def test_multi_peer_receiver_times_out_when_a_source_is_missing():
+    receiver = PendingPeerCacheReceiveGroup(
+        "127.0.0.1",
+        0,
+        transfer_id="request/attempt-1",
+        dst_rank=0,
+        dst_tp_size=4,
+        expected_peer_bytes={0: 10, 1: 20},
+        timeout_s=0.05,
+    )
+    receiver.start()
+    deadline = monotonic() + 1.0
+    while True:
+        state, error = receiver.poll()
+        if state == "failed":
+            break
+        assert monotonic() < deadline
+        sleep(0.005)
+    assert "deadline expired" in error
+    receiver.finish(accepted=False)

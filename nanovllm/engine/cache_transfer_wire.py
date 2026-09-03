@@ -799,6 +799,204 @@ class PendingRankCacheReceive:
             self._thread.join()
 
 
+class PendingPeerCacheReceiveGroup:
+    """Receive every source peer and defer ACKs until atomic installation."""
+
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        *,
+        transfer_id: str,
+        dst_rank: int,
+        dst_tp_size: int,
+        expected_peer_bytes: dict[int, int],
+        timeout_s: float = 30.0,
+    ) -> None:
+        if not isinstance(host, str) or not host:
+            raise ValueError("peer cache receiver host must not be empty")
+        if (
+            not isinstance(port, int)
+            or isinstance(port, bool)
+            or not 0 <= port <= 65535
+        ):
+            raise ValueError("peer cache receiver port must be in [0, 65535]")
+        if not isinstance(transfer_id, str) or not transfer_id:
+            raise ValueError("peer cache receiver transfer id must not be empty")
+        if (
+            not isinstance(dst_rank, int)
+            or isinstance(dst_rank, bool)
+            or not isinstance(dst_tp_size, int)
+            or isinstance(dst_tp_size, bool)
+            or dst_tp_size <= 0
+            or not 0 <= dst_rank < dst_tp_size
+        ):
+            raise ValueError("peer cache receiver destination is invalid")
+        if (
+            not isinstance(expected_peer_bytes, dict)
+            or not expected_peer_bytes
+            or any(
+                not isinstance(rank, int)
+                or isinstance(rank, bool)
+                or rank < 0
+                or not isinstance(byte_count, int)
+                or isinstance(byte_count, bool)
+                or byte_count <= 0
+                for rank, byte_count in expected_peer_bytes.items()
+            )
+        ):
+            raise ValueError("peer cache receiver expected peers are invalid")
+        if timeout_s <= 0:
+            raise ValueError("peer cache receiver timeout must be positive")
+        self._transfer_id = transfer_id
+        self._dst_rank = dst_rank
+        self._dst_tp_size = dst_tp_size
+        self._expected_peer_bytes = dict(expected_peer_bytes)
+        self._timeout_s = timeout_s
+        self._deadline = monotonic() + timeout_s
+        self._lock = Lock()
+        self._fragments: dict[int, PeerCacheFragment] = {}
+        self._connections: dict[int, socket.socket] = {}
+        self._workers: list[Thread] = []
+        self._error: BaseException | None = None
+        self._terminal = False
+        self._listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._listener.settimeout(min(timeout_s, 0.05))
+        try:
+            self._listener.bind((host, port))
+            self._listener.listen(len(expected_peer_bytes))
+        except BaseException:
+            self._listener.close()
+            raise
+        self._thread = Thread(target=self._accept, daemon=True)
+        self._thread_started = False
+
+    @property
+    def address(self) -> tuple[str, int]:
+        host, port = self._listener.getsockname()[:2]
+        return str(host), int(port)
+
+    def start(self) -> None:
+        self._thread.start()
+        self._thread_started = True
+
+    def _accept(self) -> None:
+        try:
+            while True:
+                with self._lock:
+                    if self._terminal or self._error is not None:
+                        return
+                    if len(self._fragments) == len(self._expected_peer_bytes):
+                        return
+                try:
+                    connection, _peer = self._listener.accept()
+                except socket.timeout:
+                    if monotonic() >= self._deadline:
+                        raise TimeoutError("peer cache receive deadline expired")
+                    continue
+                worker = Thread(
+                    target=self._receive_one,
+                    args=(connection,),
+                    daemon=True,
+                )
+                with self._lock:
+                    self._workers.append(worker)
+                worker.start()
+        except BaseException as exc:
+            with self._lock:
+                if not self._terminal and self._error is None:
+                    self._error = exc
+        finally:
+            self._listener.close()
+
+    def _receive_one(self, connection: socket.socket) -> None:
+        fragment = None
+        try:
+            connection.settimeout(max(self._deadline - monotonic(), 0.001))
+            fragment = receive_peer_cache_fragment(
+                connection,
+                max_payload_bytes=max(self._expected_peer_bytes.values()),
+                expected_transfer_id=self._transfer_id,
+                expected_dst_rank=self._dst_rank,
+            )
+            expected_bytes = self._expected_peer_bytes.get(fragment.src_rank)
+            if expected_bytes is None:
+                raise ValueError("peer cache fragment source rank is unexpected")
+            if fragment.nbytes != expected_bytes:
+                raise ValueError("peer cache fragment bytes do not match preflight")
+            with self._lock:
+                if self._terminal:
+                    raise RuntimeError("peer cache receive group is closed")
+                if fragment.src_rank in self._fragments:
+                    raise ValueError("peer cache fragment source rank is duplicated")
+                self._fragments[fragment.src_rank] = fragment
+                self._connections[fragment.src_rank] = connection
+            fragment = None
+            connection = None
+        except BaseException as exc:
+            with self._lock:
+                if not self._terminal and self._error is None:
+                    self._error = exc
+            if connection is not None:
+                try:
+                    connection.sendall(_TRANSFER_NACK)
+                except OSError:
+                    pass
+                connection.close()
+
+    def poll(self) -> tuple[str, str | None]:
+        with self._lock:
+            if self._terminal:
+                return "closed", None
+            if self._error is not None:
+                return "failed", str(self._error)
+            if len(self._fragments) == len(self._expected_peer_bytes):
+                return "ready", None
+            if monotonic() < self._deadline:
+                return "receiving", None
+            self._error = TimeoutError("peer cache receive deadline expired")
+            return "failed", str(self._error)
+
+    def fragments(self) -> tuple[PeerCacheFragment, ...]:
+        with self._lock:
+            if self._terminal:
+                raise RuntimeError("peer cache receive group is closed")
+            if self._error is not None:
+                raise RuntimeError(f"peer cache receive failed: {self._error}")
+            if len(self._fragments) != len(self._expected_peer_bytes):
+                raise RuntimeError("peer cache fragments are not ready")
+            return tuple(
+                self._fragments[rank] for rank in sorted(self._fragments)
+            )
+
+    def finish(self, *, accepted: bool) -> None:
+        with self._lock:
+            if self._terminal:
+                return
+            self._terminal = True
+            connections = tuple(self._connections.values())
+            self._connections.clear()
+            self._fragments.clear()
+        self._listener.close()
+        acknowledgement = _TRANSFER_ACK if accepted else _TRANSFER_NACK
+        for connection in connections:
+            try:
+                connection.sendall(acknowledgement)
+            except OSError:
+                pass
+            try:
+                connection.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            connection.close()
+        if self._thread_started and current_thread() is not self._thread:
+            self._thread.join()
+        for worker in tuple(self._workers):
+            if current_thread() is not worker:
+                worker.join()
+
+
 class PendingPeerCacheSend:
     """Send one peer fragment and wait for destination validation."""
 
