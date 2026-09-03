@@ -771,6 +771,55 @@ class LLMEngine:
             f"{active_receives + active_sends}/{limit} active"
         )
 
+    def remote_prefill_capacity_snapshot(self) -> dict[str, int | float | None]:
+        """Return live capacity inputs for an external PD request router."""
+
+        active_receives = len(self._remote_prefill_receive_tokens)
+        active_sends = len(self._remote_prefill_send_started_at)
+        active_transfers = active_receives + active_sends
+        active_staging_bytes = sum(
+            self._remote_prefill_receive_staged_bytes.values()
+        ) + sum(self._remote_prefill_send_staged_bytes.values())
+        staging_limit = self.config.max_remote_prefill_staging_bytes
+        active_waiting = sum(
+            bool(seq.block_table) or seq.state_slot is not None
+            for seq in self.scheduler.waiting
+        )
+        used_sequence_slots = (
+            len(self.scheduler.running)
+            + len(self.scheduler.remote_prefills)
+            + len(self.scheduler.remote_prefill_sources)
+            + active_waiting
+        )
+        block_manager = self.scheduler.block_manager
+        return {
+            "waiting_requests": self.scheduler.num_waiting,
+            "running_requests": self.scheduler.num_running,
+            "sequence_slots_total": self.config.max_num_seqs,
+            "sequence_slots_used": used_sequence_slots,
+            "sequence_slots_free": max(
+                self.config.max_num_seqs - used_sequence_slots,
+                0,
+            ),
+            "kv_blocks_total": block_manager.num_total_blocks,
+            "kv_blocks_used": block_manager.num_used_blocks,
+            "kv_blocks_free": block_manager.num_free_blocks,
+            "kv_block_usage": block_manager.usage,
+            "transfer_slots_total": self.config.max_remote_prefill_transfers,
+            "transfer_slots_used": active_transfers,
+            "transfer_slots_free": max(
+                self.config.max_remote_prefill_transfers - active_transfers,
+                0,
+            ),
+            "staging_bytes_limit": staging_limit,
+            "staging_bytes_used": active_staging_bytes,
+            "staging_bytes_free": (
+                None
+                if staging_limit is None
+                else max(staging_limit - active_staging_bytes, 0)
+            ),
+        }
+
     def _ensure_remote_prefill_staging_capacity(
         self,
         staged_bytes: int,

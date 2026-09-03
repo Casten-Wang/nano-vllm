@@ -684,6 +684,45 @@ def test_transfer_capacity_rejects_send_before_staging_or_source_mutation():
     assert engine.metrics.to_dict()["remote_prefill_send_backpressure"] == 1
 
 
+def test_remote_prefill_capacity_snapshot_reports_live_routing_inputs():
+    engine = make_engine()
+    engine.config.max_remote_prefill_staging_bytes = 500
+    source = _prepare_remote_prefill_source(engine, 1)
+    engine.start_remote_prefill_send(
+        source.seq_id,
+        "source/attempt-1",
+        [("127.0.0.1", 20001)],
+    )
+    engine.add_remote_prefill_request(
+        [5, 6, 7, 8],
+        SamplingParams(max_tokens=4),
+        transfer_id="destination/attempt-1",
+    )
+    engine.start_remote_prefill_receive(
+        "destination/attempt-1",
+        9,
+        [("127.0.0.1", 20002)],
+    )
+
+    assert engine.remote_prefill_capacity_snapshot() == {
+        "waiting_requests": 1,
+        "running_requests": 1,
+        "sequence_slots_total": 2,
+        "sequence_slots_used": 2,
+        "sequence_slots_free": 0,
+        "kv_blocks_total": 8,
+        "kv_blocks_used": 2,
+        "kv_blocks_free": 6,
+        "kv_block_usage": 0.25,
+        "transfer_slots_total": 2,
+        "transfer_slots_used": 2,
+        "transfer_slots_free": 0,
+        "staging_bytes_limit": 500,
+        "staging_bytes_used": 200,
+        "staging_bytes_free": 300,
+    }
+
+
 def test_transfer_capacity_is_shared_by_sends_and_receives():
     engine = make_engine()
     source = _prepare_remote_prefill_source(engine, 1)
