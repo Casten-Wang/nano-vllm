@@ -195,6 +195,7 @@ class LLMEngine:
         self._remote_prefill_receive_staged_bytes: dict[str, int] = {}
         self._remote_prefill_receive_expected_bytes: dict[str, dict[int, int]] = {}
         self._remote_prefill_receive_errors: dict[str, str] = {}
+        self._heterogeneous_remote_prefill_source_tp_sizes: dict[str, int] = {}
         self._remote_prefill_send_started_at: dict[str, float] = {}
         self._remote_prefill_send_staged_bytes: dict[str, int] = {}
         self._remote_prefill_send_errors: dict[str, str] = {}
@@ -326,6 +327,23 @@ class LLMEngine:
             self.config.tensor_parallel_size,
             "staged_bytes",
         )
+        return self._reserve_remote_prefill_request(
+            seq,
+            transfer_id,
+            expected_by_rank,
+            timeout_s=timeout_s,
+        )
+
+    def _reserve_remote_prefill_request(
+        self,
+        seq: Sequence,
+        transfer_id: str,
+        expected_by_rank: dict[int, int],
+        *,
+        timeout_s: float,
+    ) -> int:
+        """Atomically reserve scheduler and staging capacity for one handoff."""
+
         staged_bytes = sum(expected_by_rank.values())
         self._ensure_remote_prefill_staging_capacity(
             staged_bytes,
@@ -351,6 +369,46 @@ class LLMEngine:
             transfer_id
         ] = expected_by_rank
         return seq.seq_id
+
+    def add_heterogeneous_remote_prefill_request(
+        self,
+        prompt: str | list[int],
+        sampling_params: SamplingParams,
+        *,
+        transfer_id: str,
+        source_tp_size: int,
+        timeout_s: float = 30.0,
+    ) -> int:
+        """Reserve a destination using a source-to-local TP transfer plan."""
+
+        if (
+            transfer_id in self.scheduler.remote_prefills
+            or transfer_id in self.scheduler.remote_prefill_sources
+        ):
+            raise ValueError("cache transfer id is already reserved")
+        seq = self._create_sequence(prompt, sampling_params)
+        self._ensure_remote_prefill_transfer_capacity(direction="receive")
+        num_blocks = self._remote_prefill_block_count(seq.num_prompt_tokens)
+        plan = self.model_runner.build_heterogeneous_cache_receive_plan_for_blocks(
+            num_blocks,
+            source_tp_size,
+        )
+        expected_by_rank = dict(enumerate(plan.profile.destination_bytes))
+        seq_id = self._reserve_remote_prefill_request(
+            seq,
+            transfer_id,
+            expected_by_rank,
+            timeout_s=timeout_s,
+        )
+        source_sizes = getattr(
+            self,
+            "_heterogeneous_remote_prefill_source_tp_sizes",
+            None,
+        )
+        if source_sizes is None:
+            source_sizes = self._heterogeneous_remote_prefill_source_tp_sizes = {}
+        source_sizes[transfer_id] = source_tp_size
+        return seq_id
 
     def receive_remote_prefill(
         self,
@@ -549,6 +607,78 @@ class LLMEngine:
         getattr(self, "_remote_prefill_receive_errors", {}).pop(transfer_id, None)
         return seq.seq_id
 
+    def start_heterogeneous_remote_prefill_receive(
+        self,
+        transfer_id: str,
+        first_token_id: int,
+        bind_endpoints: list[tuple[str, int]],
+        *,
+        timeout_s: float = 30.0,
+        max_payload_bytes: int = 16 * 1024**3,
+    ) -> int:
+        """Start source-peer receives without admitting decode early."""
+
+        self._validate_token_ids([first_token_id], value_name="first_token_id")
+        source_sizes = getattr(
+            self,
+            "_heterogeneous_remote_prefill_source_tp_sizes",
+            {},
+        )
+        if transfer_id not in source_sizes:
+            raise ValueError("heterogeneous cache transfer id is not reserved")
+        receive_tokens = getattr(self, "_remote_prefill_receive_tokens", None)
+        if receive_tokens is None:
+            receive_tokens = self._remote_prefill_receive_tokens = {}
+        if transfer_id in receive_tokens:
+            raise ValueError("cache receive id is already active")
+        seq, _session = self.scheduler.remote_prefills[transfer_id]
+        staged_bytes = self._remote_prefill_receive_reserved_staged_bytes[transfer_id]
+        receive_started_at = perf_counter()
+        try:
+            started = self.model_runner.call_rank_results(
+                "start_heterogeneous_sequence_cache_receive",
+                transfer_id,
+                bind_endpoints,
+                source_sizes[transfer_id],
+                seq.num_prompt_tokens,
+                timeout_s,
+                max_payload_bytes,
+            )
+            _validate_rank_results(
+                started,
+                self.config.tensor_parallel_size,
+                "started",
+                expected_value=1,
+            )
+        except BaseException as exc:
+            try:
+                self.model_runner.call_rank_results(
+                    "abort_heterogeneous_sequence_cache_receive",
+                    transfer_id,
+                )
+            except BaseException:
+                pass
+            if transfer_id in self.scheduler.remote_prefills:
+                self.scheduler.abort_remote_prefill(
+                    transfer_id,
+                    f"heterogeneous cache receive start failed: {exc}",
+                    now=perf_counter(),
+                )
+            self._remote_prefill_receive_reserved_staged_bytes.pop(
+                transfer_id,
+                None,
+            )
+            self._remote_prefill_receive_expected_bytes.pop(transfer_id, None)
+            source_sizes.pop(transfer_id, None)
+            raise
+        self._remote_prefill_receive_reserved_staged_bytes.pop(transfer_id)
+        receive_tokens[transfer_id] = first_token_id
+        self._remote_prefill_receive_started_at[transfer_id] = receive_started_at
+        self._remote_prefill_receive_staged_bytes[transfer_id] = staged_bytes
+        self.metrics.record_remote_prefill_receive_started(staged_bytes)
+        self._remote_prefill_receive_errors.pop(transfer_id, None)
+        return seq.seq_id
+
     def cancel_remote_prefill_reservation(
         self,
         transfer_id: str,
@@ -572,6 +702,11 @@ class LLMEngine:
         )
         self._remote_prefill_receive_reserved_staged_bytes.pop(transfer_id)
         self._remote_prefill_receive_expected_bytes.pop(transfer_id)
+        getattr(
+            self,
+            "_heterogeneous_remote_prefill_source_tp_sizes",
+            {},
+        ).pop(transfer_id, None)
         return seq.seq_id
 
     def _abort_remote_prefill_receive(
@@ -581,9 +716,18 @@ class LLMEngine:
         *,
         outcome: str = "failed",
     ) -> None:
+        heterogeneous = transfer_id in getattr(
+            self,
+            "_heterogeneous_remote_prefill_source_tp_sizes",
+            {},
+        )
         try:
             self.model_runner.call_rank_results(
-                "abort_sequence_cache_receive",
+                (
+                    "abort_heterogeneous_sequence_cache_receive"
+                    if heterogeneous
+                    else "abort_sequence_cache_receive"
+                ),
                 transfer_id,
             )
         except BaseException:
@@ -602,6 +746,11 @@ class LLMEngine:
         getattr(
             self,
             "_remote_prefill_receive_expected_bytes",
+            {},
+        ).pop(transfer_id, None)
+        getattr(
+            self,
+            "_heterogeneous_remote_prefill_source_tp_sizes",
             {},
         ).pop(transfer_id, None)
         started_at = getattr(self, "_remote_prefill_receive_started_at", {}).pop(
@@ -684,19 +833,31 @@ class LLMEngine:
                 raise RuntimeError("; ".join(failures))
             if any(state == "receiving" for state in states.values()):
                 return None
-            installed = self.model_runner.call_rank_results(
-                "install_sequence_cache_receive",
-                seq,
-                transfer_id,
-                [
-                    getattr(
-                        self,
-                        "_remote_prefill_receive_expected_bytes",
-                        {},
-                    )[transfer_id][rank]
-                    for rank in range(self.config.tensor_parallel_size)
-                ],
+            heterogeneous = transfer_id in getattr(
+                self,
+                "_heterogeneous_remote_prefill_source_tp_sizes",
+                {},
             )
+            if heterogeneous:
+                installed = self.model_runner.call_rank_results(
+                    "install_heterogeneous_sequence_cache_receive",
+                    seq,
+                    transfer_id,
+                )
+            else:
+                installed = self.model_runner.call_rank_results(
+                    "install_sequence_cache_receive",
+                    seq,
+                    transfer_id,
+                    [
+                        getattr(
+                            self,
+                            "_remote_prefill_receive_expected_bytes",
+                            {},
+                        )[transfer_id][rank]
+                        for rank in range(self.config.tensor_parallel_size)
+                    ],
+                )
             received = _validate_rank_results(
                 installed,
                 self.config.tensor_parallel_size,
@@ -742,6 +903,11 @@ class LLMEngine:
             "_remote_prefill_receive_expected_bytes",
             {},
         ).pop(transfer_id, None)
+        getattr(
+            self,
+            "_heterogeneous_remote_prefill_source_tp_sizes",
+            {},
+        ).pop(transfer_id, None)
         started_at = getattr(self, "_remote_prefill_receive_started_at", {}).pop(
             transfer_id,
             None,
@@ -761,8 +927,17 @@ class LLMEngine:
             raise ValueError("cache receive id is not active")
         self.metrics.record_remote_prefill_poll(1)
         try:
+            heterogeneous = transfer_id in getattr(
+                self,
+                "_heterogeneous_remote_prefill_source_tp_sizes",
+                {},
+            )
             rank_results = self.model_runner.call_rank_results(
-                "poll_sequence_cache_receive",
+                (
+                    "poll_heterogeneous_sequence_cache_receive"
+                    if heterogeneous
+                    else "poll_sequence_cache_receive"
+                ),
                 transfer_id,
             )
             return self._advance_remote_prefill_receive(transfer_id, rank_results)
@@ -782,31 +957,55 @@ class LLMEngine:
         if not transfer_ids:
             return
         self.metrics.record_remote_prefill_poll(len(transfer_ids))
-        try:
-            rank_results = self.model_runner.call_rank_results(
-                "poll_sequence_cache_receives",
-                list(transfer_ids),
-            )
-            by_transfer = _validate_rank_receive_polls(
-                rank_results,
-                self.config.tensor_parallel_size,
-                transfer_ids,
-            )
-        except Exception as exc:
-            for transfer_id in transfer_ids:
-                self._abort_remote_prefill_receive(
-                    transfer_id,
-                    f"batched cache receive poll failed: {exc}",
-                )
-                errors[transfer_id] = str(exc)
-            return
-        for transfer_id in transfer_ids:
+        heterogeneous_ids = frozenset(
+            getattr(self, "_heterogeneous_remote_prefill_source_tp_sizes", {})
+        )
+        regular_ids = tuple(
+            transfer_id
+            for transfer_id in transfer_ids
+            if transfer_id not in heterogeneous_ids
+        )
+        by_transfer = {}
+        if regular_ids:
             try:
-                self._advance_remote_prefill_receive(
-                    transfer_id,
-                    by_transfer[transfer_id],
+                rank_results = self.model_runner.call_rank_results(
+                    "poll_sequence_cache_receives",
+                    list(regular_ids),
+                )
+                by_transfer.update(
+                    _validate_rank_receive_polls(
+                        rank_results,
+                        self.config.tensor_parallel_size,
+                        regular_ids,
+                    )
                 )
             except Exception as exc:
+                for transfer_id in regular_ids:
+                    self._abort_remote_prefill_receive(
+                        transfer_id,
+                        f"batched cache receive poll failed: {exc}",
+                    )
+                    errors[transfer_id] = str(exc)
+        for transfer_id in transfer_ids:
+            if transfer_id not in getattr(self, "_remote_prefill_receive_tokens", {}):
+                continue
+            try:
+                rank_results = by_transfer.get(transfer_id)
+                if transfer_id in heterogeneous_ids:
+                    rank_results = self.model_runner.call_rank_results(
+                        "poll_heterogeneous_sequence_cache_receive",
+                        transfer_id,
+                    )
+                self._advance_remote_prefill_receive(
+                    transfer_id,
+                    rank_results,
+                )
+            except Exception as exc:
+                if transfer_id in getattr(self, "_remote_prefill_receive_tokens", {}):
+                    self._abort_remote_prefill_receive(
+                        transfer_id,
+                        f"cache receive poll failed: {exc}",
+                    )
                 errors[transfer_id] = str(exc)
 
     def _poll_remote_prefill_reservations(self) -> list[Sequence]:
@@ -840,6 +1039,11 @@ class LLMEngine:
                 transfer_id,
                 None,
             )
+            getattr(
+                self,
+                "_heterogeneous_remote_prefill_source_tp_sizes",
+                {},
+            ).pop(transfer_id, None)
         if fallback:
             self.metrics.record_remote_prefill_reservation_timeout(
                 len(fallback)

@@ -1,5 +1,5 @@
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, call
 
 import pytest
 
@@ -34,12 +34,18 @@ def make_engine(*, tensor_parallel_size=1):
     send_state = {"value": "sending", "error": None, "staged_bytes": None}
 
     def rank_results(method_name, *args):
-        if method_name == "start_sequence_cache_receive":
+        if method_name in {
+            "start_sequence_cache_receive",
+            "start_heterogeneous_sequence_cache_receive",
+        }:
             return [
                 {"rank": rank, "started": 1}
                 for rank in range(tensor_parallel_size)
             ]
-        if method_name == "poll_sequence_cache_receive":
+        if method_name in {
+            "poll_sequence_cache_receive",
+            "poll_heterogeneous_sequence_cache_receive",
+        }:
             return [
                 {
                     "rank": rank,
@@ -71,7 +77,10 @@ def make_engine(*, tensor_parallel_size=1):
                 }
                 for rank in range(tensor_parallel_size)
             ]
-        if method_name == "abort_sequence_cache_receive":
+        if method_name in {
+            "abort_sequence_cache_receive",
+            "abort_heterogeneous_sequence_cache_receive",
+        }:
             return [
                 {"rank": rank, "aborted": 1}
                 for rank in range(tensor_parallel_size)
@@ -153,6 +162,7 @@ def make_engine(*, tensor_parallel_size=1):
         if method_name in {
             "receive_sequence_cache_from_endpoint",
             "install_sequence_cache_receive",
+            "install_heterogeneous_sequence_cache_receive",
         }:
             return [
                 {
@@ -167,6 +177,7 @@ def make_engine(*, tensor_parallel_size=1):
             if method_name in {
                 "receive_sequence_cache_from_endpoint",
                 "install_sequence_cache_receive",
+                "install_heterogeneous_sequence_cache_receive",
             }
             else "sent_bytes"
         )
@@ -180,6 +191,15 @@ def make_engine(*, tensor_parallel_size=1):
         call=Mock(),
         call_rank_results=Mock(side_effect=rank_results),
         estimate_heterogeneous_cache_transfer_for_blocks=Mock(),
+        build_heterogeneous_cache_receive_plan_for_blocks=Mock(
+            return_value=SimpleNamespace(
+                profile=SimpleNamespace(
+                    destination_bytes=tuple(
+                        100 + rank for rank in range(tensor_parallel_size)
+                    )
+                )
+            )
+        ),
     )
     engine._remote_prefill_receive_tokens = {}
     engine._remote_prefill_receive_started_at = {}
@@ -187,6 +207,7 @@ def make_engine(*, tensor_parallel_size=1):
     engine._remote_prefill_receive_staged_bytes = {}
     engine._remote_prefill_receive_expected_bytes = {}
     engine._remote_prefill_receive_errors = {}
+    engine._heterogeneous_remote_prefill_source_tp_sizes = {}
     engine._remote_prefill_send_started_at = {}
     engine._remote_prefill_send_staged_bytes = {}
     engine._remote_prefill_send_errors = {}
@@ -551,6 +572,122 @@ def test_engine_async_receive_commits_only_after_all_ranks_are_ready():
     assert metrics["active_remote_prefill_receive_staged_bytes"] == 0
     assert not engine._remote_prefill_receive_staged_bytes
     assert not engine._remote_prefill_receive_expected_bytes
+
+
+def test_heterogeneous_receive_commits_only_after_all_destination_ranks_install():
+    engine = make_engine(tensor_parallel_size=2)
+    seq_id = engine.add_heterogeneous_remote_prefill_request(
+        [1, 2, 3, 4],
+        SamplingParams(max_tokens=4),
+        transfer_id="request/attempt-1",
+        source_tp_size=4,
+    )
+    assert engine.remote_prefill_capacity_snapshot()["staging_bytes_reserved"] == 201
+
+    assert engine.start_heterogeneous_remote_prefill_receive(
+        "request/attempt-1",
+        9,
+        [("127.0.0.1", 20001), ("127.0.0.1", 20002)],
+    ) == seq_id
+    assert engine.poll_remote_prefill_receive("request/attempt-1") is None
+    assert not engine.scheduler.running
+
+    engine._test_async_state["value"] = "ready"
+    assert engine.poll_remote_prefill_receive("request/attempt-1") == seq_id
+    assert engine.scheduler.running[0].completion_token_ids == [9]
+    assert not engine.scheduler.remote_prefills
+    assert not engine._heterogeneous_remote_prefill_source_tp_sizes
+    methods = [
+        call.args[0]
+        for call in engine.model_runner.call_rank_results.call_args_list
+    ]
+    assert methods == [
+        "start_heterogeneous_sequence_cache_receive",
+        "poll_heterogeneous_sequence_cache_receive",
+        "poll_heterogeneous_sequence_cache_receive",
+        "install_heterogeneous_sequence_cache_receive",
+    ]
+
+
+def test_step_polls_regular_and_heterogeneous_receives_through_separate_paths():
+    engine = make_engine(tensor_parallel_size=2)
+    engine.add_remote_prefill_request(
+        [1, 2, 3, 4],
+        SamplingParams(max_tokens=4),
+        transfer_id="regular",
+    )
+    engine.start_remote_prefill_receive(
+        "regular",
+        9,
+        [("127.0.0.1", 20001), ("127.0.0.1", 20002)],
+    )
+    engine.add_heterogeneous_remote_prefill_request(
+        [5, 6, 7, 8],
+        SamplingParams(max_tokens=4),
+        transfer_id="heterogeneous",
+        source_tp_size=4,
+    )
+    engine.start_heterogeneous_remote_prefill_receive(
+        "heterogeneous",
+        10,
+        [("127.0.0.1", 20003), ("127.0.0.1", 20004)],
+    )
+    engine.model_runner.call_rank_results.reset_mock()
+
+    assert engine.step() == ([], 0, 0, 0)
+    assert engine.model_runner.call_rank_results.call_args_list == [
+        call("poll_sequence_cache_receives", ["regular"]),
+        call("poll_heterogeneous_sequence_cache_receive", "heterogeneous"),
+    ]
+
+
+def test_heterogeneous_receive_failure_aborts_and_requeues_local_prefill():
+    engine = make_engine(tensor_parallel_size=2)
+    seq_id = engine.add_heterogeneous_remote_prefill_request(
+        [1, 2, 3, 4],
+        SamplingParams(max_tokens=4),
+        transfer_id="request/attempt-1",
+        source_tp_size=4,
+    )
+    engine.start_heterogeneous_remote_prefill_receive(
+        "request/attempt-1",
+        9,
+        [("127.0.0.1", 20001), ("127.0.0.1", 20002)],
+    )
+    engine._test_async_state.update(value="failed", error="peer checksum mismatch")
+
+    with pytest.raises(RuntimeError, match="peer checksum mismatch"):
+        engine.poll_remote_prefill_receive("request/attempt-1")
+
+    assert engine.scheduler.waiting[0].seq_id == seq_id
+    assert not engine.scheduler.remote_prefills
+    assert not engine._remote_prefill_receive_tokens
+    assert not engine._heterogeneous_remote_prefill_source_tp_sizes
+    assert any(
+        call.args[0] == "abort_heterogeneous_sequence_cache_receive"
+        for call in engine.model_runner.call_rank_results.call_args_list
+    )
+
+
+def test_heterogeneous_reservation_cancel_and_timeout_release_metadata():
+    for expire in (False, True):
+        engine = make_engine(tensor_parallel_size=2)
+        engine.add_heterogeneous_remote_prefill_request(
+            [1, 2, 3, 4],
+            SamplingParams(max_tokens=4),
+            transfer_id="request/attempt-1",
+            source_tp_size=4,
+        )
+        if expire:
+            _, session = engine.scheduler.remote_prefills["request/attempt-1"]
+            session.deadline = 0.0
+            engine._poll_remote_prefill_reservations()
+        else:
+            engine.cancel_remote_prefill_reservation("request/attempt-1")
+        assert not engine.scheduler.remote_prefills
+        assert not engine._remote_prefill_receive_reserved_staged_bytes
+        assert not engine._remote_prefill_receive_expected_bytes
+        assert not engine._heterogeneous_remote_prefill_source_tp_sizes
 
 
 def test_engine_async_receive_failure_aborts_all_ranks_and_falls_back():
