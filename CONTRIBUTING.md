@@ -85,6 +85,17 @@ communication-overlap measurements, while retaining the colocated path. Every
 track must report throughput together with TTFT, inter-token latency, tail
 latency, and peak host/device memory where applicable.
 
+Treat the tracks as one control loop: memory and in-flight transfer capacity
+constrain admission, the scheduler selects placement and prefill/decode service,
+and PD transfer state feeds backpressure and failures back into routing. For
+tensor-space reuse, establish allocation live ranges and CUDA stream/event
+ownership before introducing bounded arenas or pools; test stale-data and
+overlapping-lifetime failures explicitly. For PD, progress from protocol and
+recovery to bounded staging, overlap, topology-aware placement, and load-aware
+routing. For scheduling, begin with deterministic token/memory budgets,
+starvation bounds, and preemption-cost accounting before considering adaptive
+policies.
+
 ## Releases
 
 After the pull request is merged and the resulting `main` is verified, create

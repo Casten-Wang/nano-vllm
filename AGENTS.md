@@ -66,6 +66,10 @@
   scheduling, and prefill/decode disaggregation. Every experiment must name
   its baseline, target workload, success metrics, correctness oracle, and
   fallback path before it can become a default.
+- Treat these tracks as a coordinated system rather than isolated features.
+  Memory pressure is an input to scheduling; scheduling determines prefill and
+  decode placement; disaggregation adds transfer memory, backpressure, and
+  failure states that must feed back into admission and routing decisions.
 - Execute the tracks in evidence-driven stages: first establish memory-capacity
   accounting and allocation/lifetime instrumentation; next improve the
   colocated scheduler; then prototype prefill/decode disaggregation on top of
@@ -87,6 +91,12 @@
   reuse of stable workspaces, staging buffers, KV-cache storage, and recurrent
   state over repeated temporary allocation. Prove shape, dtype, stream/event,
   aliasing, and CUDA Graph lifetime invariants before reusing storage.
+- Investigate tensor-space reuse in this order: inventory large and frequent
+  allocations; record live ranges and stream ownership; group compatible
+  shape/dtype/alignment classes; introduce bounded reusable arenas or pools;
+  then measure fragmentation and end-to-end effects. Never reuse storage whose
+  prior asynchronous consumer has not completed, and zero or overwrite data
+  whenever stale contents could become observable.
 - Treat tensor-space reuse as a correctness-sensitive allocator change. Add
   peak allocated/reserved memory, allocation count, fragmentation, and
   end-to-end latency measurements, plus tests that detect overlapping live
@@ -97,6 +107,16 @@
   policy. Require an end-to-end comparison against the colocated path under
   both steady and bursty traffic; do not infer a win from isolated transfer
   bandwidth.
+- Advance PD disaggregation through independently testable milestones:
+  protocol correctness and recovery; bounded transfer memory; overlap and
+  batching; topology-aware placement; load-aware routing; and finally
+  multi-node fault handling. Admission control must account for both KV cache
+  capacity and in-flight transfer/staging bytes.
+- Advance scheduler work through deterministic policies first: explicit token
+  and memory budgets, chunked-prefill/decode arbitration, starvation bounds,
+  preemption cost accounting, and topology-aware placement. Add learned or
+  adaptive policy only when it beats a deterministic baseline across multiple
+  traces without violating latency or fairness limits.
 - For these tracks, inspect current primary-source designs and relevant PRs in
   vLLM and SGLang, plus specialized systems such as Mooncake, Dynamo, DistServe,
   TensorRT-LLM, or PyTorch where applicable. Record why a design does or does
