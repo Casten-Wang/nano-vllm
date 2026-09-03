@@ -265,6 +265,57 @@ def test_decode_convolution_can_reuse_state_storage(kernel_size):
     torch.testing.assert_close(actual_state, expected_state)
 
 
+@pytest.mark.parametrize("kernel_size", [1, 2, 4])
+def test_decode_convolution_can_reuse_projection_storage(kernel_size):
+    torch.manual_seed(41)
+    x = torch.randn(3, 7)
+    state = torch.randn(3, 7, kernel_size)
+    weight = torch.randn(7, kernel_size)
+    bias = torch.randn(7)
+    expected, _ = qwen35_gated_delta.causal_conv1d_step(
+        x,
+        state,
+        weight,
+        bias,
+    )
+    reusable_x = x.clone()
+    reusable_state = state.clone()
+    storage = reusable_x.data_ptr()
+
+    with torch.inference_mode():
+        actual, _ = qwen35_gated_delta.causal_conv1d_step(
+            reusable_x,
+            reusable_state,
+            weight,
+            bias,
+            inplace_state=True,
+            inplace_output=True,
+        )
+
+    assert actual.data_ptr() == storage
+    torch.testing.assert_close(actual, expected)
+
+
+def test_decode_convolution_output_reuse_preserves_autograd_input():
+    x = torch.randn(2, 5, requires_grad=True)
+    original = x.detach().clone()
+    state = torch.randn(2, 5, 3, requires_grad=True)
+    weight = torch.randn(5, 3, requires_grad=True)
+
+    output, next_state = qwen35_gated_delta.causal_conv1d_step(
+        x,
+        state,
+        weight,
+        inplace_state=True,
+        inplace_output=True,
+    )
+    (output.sum() + next_state.sum()).backward()
+
+    assert output.data_ptr() != x.data_ptr()
+    torch.testing.assert_close(x.detach(), original)
+    assert x.grad is not None
+
+
 def test_decode_convolution_preserves_state_when_autograd_is_enabled():
     x = torch.randn(2, 5, requires_grad=True)
     state = torch.randn(2, 5, 4)
@@ -1443,6 +1494,46 @@ def test_batched_decode_matches_individual_slot_updates():
 
     torch.testing.assert_close(torch.cat(individual), batched)
     torch.testing.assert_close(layer.state_pool.recurrent, batched_state)
+
+
+def test_decode_layer_reuses_qkv_projection_for_convolution_output():
+    torch.manual_seed(23)
+    layer = make_layer()
+    layer.allocate_state_cache(2, "cpu")
+    hidden = torch.randn(2, 4)
+    context = SimpleNamespace(
+        is_mixed=False,
+        is_prefill=False,
+        state_slots=torch.tensor([0, 1], dtype=torch.int64),
+        state_reset_mask=torch.tensor([True, True]),
+        state_token_ranges=(),
+        decode_state_span=(0, 2),
+    )
+    context_module = types.ModuleType("nanovllm.utils.context")
+    context_module.get_context = lambda: context
+    observed = {}
+    original_step = qwen35_gated_delta.causal_conv1d_step
+
+    def capture_step(x, *args, **kwargs):
+        observed["input"] = x.data_ptr()
+        output, next_state = original_step(x, *args, **kwargs)
+        observed["output"] = output.data_ptr()
+        observed["inplace_output"] = kwargs.get("inplace_output")
+        return output, next_state
+
+    with (
+        torch.inference_mode(),
+        patch.dict(sys.modules, {"nanovllm.utils.context": context_module}),
+        patch.object(
+            qwen35_gated_delta,
+            "causal_conv1d_step",
+            side_effect=capture_step,
+        ),
+    ):
+        layer(hidden)
+
+    assert observed["inplace_output"] is True
+    assert observed["output"] == observed["input"]
 
 
 def test_decode_padding_scratch_slot_does_not_change_real_states():

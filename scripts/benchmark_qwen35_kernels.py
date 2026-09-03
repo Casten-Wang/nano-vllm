@@ -2686,16 +2686,22 @@ def benchmark_decode_convolution(args, device, dtype, local_conv_channels) -> di
         dtype=dtype,
     )
     candidate_state = state.clone()
+    candidate_input = x.clone()
 
     def reference():
         return GDN.causal_conv1d_step(x, state, weight)
 
     def candidate():
+        # A real model step receives fresh projection output. Refresh the
+        # standalone microbenchmark input explicitly because the candidate
+        # intentionally overwrites it; this makes timing conservative.
+        candidate_input.copy_(x)
         return GDN.causal_conv1d_step(
-            x,
+            candidate_input,
             candidate_state,
             weight,
             inplace_state=True,
+            inplace_output=True,
         )
 
     result = compare(
@@ -2709,6 +2715,11 @@ def benchmark_decode_convolution(args, device, dtype, local_conv_channels) -> di
     result["reused_convolution_state_mib"] = (
         state.numel() * state.element_size() / 1024 / 1024
     )
+    result["reused_projection_output_mib"] = (
+        x.numel() * x.element_size() / 1024 / 1024
+    )
+    result["candidate_reuses_projection_output"] = True
+    result["candidate_timing_includes_input_refresh_copy"] = True
     return result
 
 

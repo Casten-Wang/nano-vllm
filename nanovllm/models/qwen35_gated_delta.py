@@ -87,8 +87,9 @@ def causal_conv1d_step(
     bias: torch.Tensor | None = None,
     *,
     inplace_state: bool = False,
+    inplace_output: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Apply one depthwise causal-convolution step without in-place mutation.
+    """Apply one depthwise causal-convolution step with optional storage reuse.
 
     Args:
         x: Current input with shape ``[batch, channels]``.
@@ -106,7 +107,20 @@ def causal_conv1d_step(
         next_state = state
     else:
         next_state = torch.cat((state[..., 1:], x.unsqueeze(-1)), dim=-1)
-    output = (next_state.to(weight.dtype) * weight.unsqueeze(0)).sum(dim=-1)
+    weighted_state = next_state.to(weight.dtype) * weight.unsqueeze(0)
+    can_reuse_input = (
+        inplace_output
+        and not torch.is_grad_enabled()
+        and x.dtype == weight.dtype
+    )
+    if can_reuse_input:
+        # ``x`` has already been copied into ``next_state`` and has no later
+        # consumer in decode. Reuse it for both the reduction and activation.
+        torch.sum(weighted_state, dim=-1, out=x)
+        if bias is not None:
+            x.add_(bias)
+        return F.silu(x, inplace=True), next_state
+    output = weighted_state.sum(dim=-1)
     if bias is not None:
         output = output + bias
     return F.silu(output).to(x.dtype), next_state
@@ -1127,6 +1141,7 @@ class Qwen35GatedDeltaNet(nn.Module):
             conv_state,
             self.conv1d.weight.squeeze(1),
             inplace_state=True,
+            inplace_output=True,
         )
         convolved = convolved.unsqueeze(1)
         query, key, value = convolved.split(

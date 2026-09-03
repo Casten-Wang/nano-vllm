@@ -444,6 +444,9 @@ def test_decode_convolution_benchmark_tracks_reused_state():
     )
 
     assert result["reused_convolution_state_mib"] == 4 * 6 * 4 * 2 / 1024 / 1024
+    assert result["reused_projection_output_mib"] == 4 * 6 * 2 / 1024 / 1024
+    assert result["candidate_reuses_projection_output"]
+    assert result["candidate_timing_includes_input_refresh_copy"]
     assert all(item["max_abs_error"] == 0 for item in result["errors"])
 
 
