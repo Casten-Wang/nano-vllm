@@ -136,6 +136,46 @@ def test_model_runner_exposes_serializable_heterogeneous_transfer_preflight():
     assert report["destination_peer_counts"] == (1,) * 8
 
 
+@pytest.mark.parametrize("src_tp_size,dst_tp_size", [(4, 8), (8, 4)])
+@pytest.mark.parametrize(
+    "kv_dtype,recurrent_dtype",
+    [
+        (torch.bfloat16, torch.float32),
+        (torch.int8, torch.bfloat16),
+    ],
+)
+def test_heterogeneous_destination_bytes_match_destination_cache_layout(
+    src_tp_size,
+    dst_tp_size,
+    kv_dtype,
+    recurrent_dtype,
+):
+    model_spec = make_qwen36_model_spec()
+    kwargs = {
+        "num_blocks": 3,
+        "block_size": 256,
+        "kv_dtype": kv_dtype,
+        "recurrent_dtype": recurrent_dtype,
+        "convolution_dtype": torch.bfloat16,
+    }
+
+    heterogeneous = plan_qwen35_cache_transfer_capacity(
+        model_spec,
+        src_tp_size=src_tp_size,
+        dst_tp_size=dst_tp_size,
+        **kwargs,
+    )
+    destination_local = plan_qwen35_cache_transfer_capacity(
+        model_spec,
+        src_tp_size=dst_tp_size,
+        dst_tp_size=dst_tp_size,
+        **kwargs,
+    )
+
+    assert heterogeneous.destination_bytes == destination_local.source_staging_bytes
+    assert heterogeneous.wire_bytes == destination_local.wire_bytes
+
+
 def test_float_rank_cache_round_trip_uses_logical_block_order():
     source = make_float_cache()
     recurrent, convolution = make_states()

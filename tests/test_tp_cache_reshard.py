@@ -1,3 +1,5 @@
+import json
+
 import pytest
 import torch
 
@@ -278,6 +280,54 @@ def test_request_profile_aggregates_all_qwen36_cache_components(
     )
     assert len(request_profile.peer_bytes) == max(src_tp, dst_tp)
     assert estimated_profile == request_profile
+
+
+def test_transfer_profile_survives_json_control_plane_round_trip():
+    profile = profile_qwen35_cache_transfer_layout(
+        src_tp_size=4,
+        dst_tp_size=8,
+        total_kv_heads=2,
+        kv_bytes_per_head=1_024,
+        kv_scale_bytes_per_head=32,
+        recurrent_heads=32,
+        recurrent_bytes_per_head=512,
+        convolution_group_widths=(16, 16, 32),
+        convolution_bytes_per_channel=64,
+    )
+    report = json.loads(json.dumps(profile.to_dict()))
+
+    assert TPTransferProfile.from_dict(report) == profile
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("source_tp_size", 8, "source_tp_size"),
+        ("destination_tp_size", True, "destination_tp_size"),
+        ("peer_bytes", [[0, 0]], "peer_bytes"),
+    ],
+)
+def test_transfer_profile_rejects_corrupted_serialized_topology(
+    field,
+    value,
+    message,
+):
+    profile = profile_qwen35_cache_transfer_layout(
+        src_tp_size=4,
+        dst_tp_size=8,
+        total_kv_heads=2,
+        kv_bytes_per_head=1_024,
+        kv_scale_bytes_per_head=0,
+        recurrent_heads=32,
+        recurrent_bytes_per_head=512,
+        convolution_group_widths=(16, 16, 32),
+        convolution_bytes_per_channel=64,
+    )
+    report = profile.to_dict()
+    report[field] = value
+
+    with pytest.raises(ValueError, match=message):
+        TPTransferProfile.from_dict(report)
 
 
 def test_layout_preflight_omits_scale_traffic_for_floating_kv_cache():

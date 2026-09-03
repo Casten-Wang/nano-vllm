@@ -7,7 +7,7 @@ the production transport may later replace that work with direct peer slices.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 import math
 
@@ -152,6 +152,61 @@ class TPTransferProfile:
             "peer_bytes": self.peer_bytes,
             "slice_count": self.slice_count,
         }
+
+    @classmethod
+    def from_dict(cls, report: Mapping[str, object]) -> "TPTransferProfile":
+        """Rebuild and fully validate a control-plane transfer report."""
+
+        if not isinstance(report, Mapping):
+            raise ValueError("transfer profile report must be a mapping")
+
+        def rank_vector(name: str) -> tuple[int, ...]:
+            values = report.get(name)
+            if not isinstance(values, (tuple, list)) or not values:
+                raise ValueError(f"{name} must be a non-empty rank vector")
+            return tuple(values)
+
+        def counter(name: str) -> int:
+            value = report.get(name)
+            if (
+                not isinstance(value, int)
+                or isinstance(value, bool)
+                or value < 0
+            ):
+                raise ValueError(f"{name} must be a non-negative integer")
+            return value
+
+        raw_peers = report.get("peer_bytes")
+        if not isinstance(raw_peers, (tuple, list)) or not raw_peers:
+            raise ValueError("peer_bytes must be a non-empty peer vector")
+        peers = []
+        for peer in raw_peers:
+            if not isinstance(peer, (tuple, list)) or len(peer) != 3:
+                raise ValueError("peer_bytes entries must contain source, destination, bytes")
+            peers.append(tuple(peer))
+
+        profile = cls(
+            wire_bytes=counter("wire_bytes"),
+            source_bytes=rank_vector("source_egress_bytes"),
+            source_staging_bytes=rank_vector("source_staging_bytes"),
+            destination_bytes=rank_vector("destination_bytes"),
+            source_peer_counts=rank_vector("source_peer_counts"),
+            destination_peer_counts=rank_vector("destination_peer_counts"),
+            peer_bytes=tuple(peers),
+            slice_count=counter("slice_count"),
+        )
+        for name, actual in (
+            ("source_tp_size", len(profile.source_bytes)),
+            ("destination_tp_size", len(profile.destination_bytes)),
+        ):
+            declared = report.get(name)
+            if (
+                not isinstance(declared, int)
+                or isinstance(declared, bool)
+                or declared != actual
+            ):
+                raise ValueError(f"{name} does not match the rank vectors")
+        return profile
 
 
 class TPPeerTransferSession:

@@ -100,10 +100,21 @@ def test_router_accepts_per_destination_demands_for_heterogeneous_nodes():
 def test_heterogeneous_preflight_uses_destination_wire_bytes_for_admission():
     preflight = {
         "kv_blocks": 4,
+        "source_tp_size": 2,
+        "destination_tp_size": 4,
         "wire_bytes": 800,
         "source_egress_bytes": (400, 400),
         "source_staging_bytes": (100, 100),
         "destination_bytes": (200, 200, 200, 200),
+        "source_peer_counts": (2, 2),
+        "destination_peer_counts": (1, 1, 1, 1),
+        "peer_bytes": (
+            (0, 0, 200),
+            (0, 1, 200),
+            (1, 2, 200),
+            (1, 3, 200),
+        ),
+        "slice_count": 4,
     }
 
     demand = demand_from_heterogeneous_transfer_preflight(preflight)
@@ -124,7 +135,7 @@ def test_heterogeneous_preflight_uses_destination_wire_bytes_for_admission():
         ({"destination_bytes": ()}, "destination_bytes"),
         ({"source_egress_bytes": ()}, "source_egress_bytes"),
         ({"wire_bytes": True}, "wire_bytes"),
-        ({"destination_bytes": (399, 400)}, "do not match"),
+        ({"destination_bytes": (199, 200, 200, 200)}, "do not match"),
         ({"source_egress_bytes": (399, 400)}, "do not match"),
     ],
 )
@@ -134,9 +145,21 @@ def test_heterogeneous_preflight_rejects_inconsistent_transfer_bytes(
 ):
     preflight = {
         "kv_blocks": 4,
+        "source_tp_size": 2,
+        "destination_tp_size": 4,
         "wire_bytes": 800,
         "source_egress_bytes": (400, 400),
+        "source_staging_bytes": (400, 400),
         "destination_bytes": (200, 200, 200, 200),
+        "source_peer_counts": (2, 2),
+        "destination_peer_counts": (1, 1, 1, 1),
+        "peer_bytes": (
+            (0, 0, 200),
+            (0, 1, 200),
+            (1, 2, 200),
+            (1, 3, 200),
+        ),
+        "slice_count": 4,
         **update,
     }
 

@@ -6,6 +6,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from fractions import Fraction
 
+from nanovllm.engine.tp_cache_reshard import TPTransferProfile
+
 
 CapacityValue = int | float | None
 CapacitySnapshot = Mapping[str, CapacityValue]
@@ -43,39 +45,10 @@ def demand_from_heterogeneous_transfer_preflight(
     not be used to admit destination work.
     """
 
-    kv_blocks = preflight.get("kv_blocks")
-    wire_bytes = preflight.get("wire_bytes")
-    destination_bytes = preflight.get("destination_bytes")
-    source_egress_bytes = preflight.get("source_egress_bytes")
-    if not isinstance(destination_bytes, (tuple, list)) or not destination_bytes:
-        raise ValueError("destination_bytes must be a non-empty rank vector")
-    if not isinstance(source_egress_bytes, (tuple, list)) or not source_egress_bytes:
-        raise ValueError("source_egress_bytes must be a non-empty rank vector")
-    for name, rank_bytes in (
-        ("destination_bytes", destination_bytes),
-        ("source_egress_bytes", source_egress_bytes),
-    ):
-        if any(
-            not isinstance(value, int)
-            or isinstance(value, bool)
-            or value < 0
-            for value in rank_bytes
-        ):
-            raise ValueError(f"{name} must contain non-negative integers")
-    if (
-        not isinstance(wire_bytes, int)
-        or isinstance(wire_bytes, bool)
-        or wire_bytes < 0
-    ):
-        raise ValueError("wire_bytes must be a non-negative integer")
-    if (
-        sum(destination_bytes) != wire_bytes
-        or sum(source_egress_bytes) != wire_bytes
-    ):
-        raise ValueError("transfer rank bytes do not match wire_bytes")
+    profile = TPTransferProfile.from_dict(preflight)
     return RemotePrefillDemand(
-        kv_blocks=kv_blocks,
-        staging_bytes=wire_bytes,
+        kv_blocks=preflight.get("kv_blocks"),
+        staging_bytes=profile.wire_bytes,
     )
 
 
