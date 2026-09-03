@@ -317,9 +317,7 @@ def filter_top_k_candidates(
     if any_top_p_enabled:
         selected_probs = torch.softmax(selected_logits, dim=-1)
         cumulative_probs = torch.cumsum(selected_probs, dim=-1)
-        selected_remove = cumulative_probs > top_ps.unsqueeze(1)
-        selected_remove[:, 1:] = selected_remove[:, :-1].clone()
-        selected_remove[:, 0] = False
+        selected_remove = _exclusive_top_p_mask(cumulative_probs, top_ps)
         selected_logits.masked_fill_(selected_remove, float("-inf"))
     return selected_logits
 

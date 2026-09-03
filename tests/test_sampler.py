@@ -29,6 +29,7 @@ sampling_params_module = load_module(
 )
 apply_top_k_top_p = sampler_module.apply_top_k_top_p
 build_sampling_metadata = sampler_module.build_sampling_metadata
+filter_top_k_candidates = sampler_module.filter_top_k_candidates
 Sampler = sampler_module.Sampler
 SamplingParams = sampling_params_module.SamplingParams
 
@@ -214,6 +215,30 @@ class SamplerTest(unittest.TestCase):
         self.assertTrue(torch.isneginf(filtered[0, 1:]).all())
         self.assertTrue(torch.isfinite(filtered[1, :2]).all())
         self.assertTrue(torch.isneginf(filtered[1, 2:]).all())
+
+    def test_compact_top_k_top_p_does_not_clone_shifted_mask(self):
+        selected_logits = torch.log(
+            torch.tensor([[0.50, 0.25, 0.15, 0.10]])
+        )
+        temperatures = torch.ones(1)
+        top_ks = torch.tensor([4], dtype=torch.int32)
+        top_ps = torch.tensor([0.80], dtype=torch.float32)
+
+        with patch.object(
+            torch.Tensor,
+            "clone",
+            side_effect=AssertionError("compact top-p mask must not clone"),
+        ):
+            filtered = filter_top_k_candidates(
+                selected_logits,
+                temperatures,
+                top_ks,
+                top_ps,
+                any_top_p_enabled=True,
+            )
+
+        self.assertTrue(torch.isfinite(filtered[0, :3]).all())
+        self.assertTrue(torch.isneginf(filtered[0, 3]))
 
     def test_all_greedy_rows_use_argmax_without_sampling(self):
         sampler = Sampler()
