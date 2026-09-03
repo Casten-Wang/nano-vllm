@@ -126,6 +126,36 @@ def test_fp8_loader_coverage_rejects_unclassified_skip():
     assert result["unclassified_skipped_fp8_weights"] == ["audio.weight"]
 
 
+def test_native_fp8_storage_projection_keeps_non_fp8_parameters():
+    result = MODULE.project_native_fp8_parameter_storage(
+        1_000,
+        {
+            "estimated_local_bf16_temporary_bytes": 800,
+            "requested_payload_bytes": 420,
+        },
+    )
+
+    assert result["current_parameter_bytes"] == 1_000
+    assert result["dequantized_fp8_weight_bytes"] == 800
+    assert result["non_fp8_parameter_bytes"] == 200
+    assert result["quantized_weight_and_scale_bytes"] == 420
+    assert result["projected_parameter_bytes"] == 620
+    assert result["projected_saved_bytes"] == 380
+    assert result["projected_saved_fraction"] == pytest.approx(0.38)
+    assert "not validated" in result["scope"]
+
+
+def test_native_fp8_storage_projection_rejects_impossible_accounting():
+    with pytest.raises(ValueError, match="must fit"):
+        MODULE.project_native_fp8_parameter_storage(
+            100,
+            {
+                "estimated_local_bf16_temporary_bytes": 101,
+                "requested_payload_bytes": 50,
+            },
+        )
+
+
 def test_header_only_audit_reports_shape_error():
     model = torch.nn.Linear(2, 3, bias=False, device="meta")
     headers = {"weight": {"dtype": "F32", "shape": [4, 2]}}

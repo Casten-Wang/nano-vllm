@@ -710,6 +710,42 @@ def audit_fp8_loader_coverage(
     }
 
 
+def project_native_fp8_parameter_storage(
+    local_parameter_bytes: int,
+    loader_coverage: dict,
+) -> dict:
+    """Project rank-local storage if mapped FP8 weights remain quantized.
+
+    The current reference loader materializes every mapped FP8 element in
+    BF16 parameter storage.  A native backend would replace exactly that
+    storage with the rank-local FP8 payload and its block scales while leaving
+    checkpoint-ignored BF16 parameters unchanged.
+    """
+
+    dequantized_bytes = loader_coverage["estimated_local_bf16_temporary_bytes"]
+    quantized_bytes = loader_coverage["requested_payload_bytes"]
+    if not 0 <= dequantized_bytes <= local_parameter_bytes:
+        raise ValueError("FP8 dequantized bytes must fit in local parameters")
+    non_fp8_bytes = local_parameter_bytes - dequantized_bytes
+    projected_bytes = non_fp8_bytes + quantized_bytes
+    saved_bytes = local_parameter_bytes - projected_bytes
+    return {
+        "scope": (
+            "storage projection only; native FP8 kernels, activation "
+            "quantization, accuracy, and performance are not validated"
+        ),
+        "current_parameter_bytes": local_parameter_bytes,
+        "dequantized_fp8_weight_bytes": dequantized_bytes,
+        "non_fp8_parameter_bytes": non_fp8_bytes,
+        "quantized_weight_and_scale_bytes": quantized_bytes,
+        "projected_parameter_bytes": projected_bytes,
+        "projected_saved_bytes": saved_bytes,
+        "projected_saved_fraction": (
+            saved_bytes / local_parameter_bytes if local_parameter_bytes else 0.0
+        ),
+    }
+
+
 def parse_tp_sizes(value: str) -> tuple[int, ...]:
     sizes = tuple(int(item.strip()) for item in value.split(",") if item.strip())
     if not sizes or any(size <= 0 for size in sizes):
@@ -863,6 +899,12 @@ def main() -> None:
                         model,
                         headers,
                         quantization.weight_block_size,
+                    )
+                    result["native_fp8_storage_projection"] = (
+                        project_native_fp8_parameter_storage(
+                            result["local_parameter_bytes"],
+                            result["fp8_loader_coverage"],
+                        )
                     )
                 result["quantized_tp_layout"] = audit_quantized_tp_layout(
                     unstacked_logical_headers,
