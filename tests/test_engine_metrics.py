@@ -144,6 +144,29 @@ class EngineMetricsTest(unittest.TestCase):
             for percentile in ("p50", "p95", "p99"):
                 self.assertEqual(result[f"{percentile}_{metric}_s"], 0.0)
 
+    def test_remote_prefill_receive_metrics_track_batching_and_outcomes(self):
+        metrics = EngineMetrics()
+        metrics.record_remote_prefill_receive_started()
+        metrics.record_remote_prefill_receive_started()
+        metrics.record_remote_prefill_poll(2)
+        metrics.record_remote_prefill_receive_finished(0.4, outcome="committed")
+        metrics.record_remote_prefill_receive_finished(0.6, outcome="timed_out")
+
+        result = metrics.to_dict()
+        self.assertEqual(result["remote_prefill_receive_started"], 2)
+        self.assertEqual(result["remote_prefill_receive_committed"], 1)
+        self.assertEqual(result["remote_prefill_receive_timed_out"], 1)
+        self.assertEqual(result["remote_prefill_receive_failed"], 0)
+        self.assertEqual(result["remote_prefill_poll_calls"], 1)
+        self.assertEqual(result["remote_prefill_requests_polled"], 2)
+        self.assertEqual(result["remote_prefill_receive_time_s"], 1.0)
+        self.assertEqual(result["avg_remote_prefill_receive_time_s"], 0.5)
+        self.assertEqual(result["max_remote_prefill_receive_time_s"], 0.6)
+
+        metrics.reset()
+        self.assertEqual(metrics.to_dict()["remote_prefill_receive_started"], 0)
+        self.assertEqual(metrics.to_dict()["remote_prefill_poll_calls"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

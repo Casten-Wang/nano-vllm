@@ -1,6 +1,7 @@
 import socket
 from threading import Thread
 from time import monotonic, sleep
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -347,3 +348,23 @@ def test_model_runner_async_receive_polls_then_installs_before_ack():
     assert sender_result[0]["sent_bytes"] > 0
     assert len(installed) == 1
     assert payload.transfer_id not in destination._pending_cache_receives
+
+
+def test_model_runner_batches_receive_states_in_one_result():
+    runner = object.__new__(ModelRunner)
+    runner.rank = 2
+    runner._pending_cache_receives = {
+        "ready": SimpleNamespace(poll=lambda: ("ready", None)),
+        "failed": SimpleNamespace(poll=lambda: ("failed", "checksum mismatch")),
+    }
+
+    assert runner.poll_sequence_cache_receives(["ready", "failed"]) == {
+        "rank": 2,
+        "receives": {
+            "ready": {"state": "ready"},
+            "failed": {"state": "failed", "error": "checksum mismatch"},
+        },
+    }
+
+    with pytest.raises(ValueError, match="unique non-empty"):
+        runner.poll_sequence_cache_receives(["ready", "ready"])

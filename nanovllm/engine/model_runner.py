@@ -1152,6 +1152,24 @@ class ModelRunner:
             result["error"] = error
         return result
 
+    def poll_sequence_cache_receives(self, transfer_ids: list[str]) -> dict:
+        """Poll multiple CPU receive tasks in one TP control command."""
+
+        if (
+            not isinstance(transfer_ids, list)
+            or not transfer_ids
+            or any(not isinstance(item, str) or not item for item in transfer_ids)
+            or len(set(transfer_ids)) != len(transfer_ids)
+        ):
+            raise ValueError("cache receive ids must be unique non-empty strings")
+        receives = {}
+        for transfer_id in transfer_ids:
+            result = self.poll_sequence_cache_receive(transfer_id)
+            receives[transfer_id] = {
+                key: value for key, value in result.items() if key != "rank"
+            }
+        return {"rank": self.rank, "receives": receives}
+
     def install_sequence_cache_receive(
         self,
         seq: Sequence,

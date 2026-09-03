@@ -4,6 +4,7 @@ from unittest.mock import Mock
 import pytest
 
 from nanovllm.engine.llm_engine import LLMEngine
+from nanovllm.engine.metrics import EngineMetrics
 from nanovllm.engine.scheduler import ScheduleResult, Scheduler
 from nanovllm.engine.sequence import Sequence, SequenceStatus
 from nanovllm.sampling_params import SamplingParams
@@ -47,6 +48,25 @@ def make_engine(*, tensor_parallel_size=1):
                 }
                 for rank in range(tensor_parallel_size)
             ]
+        if method_name == "poll_sequence_cache_receives":
+            transfer_ids = args[0]
+            return [
+                {
+                    "rank": rank,
+                    "receives": {
+                        transfer_id: {
+                            "state": async_state["value"],
+                            **(
+                                {"error": async_state["error"]}
+                                if async_state["error"] is not None
+                                else {}
+                            ),
+                        }
+                        for transfer_id in transfer_ids
+                    },
+                }
+                for rank in range(tensor_parallel_size)
+            ]
         if method_name == "abort_sequence_cache_receive":
             return [
                 {"rank": rank, "aborted": 1}
@@ -72,8 +92,10 @@ def make_engine(*, tensor_parallel_size=1):
         call_rank_results=Mock(side_effect=rank_results),
     )
     engine._remote_prefill_receive_tokens = {}
+    engine._remote_prefill_receive_started_at = {}
     engine._remote_prefill_receive_errors = {}
     engine._test_async_state = async_state
+    engine.metrics = EngineMetrics()
     return engine
 
 
@@ -104,29 +126,49 @@ def test_idle_remote_prefill_step_polls_without_running_model():
 
 
 def test_step_polls_active_async_receive_then_continues_scheduling():
-    engine = object.__new__(LLMEngine)
-    engine._remote_prefill_receive_tokens = {"request/attempt-1": 9}
-    engine._remote_prefill_receive_errors = {}
-    engine.poll_remote_prefill_receive = Mock(return_value=None)
-    engine.scheduler = SimpleNamespace(
-        poll_remote_prefills=Mock(return_value=[]),
-        schedule=Mock(return_value=ScheduleResult([], [])),
-        num_waiting=1,
-        num_running=0,
-        block_manager=SimpleNamespace(num_used_blocks=1, num_total_blocks=8),
-        prefill_starved_steps=0,
-        max_prefill_starvation_steps=0,
-        preemption_count=0,
-        preempted_token_progress=0,
-        max_preempted_token_progress=0,
-        reclaimed_kv_blocks=0,
+    engine = make_engine()
+    engine.add_remote_prefill_request(
+        [1, 2, 3, 4],
+        SamplingParams(max_tokens=4),
+        transfer_id="request/attempt-1",
     )
-    engine.metrics = SimpleNamespace(record_scheduler_state=Mock())
-    engine.model_runner = SimpleNamespace(call=Mock())
+    engine.start_remote_prefill_receive(
+        "request/attempt-1",
+        9,
+        [("127.0.0.1", 20001)],
+    )
+    engine.model_runner.call_rank_results.reset_mock()
+    assert engine.step() == ([], 0, 0, 0)
+    engine.model_runner.call_rank_results.assert_called_once_with(
+        "poll_sequence_cache_receives",
+        ["request/attempt-1"],
+    )
+
+
+def test_step_batches_multiple_async_receive_polls_into_one_tp_command():
+    engine = make_engine()
+    for index in range(2):
+        transfer_id = f"request/attempt-{index}"
+        engine.add_remote_prefill_request(
+            [index + 1, 2, 3, 4],
+            SamplingParams(max_tokens=4),
+            transfer_id=transfer_id,
+        )
+        engine.start_remote_prefill_receive(
+            transfer_id,
+            9,
+            [("127.0.0.1", 20001 + index)],
+        )
+    engine.model_runner.call_rank_results.reset_mock()
 
     assert engine.step() == ([], 0, 0, 0)
-    engine.poll_remote_prefill_receive.assert_called_once_with("request/attempt-1")
-    engine.scheduler.schedule.assert_called_once()
+    engine.model_runner.call_rank_results.assert_called_once_with(
+        "poll_sequence_cache_receives",
+        ["request/attempt-0", "request/attempt-1"],
+    )
+    metrics = engine.metrics.to_dict()
+    assert metrics["remote_prefill_poll_calls"] == 1
+    assert metrics["remote_prefill_requests_polled"] == 2
 
 
 def test_engine_commits_remote_prefill_only_after_all_rank_receive():
@@ -253,6 +295,10 @@ def test_engine_async_receive_commits_only_after_all_ranks_are_ready():
     assert engine.poll_remote_prefill_receive("request/attempt-1") == seq_id
     assert engine.scheduler.running[0].completion_token_ids == [9]
     assert not engine.scheduler.remote_prefills
+    metrics = engine.metrics.to_dict()
+    assert metrics["remote_prefill_receive_started"] == 1
+    assert metrics["remote_prefill_receive_committed"] == 1
+    assert metrics["remote_prefill_poll_calls"] == 2
 
 
 def test_engine_async_receive_failure_aborts_all_ranks_and_falls_back():
@@ -275,6 +321,7 @@ def test_engine_async_receive_failure_aborts_all_ranks_and_falls_back():
     assert engine.scheduler.waiting[0].seq_id == seq_id
     assert not engine.scheduler.remote_prefills
     assert "request/attempt-1" not in engine._remote_prefill_receive_tokens
+    assert engine.metrics.to_dict()["remote_prefill_receive_failed"] == 1
 
 
 def test_engine_async_receive_can_be_cancelled_explicitly():
@@ -296,6 +343,7 @@ def test_engine_async_receive_can_be_cancelled_explicitly():
     ) == seq_id
     assert engine.scheduler.waiting[0].seq_id == seq_id
     assert not engine.scheduler.remote_prefills
+    assert engine.metrics.to_dict()["remote_prefill_receive_cancelled"] == 1
 
 
 def test_engine_releases_prefill_source_only_after_receiver_ack():
