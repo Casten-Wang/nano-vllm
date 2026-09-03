@@ -152,17 +152,28 @@ class Scheduler:
         self.waiting.remove(seq)
         self.remote_prefills[transfer_id] = (seq, session)
 
-    def _rollback_remote_prefill(self, transfer_id: str) -> Sequence:
+    def _release_remote_prefill(
+        self,
+        transfer_id: str,
+        *,
+        fallback: bool,
+    ) -> Sequence:
         seq, _ = self.remote_prefills.pop(transfer_id)
         self.block_manager.deallocate(seq)
         if self.state_manager is not None:
             self.state_manager.release(seq.seq_id)
         seq.state_slot = None
-        seq.status = SequenceStatus.WAITING
-        seq.is_prefill = True
+        seq.status = (
+            SequenceStatus.WAITING if fallback else SequenceStatus.FINISHED
+        )
         seq.num_scheduled_tokens = 0
-        self.waiting.appendleft(seq)
+        if fallback:
+            seq.is_prefill = True
+            self.waiting.appendleft(seq)
         return seq
+
+    def _rollback_remote_prefill(self, transfer_id: str) -> Sequence:
+        return self._release_remote_prefill(transfer_id, fallback=True)
 
     def fail_remote_prefill(
         self,
@@ -190,6 +201,21 @@ class Scheduler:
         if not session.fallback_required:
             session.fail(0, reason, now=now)
         return self._rollback_remote_prefill(transfer_id)
+
+    def cancel_remote_prefill(
+        self,
+        transfer_id: str,
+        reason: str,
+        *,
+        now: float,
+    ) -> Sequence:
+        """Release an unstarted destination reservation without local fallback."""
+
+        _, session = self.remote_prefills[transfer_id]
+        session.poll(now=now)
+        if not session.fallback_required:
+            session.fail(0, reason, now=now)
+        return self._release_remote_prefill(transfer_id, fallback=False)
 
     def poll_remote_prefills(self, *, now: float) -> list[Sequence]:
         fallback = []

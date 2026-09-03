@@ -488,6 +488,29 @@ class LLMEngine:
         getattr(self, "_remote_prefill_receive_errors", {}).pop(transfer_id, None)
         return seq.seq_id
 
+    def cancel_remote_prefill_reservation(
+        self,
+        transfer_id: str,
+        *,
+        reason: str = "remote prefill destination rejected",
+    ) -> int:
+        """Release an unstarted destination so a router can try another node."""
+
+        if transfer_id not in self.scheduler.remote_prefills:
+            raise ValueError("cache transfer id is not reserved")
+        if transfer_id in self._remote_prefill_receive_tokens:
+            raise RuntimeError(
+                "cache receive is active; abort it before releasing the request"
+            )
+        if not reason:
+            raise ValueError("cache reservation cancellation reason must not be empty")
+        seq = self.scheduler.cancel_remote_prefill(
+            transfer_id,
+            reason,
+            now=perf_counter(),
+        )
+        return seq.seq_id
+
     def _abort_remote_prefill_receive(
         self,
         transfer_id: str,

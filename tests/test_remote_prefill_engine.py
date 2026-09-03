@@ -759,6 +759,41 @@ def test_remote_prefill_demand_rejects_prompt_beyond_context_limit():
         engine.estimate_remote_prefill_demand(33)
 
 
+def test_cancel_remote_prefill_reservation_releases_all_capacity():
+    engine = make_engine()
+    capacity_before = engine.remote_prefill_capacity_snapshot()
+    seq_id = engine.add_remote_prefill_request(
+        [1, 2, 3, 4, 5],
+        SamplingParams(max_tokens=4),
+        transfer_id="request/attempt-1",
+    )
+
+    assert engine.remote_prefill_capacity_snapshot() != capacity_before
+    assert engine.cancel_remote_prefill_reservation(
+        "request/attempt-1",
+    ) == seq_id
+
+    assert engine.remote_prefill_capacity_snapshot() == capacity_before
+    assert engine.scheduler.is_finished()
+
+
+def test_cancel_remote_prefill_reservation_rejects_active_receive():
+    engine = make_engine()
+    engine.add_remote_prefill_request(
+        [1, 2, 3, 4],
+        SamplingParams(max_tokens=4),
+        transfer_id="request/attempt-1",
+    )
+    engine.start_remote_prefill_receive(
+        "request/attempt-1",
+        9,
+        [("127.0.0.1", 20001)],
+    )
+
+    with pytest.raises(RuntimeError, match="receive is active"):
+        engine.cancel_remote_prefill_reservation("request/attempt-1")
+
+
 def test_transfer_capacity_is_shared_by_sends_and_receives():
     engine = make_engine()
     source = _prepare_remote_prefill_source(engine, 1)
