@@ -2559,6 +2559,75 @@ def benchmark_contiguous_decode_state(
     return result
 
 
+def benchmark_contiguous_prefill_output_store(
+    args,
+    device,
+    dtype,
+    local_value_heads: int,
+) -> dict:
+    local_value_dim = local_value_heads * args.value_head_dim
+    token_count = args.prefill_batch * args.prefill_tokens
+    grouped_output = torch.randn(
+        args.prefill_batch,
+        args.prefill_tokens,
+        local_value_dim,
+        device=device,
+        dtype=dtype,
+    )
+    reference_output = torch.empty(
+        token_count,
+        local_value_dim,
+        device=device,
+        dtype=dtype,
+    )
+    candidate_output = torch.empty_like(reference_output)
+    group = tuple(
+        (
+            batch_index * args.prefill_tokens,
+            (batch_index + 1) * args.prefill_tokens,
+            batch_index,
+        )
+        for batch_index in range(args.prefill_batch)
+    )
+
+    def reference():
+        for batch_index, (start, end, _) in enumerate(group):
+            reference_output[start:end].copy_(grouped_output[batch_index])
+        return (reference_output,)
+
+    def candidate():
+        GDN._store_prefill_group(
+            candidate_output,
+            grouped_output,
+            args.prefill_tokens,
+            group,
+        )
+        return (candidate_output,)
+
+    result = compare(
+        reference,
+        candidate,
+        device=device,
+        warmup=args.warmup,
+        iterations=args.iterations,
+        repeats=args.repeats,
+    )
+    result.update(
+        {
+            "reference_copy_launches": args.prefill_batch,
+            "candidate_copy_launches": 1,
+            "avoided_copy_launches": args.prefill_batch - 1,
+            "copied_output_mib": (
+                grouped_output.numel()
+                * grouped_output.element_size()
+                / 1024
+                / 1024
+            ),
+        }
+    )
+    return result
+
+
 def benchmark_decay_rate(args, device, dtype, local_value_heads: int) -> dict:
     hidden = torch.randn(
         args.router_tokens,
@@ -3655,6 +3724,14 @@ def main() -> None:
                 local_key_heads,
                 local_value_heads,
             ),
+            "contiguous_prefill_output_store": (
+                benchmark_contiguous_prefill_output_store(
+                    args,
+                    device,
+                    dtype,
+                    local_value_heads,
+                )
+            ),
             "delta_prefill_decay_workspace_reuse": (
                 benchmark_delta_prefill_decay_workspace_reuse(
                     args,
@@ -3823,6 +3900,14 @@ def main() -> None:
                 dtype,
                 local_value_heads,
                 local_conv_channels,
+            ),
+            "contiguous_prefill_output_store": (
+                benchmark_contiguous_prefill_output_store(
+                    args,
+                    device,
+                    dtype,
+                    local_value_heads,
+                )
             ),
             "gated_delta_decay_rate_precompute": benchmark_decay_rate(
                 args,

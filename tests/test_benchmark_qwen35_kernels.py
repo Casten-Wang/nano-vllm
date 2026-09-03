@@ -330,6 +330,30 @@ def test_contiguous_decode_state_benchmark_tracks_avoided_copy():
     assert all(item["max_abs_error"] == 0 for item in result["errors"])
 
 
+def test_contiguous_prefill_output_benchmark_tracks_copy_launches():
+    args = SimpleNamespace(
+        prefill_batch=3,
+        prefill_tokens=5,
+        value_head_dim=4,
+        warmup=0,
+        iterations=1,
+        repeats=1,
+    )
+
+    result = MODULE.benchmark_contiguous_prefill_output_store(
+        args,
+        torch.device("cpu"),
+        torch.bfloat16,
+        local_value_heads=2,
+    )
+
+    assert result["reference_copy_launches"] == 3
+    assert result["candidate_copy_launches"] == 1
+    assert result["avoided_copy_launches"] == 2
+    assert result["copied_output_mib"] == 3 * 5 * 2 * 4 * 2 / 1024 / 1024
+    assert all(item["max_abs_error"] == 0 for item in result["errors"])
+
+
 def test_greedy_sampler_benchmark_tracks_avoided_fp32_logits():
     args = SimpleNamespace(
         sampling_batch=4,
