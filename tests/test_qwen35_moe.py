@@ -587,6 +587,55 @@ def test_batched_expert_layers_can_share_weight_buffer_pool():
     assert pool.storage_stats()["workspace_allocation_count"] == 1
 
 
+def test_batched_expert_pool_can_be_reserved_before_first_decode():
+    pool = moe_dispatch.BatchedExpertWeightBufferPool()
+
+    pool.reserve(
+        weight_elements=96,
+        workspace_elements=40,
+        weight_dtype=torch.bfloat16,
+        activation_dtype=torch.bfloat16,
+        device=torch.device("cpu"),
+    )
+
+    assert pool.storage.shape == (96,)
+    assert pool.workspace_storage.shape == (40,)
+    assert pool.storage_stats() == {
+        "storage_bytes": 192,
+        "allocation_count": 1,
+        "reuse_count": 0,
+        "workspace_bytes": 80,
+        "workspace_allocation_count": 1,
+        "workspace_reuse_count": 0,
+    }
+    pool.reserve(
+        weight_elements=48,
+        workspace_elements=20,
+        weight_dtype=torch.bfloat16,
+        activation_dtype=torch.bfloat16,
+        device=torch.device("cpu"),
+    )
+    assert pool.storage_stats()["allocation_count"] == 1
+    assert pool.storage_stats()["workspace_allocation_count"] == 1
+    storage_pointer = pool.storage.data_ptr()
+    workspace_pointer = pool.workspace_storage.data_ptr()
+    with torch.inference_mode():
+        pool.gather(
+            torch.randn(4, 3, 4, dtype=torch.bfloat16),
+            torch.tensor([0, 1, 2, 3]),
+        )
+        pool.workspaces(
+            (2, 4),
+            (3, 4),
+            dtype=torch.bfloat16,
+            device=torch.device("cpu"),
+        )
+    assert pool.storage.data_ptr() == storage_pointer
+    assert pool.workspace_storage.data_ptr() == workspace_pointer
+    assert pool.storage_stats()["reuse_count"] == 1
+    assert pool.storage_stats()["workspace_reuse_count"] == 1
+
+
 def test_mixed_batched_backend_only_splits_decode_prefix():
     torch.manual_seed(58)
     sorted_experts = make_experts(num_experts=4)

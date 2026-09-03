@@ -90,6 +90,40 @@ class Qwen35Model(nn.Module):
             int(config.hidden_size), eps=float(config.rms_norm_eps)
         )
 
+    def reserve_runtime_buffers(self, max_decode_tokens: int) -> None:
+        """Reserve batched-MoE scratch before the KV cache consumes VRAM."""
+
+        if max_decode_tokens <= 0:
+            raise ValueError("max_decode_tokens must be positive")
+        block = next(
+            (
+                layer.mlp
+                for layer in self.layers
+                if isinstance(layer.mlp.experts, Qwen35Experts)
+                and layer.mlp.experts.decode_backend == "batched"
+            ),
+            None,
+        )
+        if block is None:
+            return
+        experts = block.experts
+        chunk_tokens = min(max_decode_tokens, experts.decode_chunk_size)
+        route_count = chunk_tokens * block.gate.top_k
+        weight_elements = route_count * max(
+            experts.gate_up_proj[0].numel(),
+            experts.down_proj[0].numel(),
+        )
+        workspace_elements = route_count * (
+            experts.gate_up_proj.shape[1] + experts.down_proj.shape[1]
+        )
+        self.moe_decode_weight_buffer_pool.reserve(
+            weight_elements=weight_elements,
+            workspace_elements=workspace_elements,
+            weight_dtype=experts.gate_up_proj.dtype,
+            activation_dtype=experts.gate_up_proj.dtype,
+            device=experts.gate_up_proj.device,
+        )
+
     def forward(
         self,
         input_ids: torch.Tensor,

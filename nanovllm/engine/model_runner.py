@@ -154,6 +154,7 @@ class ModelRunner:
         torch.set_default_device("cuda")
         self.model = create_model(model_spec.architecture, hf_config)
         load_model(self.model, config.model)
+        self.reserve_runtime_buffers()
         self.sampler = Sampler()
         self.sampling_inputs = (
             SamplingInputBatch(config.max_num_seqs)
@@ -269,6 +270,17 @@ class ModelRunner:
             if reset_dispatch_stats is not None:
                 reset_dispatch_stats()
         self.execution_stats_enabled = True
+
+    def reserve_runtime_buffers(self) -> int:
+        """Allocate predictable persistent scratch before KV-cache sizing."""
+
+        reserved_modules = 0
+        for module in self.model.modules():
+            reserve = getattr(module, "reserve_runtime_buffers", None)
+            if reserve is not None and callable(reserve):
+                reserve(self.config.max_num_seqs)
+                reserved_modules += 1
+        return reserved_modules
 
     def get_execution_stats(self):
         return self.execution_stats.to_dict()

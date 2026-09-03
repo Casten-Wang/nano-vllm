@@ -19,6 +19,44 @@ class BatchedExpertWeightBufferPool:
         self.workspace_allocation_count = 0
         self.workspace_reuse_count = 0
 
+    def reserve(
+        self,
+        *,
+        weight_elements: int,
+        workspace_elements: int,
+        weight_dtype: torch.dtype,
+        activation_dtype: torch.dtype,
+        device: torch.device,
+    ) -> None:
+        """Allocate persistent decode buffers before KV-cache sizing."""
+
+        if weight_elements <= 0 or workspace_elements <= 0:
+            raise ValueError("expert buffer reservations must be positive")
+        if (
+            self.storage is None
+            or self.storage.device != device
+            or self.storage.dtype != weight_dtype
+            or self.storage.numel() < weight_elements
+        ):
+            self.storage = torch.empty(
+                weight_elements,
+                dtype=weight_dtype,
+                device=device,
+            )
+            self.allocation_count += 1
+        if (
+            self.workspace_storage is None
+            or self.workspace_storage.device != device
+            or self.workspace_storage.dtype != activation_dtype
+            or self.workspace_storage.numel() < workspace_elements
+        ):
+            self.workspace_storage = torch.empty(
+                workspace_elements,
+                dtype=activation_dtype,
+                device=device,
+            )
+            self.workspace_allocation_count += 1
+
     def gather(
         self,
         weight: torch.Tensor,

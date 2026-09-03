@@ -58,7 +58,11 @@ class FakeExperts(nn.Module):
 
 
 class FakeWeightBufferPool:
-    pass
+    def __init__(self):
+        self.reservations = []
+
+    def reserve(self, **kwargs):
+        self.reservations.append(kwargs)
 
 
 def load_qwen35_module():
@@ -161,6 +165,28 @@ def test_text_model_uses_declared_hybrid_layer_pattern():
     key_pool = model.model.full_attention_key_buffer_pool
     assert isinstance(key_pool, FakeWeightBufferPool)
     assert model.model.layers[-1].self_attn.key_buffer_pool is key_pool
+
+
+def test_text_model_reserves_batched_moe_buffers_for_max_decode_chunk():
+    model = QWEN35.Qwen3_5MoeForConditionalGeneration(tiny_outer_config())
+    block = model.model.layers[0].mlp
+    block.gate = SimpleNamespace(top_k=2)
+    block.experts.decode_backend = "batched"
+    block.experts.decode_chunk_size = 3
+    block.experts.gate_up_proj = torch.empty(4, 6, 4, dtype=torch.bfloat16)
+    block.experts.down_proj = torch.empty(4, 4, 3, dtype=torch.bfloat16)
+
+    model.model.reserve_runtime_buffers(max_decode_tokens=8)
+
+    assert model.model.moe_decode_weight_buffer_pool.reservations == [
+        {
+            "weight_elements": 3 * 2 * 6 * 4,
+            "workspace_elements": 3 * 2 * (6 + 4),
+            "weight_dtype": torch.bfloat16,
+            "activation_dtype": torch.bfloat16,
+            "device": torch.device("cpu"),
+        }
+    ]
 
 
 def test_residual_merge_reuses_branch_output_during_inference():

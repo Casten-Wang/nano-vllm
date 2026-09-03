@@ -936,6 +936,22 @@ class HybridStateContextTest(unittest.TestCase):
         self.assertEqual(stats["tp_top_k_full_gather_avoided_bytes"], 8192)
         self.assertEqual(stats["total_bytes_local_rank"], 164)
 
+    def test_runtime_buffers_are_reserved_before_capacity_planning(self):
+        runner = object.__new__(ModelRunner)
+        reservations = []
+        runner.config = SimpleNamespace(max_num_seqs=17)
+        runner.model = SimpleNamespace(
+            modules=lambda: [
+                SimpleNamespace(
+                    reserve_runtime_buffers=lambda value: reservations.append(value)
+                ),
+                SimpleNamespace(),
+            ]
+        )
+
+        self.assertEqual(runner.reserve_runtime_buffers(), 1)
+        self.assertEqual(reservations, [17])
+
     def test_multi_rank_kv_cache_stats_are_gathered(self):
         runner = object.__new__(ModelRunner)
         runner.rank = 0
