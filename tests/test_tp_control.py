@@ -673,7 +673,9 @@ class HybridStateContextTest(unittest.TestCase):
             ),
         )
         decode_seqs = [object(), object()]
-        prefill_seqs = [object()]
+        prefill_seqs = [
+            SimpleNamespace(state_slot=3, num_scheduled_tokens=2)
+        ]
         state_metadata_calls = []
         runner.prepare_state_slots = lambda seqs, **kwargs: (
             state_metadata_calls.append(("slots", seqs))
@@ -736,6 +738,31 @@ class HybridStateContextTest(unittest.TestCase):
         self.assertEqual(runner.contiguous_state_span(contiguous), (3, 3))
         self.assertIsNone(runner.contiguous_state_span(interleaved))
         self.assertIsNone(runner.contiguous_state_span([]))
+
+    def test_contiguous_prefill_state_spans_follow_length_groups(self):
+        runner = self.make_hybrid_runner()
+        seqs = [
+            SimpleNamespace(state_slot=3, num_scheduled_tokens=4),
+            SimpleNamespace(state_slot=8, num_scheduled_tokens=2),
+            SimpleNamespace(state_slot=4, num_scheduled_tokens=4),
+        ]
+
+        self.assertEqual(
+            runner.contiguous_prefill_state_spans(seqs),
+            ((3, 2), (8, 1)),
+        )
+
+    def test_interleaved_prefill_state_group_has_no_span(self):
+        runner = self.make_hybrid_runner()
+        seqs = [
+            SimpleNamespace(state_slot=3, num_scheduled_tokens=4),
+            SimpleNamespace(state_slot=5, num_scheduled_tokens=4),
+        ]
+
+        self.assertEqual(
+            runner.contiguous_prefill_state_spans(seqs),
+            (None,),
+        )
 
     def test_compressed_eager_state_span_is_reported_as_contiguous_view(self):
         runner = self.make_hybrid_runner()

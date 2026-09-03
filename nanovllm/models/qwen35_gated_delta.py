@@ -1224,9 +1224,21 @@ class Qwen35GatedDeltaNet(nn.Module):
         beta: torch.Tensor,
         log_decay: torch.Tensor,
         slots: torch.Tensor,
+        state_span: tuple[int, int] | None = None,
     ) -> torch.Tensor:
         assert self.state_pool is not None
-        recurrent_state, conv_state = self.state_pool.get(0, slots)
+        use_contiguous_state = (
+            state_span is not None and not torch.is_grad_enabled()
+        )
+        if use_contiguous_state:
+            recurrent_state, conv_state = self.state_pool.get_contiguous(
+                0,
+                *state_span,
+            )
+            cached_recurrent_state = recurrent_state
+            cached_conv_state = conv_state
+        else:
+            recurrent_state, conv_state = self.state_pool.get(0, slots)
         convolved, conv_state = causal_conv1d_prefill(
             mixed_qkv,
             conv_state,
@@ -1255,7 +1267,13 @@ class Qwen35GatedDeltaNet(nn.Module):
             beta,
             recurrent_state,
         )
-        self.state_pool.update(0, slots, recurrent_state, conv_state)
+        if use_contiguous_state:
+            if recurrent_state.data_ptr() != cached_recurrent_state.data_ptr():
+                cached_recurrent_state.copy_(recurrent_state)
+            if conv_state.data_ptr() != cached_conv_state.data_ptr():
+                cached_conv_state.copy_(conv_state)
+        else:
+            self.state_pool.update(0, slots, recurrent_state, conv_state)
         return self.norm(
             output.reshape(-1, self.value_head_dim),
             z.reshape(-1, self.value_head_dim),
@@ -1345,10 +1363,11 @@ class Qwen35GatedDeltaNet(nn.Module):
                             dtype=torch.long,
                         ),
                     ).to(torch.long),
+                    None,
                 )
                 for sequence_length, group in ranges_by_length.items()
             )
-        for sequence_length, group, group_slots in prefill_groups:
+        for sequence_length, group, group_slots, state_span in prefill_groups:
             group_qkv = _gather_prefill_group(
                 mixed_qkv, sequence_length, group
             )
@@ -1365,6 +1384,7 @@ class Qwen35GatedDeltaNet(nn.Module):
                 group_beta,
                 group_decay,
                 group_slots,
+                state_span,
             )
             for batch_index, (start, end, _) in enumerate(group):
                 outputs[start:end] = group_output[batch_index, :sequence_length]

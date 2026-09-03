@@ -1769,6 +1769,35 @@ class ModelRunner:
             return start, len(slots)
         return None
 
+    def contiguous_prefill_state_spans(
+        self,
+        seqs: list[Sequence],
+        *,
+        slot_offset: int = 0,
+    ) -> tuple[tuple[int, int] | None, ...]:
+        """Describe equal-length prefill slot groups without device reads."""
+
+        model_spec = self.config.model_spec
+        if model_spec is None or not model_spec.is_hybrid or not seqs:
+            return ()
+        grouped_slots: dict[int, list[int]] = {}
+        for sequence_index, seq in enumerate(seqs):
+            slot = (
+                slot_offset + sequence_index
+                if seq.state_slot is None
+                else seq.state_slot
+            )
+            grouped_slots.setdefault(seq.num_scheduled_tokens, []).append(slot)
+        spans = []
+        for slots in grouped_slots.values():
+            start = slots[0]
+            spans.append(
+                (start, len(slots))
+                if slots == list(range(start, start + len(slots)))
+                else None
+            )
+        return tuple(spans)
+
     def prepare_state_reset_slots(
         self,
         seqs: list[Sequence],
@@ -1884,6 +1913,7 @@ class ModelRunner:
                 reuse_decode_buffer=True,
             ),
             state_token_ranges=state_token_ranges,
+            state_prefill_spans=self.contiguous_prefill_state_spans(seqs),
             logits_indices=logits_indices,
         )
         return input_ids, positions
@@ -2139,6 +2169,10 @@ class ModelRunner:
                     len(decode_seqs) + end,
                 )
                 for start, end in prefill["state_token_ranges"]
+            ),
+            state_prefill_spans=self.contiguous_prefill_state_spans(
+                prefill_seqs,
+                slot_offset=len(decode_seqs),
             ),
             decode_state_span=decode.get("decode_state_span"),
             logits_indices=logits_indices,

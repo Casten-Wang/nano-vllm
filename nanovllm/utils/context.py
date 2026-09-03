@@ -6,6 +6,7 @@ StatePrefillGroup = tuple[
     int,
     tuple[tuple[int, int], ...],
     torch.Tensor,
+    tuple[int, int] | None,
 ]
 
 
@@ -13,6 +14,7 @@ def build_state_prefill_groups(
     state_token_ranges: tuple[tuple[int, int], ...],
     state_slots: torch.Tensor | None,
     decode_token_count: int,
+    state_prefill_spans: tuple[tuple[int, int] | None, ...] = (),
 ) -> tuple[StatePrefillGroup, ...]:
     """Group equal-length prefills once for reuse by every recurrent layer."""
 
@@ -29,8 +31,17 @@ def build_state_prefill_groups(
         grouped.setdefault(end - start, []).append(
             (start, end, decode_token_count + range_index)
         )
+    if state_prefill_spans and len(state_prefill_spans) != len(grouped):
+        raise ValueError("recurrent prefill spans must match length groups")
     result = []
-    for sequence_length, ranges in grouped.items():
+    for group_index, (sequence_length, ranges) in enumerate(grouped.items()):
+        state_span = (
+            state_prefill_spans[group_index]
+            if state_prefill_spans
+            else None
+        )
+        if state_span is not None and state_span[1] != len(ranges):
+            raise ValueError("recurrent prefill span size must match its group")
         slot_positions = [slot_index for _, _, slot_index in ranges]
         first_slot_position = slot_positions[0]
         positions_are_contiguous = all(
@@ -57,6 +68,7 @@ def build_state_prefill_groups(
                 sequence_length,
                 tuple(ranges),
                 grouped_slots,
+                state_span,
             )
         )
     return tuple(result)
@@ -147,6 +159,7 @@ def set_context(
     state_reset_mask=None,
     state_reset_slots=None,
     state_token_ranges=(),
+    state_prefill_spans=(),
     decode_state_span=None,
     logits_indices=None,
 ):
@@ -155,6 +168,7 @@ def set_context(
         state_token_ranges,
         state_slots,
         decode_token_count,
+        state_prefill_spans,
     )
     if state_reset_slots is None:
         state_reset_slots = build_state_reset_slots(

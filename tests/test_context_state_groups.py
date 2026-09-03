@@ -1,3 +1,4 @@
+import pytest
 import torch
 
 from nanovllm.utils.context import (
@@ -16,10 +17,11 @@ def test_state_prefill_groups_reuse_slots_for_equal_length_sequences():
     groups = build_state_prefill_groups(ranges, slots, decode_token_count=1)
 
     assert len(groups) == 2
-    length_three, grouped_ranges, grouped_slots = groups[0]
+    length_three, grouped_ranges, grouped_slots, state_span = groups[0]
     assert length_three == 3
     assert grouped_ranges == ((2, 5, 1), (6, 9, 3))
     assert torch.equal(grouped_slots, torch.tensor([4, 2]))
+    assert state_span is None
     assert groups[1][0] == 1
     assert torch.equal(groups[1][2], torch.tensor([7]))
 
@@ -37,6 +39,37 @@ def test_contiguous_state_prefill_group_reuses_slot_storage():
     assert len(groups) == 1
     assert torch.equal(groups[0][2], torch.tensor([4, 7]))
     assert groups[0][2].data_ptr() == slots[1:].data_ptr()
+
+
+def test_state_prefill_groups_preserve_host_derived_contiguous_spans():
+    groups = build_state_prefill_groups(
+        ((0, 3), (3, 6)),
+        torch.tensor([4, 5], dtype=torch.int64),
+        decode_token_count=0,
+        state_prefill_spans=((4, 2),),
+    )
+
+    assert groups[0][3] == (4, 2)
+
+
+def test_state_prefill_groups_reject_misaligned_spans():
+    with pytest.raises(ValueError, match="spans must match length groups"):
+        build_state_prefill_groups(
+            ((0, 3), (3, 4)),
+            torch.tensor([4, 5], dtype=torch.int64),
+            decode_token_count=0,
+            state_prefill_spans=((4, 1),),
+        )
+
+
+def test_state_prefill_groups_reject_wrong_span_size():
+    with pytest.raises(ValueError, match="span size must match its group"):
+        build_state_prefill_groups(
+            ((0, 3), (3, 6)),
+            torch.tensor([4, 5], dtype=torch.int64),
+            decode_token_count=0,
+            state_prefill_spans=((4, 1),),
+        )
 
 
 def test_interleaved_state_prefill_group_keeps_indexed_fallback():

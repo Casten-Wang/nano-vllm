@@ -1722,6 +1722,69 @@ def test_contiguous_decode_updates_state_cache_without_gather_scatter():
     )
 
 
+def test_contiguous_prefill_updates_state_cache_without_gather_scatter():
+    torch.manual_seed(33)
+    layer = make_layer()
+    layer.allocate_state_cache(4, "cpu")
+    for parameter in layer.parameters():
+        parameter.data.normal_(mean=0.0, std=0.2)
+    hidden = torch.randn(4, 4)
+    slots = torch.tensor([1, 2], dtype=torch.int64)
+    ranges = ((0, 2), (2, 4))
+    grouped_ranges = ((0, 2, 0), (2, 4, 1))
+    context = SimpleNamespace(
+        is_mixed=False,
+        is_prefill=True,
+        state_slots=slots,
+        state_reset_mask=torch.tensor([True, True]),
+        state_token_ranges=ranges,
+        state_prefill_groups=((2, grouped_ranges, slots, (1, 2)),),
+    )
+    context_module = types.ModuleType("nanovllm.utils.context")
+    context_module.get_context = lambda: context
+
+    with (
+        torch.inference_mode(),
+        patch.dict(sys.modules, {"nanovllm.utils.context": context_module}),
+        patch.object(layer.state_pool, "get", wraps=layer.state_pool.get) as get,
+        patch.object(
+            layer.state_pool,
+            "get_contiguous",
+            wraps=layer.state_pool.get_contiguous,
+        ) as get_contiguous,
+        patch.object(
+            layer.state_pool,
+            "update",
+            wraps=layer.state_pool.update,
+        ) as update,
+    ):
+        contiguous_output = layer(hidden)
+
+    assert get.call_count == 0
+    assert get_contiguous.call_count == 1
+    assert update.call_count == 0
+    contiguous_state = layer.state_pool.recurrent[:, 1:3].clone()
+    contiguous_conv = layer.state_pool.convolution[:, 1:3].clone()
+
+    layer.state_pool.reset(slots)
+    context.state_prefill_groups = ((2, grouped_ranges, slots, None),)
+    with (
+        torch.inference_mode(),
+        patch.dict(sys.modules, {"nanovllm.utils.context": context_module}),
+    ):
+        indexed_output = layer(hidden)
+
+    torch.testing.assert_close(contiguous_output, indexed_output)
+    torch.testing.assert_close(
+        contiguous_state,
+        layer.state_pool.recurrent[:, 1:3],
+    )
+    torch.testing.assert_close(
+        contiguous_conv,
+        layer.state_pool.convolution[:, 1:3],
+    )
+
+
 def test_compressed_contiguous_decode_avoids_gather_and_matches_indexed_path():
     torch.manual_seed(37)
     layer = make_layer()
