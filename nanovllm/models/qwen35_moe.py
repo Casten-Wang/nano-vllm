@@ -245,19 +245,20 @@ class Qwen35Experts(nn.Module):
                 f"{shape}; expected {expected_shape}"
             )
         source_start = self.tp_rank * self.local_intermediate_size
-        local_weight = dequantize_fp8_block_weight_slice(
+        target_start = 0 if projection == "gate" else self.local_intermediate_size
+        target = param.data[
+            expert_id,
+            target_start : target_start + self.local_intermediate_size,
+        ]
+        dequantize_fp8_block_weight_slice(
             loaded_weight,
             loaded_scale,
             block_size,
             (source_start, source_start + self.local_intermediate_size),
             (0, self.hidden_size),
             output_dtype=param.dtype,
+            out=target,
         )
-        target_start = 0 if projection == "gate" else self.local_intermediate_size
-        param.data[
-            expert_id,
-            target_start : target_start + self.local_intermediate_size,
-        ].copy_(local_weight)
 
     def _load_down(
         self,
@@ -333,15 +334,15 @@ class Qwen35Experts(nn.Module):
                 f"{shape}; expected {expected_shape}"
             )
         source_start = self.tp_rank * self.local_intermediate_size
-        local_weight = dequantize_fp8_block_weight_slice(
+        dequantize_fp8_block_weight_slice(
             loaded_weight,
             loaded_scale,
             block_size,
             (0, self.hidden_size),
             (source_start, source_start + self.local_intermediate_size),
             output_dtype=param.dtype,
+            out=param.data[expert_id],
         )
-        param.data[expert_id].copy_(local_weight)
 
     def forward(
         self,

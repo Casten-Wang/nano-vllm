@@ -960,15 +960,14 @@ class Qwen35GatedDeltaNet(nn.Module):
         start, end = self._column_bounds(shape[1])
         if end - start != param.shape[1]:
             raise ValueError("invalid tensor-parallel row weight shape")
-        param.data.copy_(
-            dequantize_fp8_block_weight_slice(
-                weight,
-                scale,
-                block_size,
-                (0, shape[0]),
-                (start, end),
-                output_dtype=param.dtype,
-            )
+        dequantize_fp8_block_weight_slice(
+            weight,
+            scale,
+            block_size,
+            (0, shape[0]),
+            (start, end),
+            output_dtype=param.dtype,
+            out=param.data,
         )
 
     @staticmethod
@@ -1039,15 +1038,20 @@ class Qwen35GatedDeltaNet(nn.Module):
             self.global_value_dim,
         ):
             start, end = self._column_bounds(width)
-            local = dequantize_fp8_block_weight_slice(
+            target = param.data.narrow(
+                0,
+                destination_offset,
+                end - start,
+            )
+            dequantize_fp8_block_weight_slice(
                 weight,
                 scale,
                 block_size,
                 (source_offset + start, source_offset + end),
                 (0, self.hidden_size),
                 output_dtype=param.dtype,
+                out=target,
             )
-            param.data.narrow(0, destination_offset, end - start).copy_(local)
             destination_offset += end - start
             source_offset += width
         if destination_offset != param.shape[0]:

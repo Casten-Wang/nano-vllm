@@ -39,6 +39,7 @@ def dequantize_fp8_block_weight(
     *,
     output_dtype: torch.dtype,
     block_offset: tuple[int, int] = (0, 0),
+    out: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Dequantize a rank-2 block-FP8 weight slice using its scale grid."""
 
@@ -59,8 +60,16 @@ def dequantize_fp8_block_weight(
             f"invalid block-FP8 scale shape: {tuple(scale.shape)}; "
             f"expected {expected_scale_shape}"
         )
-    output = weight.to(output_dtype)
-    scale = scale.to(output_dtype)
+    if out is None:
+        output = weight.to(output_dtype)
+    else:
+        if tuple(out.shape) != tuple(weight.shape):
+            raise ValueError("block-FP8 output shape must match the weight")
+        if out.dtype != output_dtype:
+            raise ValueError("block-FP8 output dtype does not match output_dtype")
+        output = out
+        output.copy_(weight)
+    scale = scale.to(dtype=output_dtype, device=output.device)
     rows, columns = weight.shape
     if (
         row_offset == 0
@@ -108,6 +117,7 @@ def dequantize_fp8_block_weight_slice(
     column_range: tuple[int, int],
     *,
     output_dtype: torch.dtype,
+    out: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Read and dequantize only one rectangular shard of an FP8 weight."""
 
@@ -148,6 +158,7 @@ def dequantize_fp8_block_weight_slice(
         local_scale,
         block_size,
         output_dtype=output_dtype,
+        out=out,
         block_offset=(
             row_start % block_rows,
             column_start % block_columns,

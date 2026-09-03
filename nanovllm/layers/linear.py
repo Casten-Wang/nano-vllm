@@ -19,15 +19,14 @@ def _copy_fp8_weight_slice(
 ) -> None:
     from nanovllm.models.qwen35_fp8 import dequantize_fp8_block_weight_slice
 
-    target.copy_(
-        dequantize_fp8_block_weight_slice(
-            loaded_weight,
-            loaded_scale,
-            block_size,
-            row_range,
-            column_range,
-            output_dtype=target.dtype,
-        )
+    dequantize_fp8_block_weight_slice(
+        loaded_weight,
+        loaded_scale,
+        block_size,
+        row_range,
+        column_range,
+        output_dtype=target.dtype,
+        out=target,
     )
 
 

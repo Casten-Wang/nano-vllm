@@ -133,6 +133,57 @@ def test_block_fp8_slice_dequantization_preserves_global_block_offsets():
     torch.testing.assert_close(shard, full[2:5, 2:7])
 
 
+def test_block_fp8_slice_dequantization_writes_directly_to_output():
+    weight = torch.arange(1, 36, dtype=torch.float32).reshape(5, 7).to(
+        torch.float8_e4m3fn
+    )
+    scale = torch.arange(1, 7, dtype=torch.float32).reshape(2, 3)
+    expected = dequantize_fp8_block_weight_slice(
+        weight,
+        scale,
+        (3, 3),
+        (2, 5),
+        (2, 7),
+        output_dtype=torch.float32,
+    )
+    output = torch.empty_like(expected)
+
+    actual = dequantize_fp8_block_weight_slice(
+        weight,
+        scale,
+        (3, 3),
+        (2, 5),
+        (2, 7),
+        output_dtype=output.dtype,
+        out=output,
+    )
+
+    assert actual.data_ptr() == output.data_ptr()
+    torch.testing.assert_close(actual, expected)
+
+
+def test_block_fp8_dequantization_rejects_incompatible_output():
+    weight = torch.ones(2, 2, dtype=torch.float8_e4m3fn)
+    scale = torch.ones(1, 1)
+
+    with pytest.raises(ValueError, match="output shape"):
+        dequantize_fp8_block_weight(
+            weight,
+            scale,
+            (2, 2),
+            output_dtype=torch.float32,
+            out=torch.empty(1, 4),
+        )
+    with pytest.raises(ValueError, match="output dtype"):
+        dequantize_fp8_block_weight(
+            weight,
+            scale,
+            (2, 2),
+            output_dtype=torch.float32,
+            out=torch.empty(2, 2, dtype=torch.bfloat16),
+        )
+
+
 def test_block_fp8_dequantization_rejects_wrong_scale_grid():
     with pytest.raises(ValueError, match="scale shape"):
         dequantize_fp8_block_weight(

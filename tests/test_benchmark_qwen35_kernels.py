@@ -833,6 +833,8 @@ def test_fp8_expert_shard_benchmark_covers_non_aligned_tp_slice():
     assert result["local_weight_shape"] == [3, 8]
     assert result["row_block_offset"] == 1
     assert result["dequantized_temporary_reduction"] == 4
+    assert result["avoided_local_dequantized_temporary_mib"] == 3 * 8 * 4 / 1024**2
+    assert result["candidate_writes_to_parameter_storage"]
     assert result["candidate"]["median_ms"] > 0
     assert result["errors"][0]["max_abs_error"] == 0
 

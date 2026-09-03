@@ -410,6 +410,12 @@ def benchmark_fp8_expert_shard_dequantization(args, device, dtype) -> dict:
         device=device,
         dtype=torch.float32,
     )
+    candidate_output = torch.empty(
+        local_rows,
+        columns,
+        device=device,
+        dtype=dtype,
+    )
 
     def reference():
         full = FP8.dequantize_fp8_block_weight(
@@ -429,6 +435,7 @@ def benchmark_fp8_expert_shard_dequantization(args, device, dtype) -> dict:
                 (row_start, row_start + local_rows),
                 (0, columns),
                 output_dtype=dtype,
+                out=candidate_output,
             ),
         )
 
@@ -455,6 +462,10 @@ def benchmark_fp8_expert_shard_dequantization(args, device, dtype) -> dict:
                 local_rows * columns * element_size / 1024**2
             ),
             "dequantized_temporary_reduction": args.tp_size,
+            "avoided_local_dequantized_temporary_mib": (
+                local_rows * columns * element_size / 1024**2
+            ),
+            "candidate_writes_to_parameter_storage": True,
         }
     )
     return result
