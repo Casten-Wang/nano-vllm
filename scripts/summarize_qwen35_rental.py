@@ -1564,6 +1564,9 @@ def summarize_kv_pressure_case(
         "completion_valid": completion_valid,
         "latency_metrics_valid": latency_metrics_valid,
         "preemption_count": metrics.get("preemption_count"),
+        "waiting_prefill_preemptions": metrics.get(
+            "waiting_prefill_preemptions"
+        ),
         "preempted_token_progress": metrics.get("preempted_token_progress"),
         "max_preempted_token_progress": metrics.get(
             "max_preempted_token_progress"

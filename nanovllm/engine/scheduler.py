@@ -83,6 +83,7 @@ class Scheduler:
         self.current_prefill_starvation_steps = 0
         self.max_prefill_starvation_steps = 0
         self.preemption_count = 0
+        self.waiting_prefill_preemptions = 0
         self.preempted_token_progress = 0
         self.max_preempted_token_progress = 0
         self.reclaimed_kv_blocks = 0
@@ -847,6 +848,7 @@ class Scheduler:
             )
         self.waiting.remove(victim)
         self.preempt(victim)
+        self.waiting_prefill_preemptions += 1
         self.waiting.remove(current)
         self.waiting.appendleft(current)
         return True

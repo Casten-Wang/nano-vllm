@@ -1181,6 +1181,7 @@ def test_prefill_pressure_reclaims_another_partial_waiting_request():
     assert victim.num_cached_tokens == 0
     assert victim.state_slot is not None
     assert scheduler.preemption_count == 1
+    assert scheduler.waiting_prefill_preemptions == 1
     assert scheduler.preempted_token_progress == 20
     assert scheduler.reclaimed_kv_blocks == 5
 

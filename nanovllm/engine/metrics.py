@@ -32,6 +32,7 @@ class EngineMetrics:
     prefill_starved_steps: int = 0
     max_prefill_starvation_steps: int = 0
     preemption_count: int = 0
+    waiting_prefill_preemptions: int = 0
     preempted_token_progress: int = 0
     max_preempted_token_progress: int = 0
     reclaimed_kv_blocks: int = 0
@@ -98,6 +99,7 @@ class EngineMetrics:
         self.prefill_starved_steps = 0
         self.max_prefill_starvation_steps = 0
         self.preemption_count = 0
+        self.waiting_prefill_preemptions = 0
         self.preempted_token_progress = 0
         self.max_preempted_token_progress = 0
         self.reclaimed_kv_blocks = 0
@@ -189,6 +191,7 @@ class EngineMetrics:
         prefill_starved_steps: int = 0,
         max_prefill_starvation_steps: int = 0,
         preemption_count: int = 0,
+        waiting_prefill_preemptions: int = 0,
         preempted_token_progress: int = 0,
         max_preempted_token_progress: int = 0,
         reclaimed_kv_blocks: int = 0,
@@ -217,6 +220,7 @@ class EngineMetrics:
         self.prefill_starved_steps = prefill_starved_steps
         self.max_prefill_starvation_steps = max_prefill_starvation_steps
         self.preemption_count = preemption_count
+        self.waiting_prefill_preemptions = waiting_prefill_preemptions
         self.preempted_token_progress = preempted_token_progress
         self.max_preempted_token_progress = max_preempted_token_progress
         self.reclaimed_kv_blocks = reclaimed_kv_blocks
@@ -470,6 +474,7 @@ class EngineMetrics:
             "prefill_starved_steps": self.prefill_starved_steps,
             "max_prefill_starvation_steps": self.max_prefill_starvation_steps,
             "preemption_count": self.preemption_count,
+            "waiting_prefill_preemptions": self.waiting_prefill_preemptions,
             "preempted_token_progress": self.preempted_token_progress,
             "max_preempted_token_progress": self.max_preempted_token_progress,
             "reclaimed_kv_blocks": self.reclaimed_kv_blocks,

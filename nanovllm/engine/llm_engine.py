@@ -1217,6 +1217,9 @@ class LLMEngine:
             prefill_starved_steps=self.scheduler.prefill_starved_steps,
             max_prefill_starvation_steps=self.scheduler.max_prefill_starvation_steps,
             preemption_count=self.scheduler.preemption_count,
+            waiting_prefill_preemptions=(
+                self.scheduler.waiting_prefill_preemptions
+            ),
             preempted_token_progress=self.scheduler.preempted_token_progress,
             max_preempted_token_progress=self.scheduler.max_preempted_token_progress,
             reclaimed_kv_blocks=self.scheduler.reclaimed_kv_blocks,

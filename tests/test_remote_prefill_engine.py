@@ -216,6 +216,7 @@ def test_idle_remote_prefill_step_polls_without_running_model():
         prefill_starved_steps=0,
         max_prefill_starvation_steps=0,
         preemption_count=0,
+        waiting_prefill_preemptions=0,
         preempted_token_progress=0,
         max_preempted_token_progress=0,
         reclaimed_kv_blocks=0,
