@@ -326,6 +326,50 @@ def summarize_optional_fp8_audit(run_dir: Path, run_id: str | None = None) -> di
         memory.get("valid") is True
         and set(memory.get("results", {})) == tp_names
     )
+    runtime_storage_by_tp = {}
+    for row in performance_runs:
+        tp_size = row.get("tensor_parallel_size")
+        rank_stats = row.get("storage", {}).get(
+            "runtime_buffer_storage_by_rank",
+            [],
+        )
+        ranks_complete = (
+            isinstance(tp_size, int)
+            and {item.get("rank") for item in rank_stats}
+            == set(range(tp_size))
+        )
+        if runtime_backend == "resident":
+            valid = ranks_complete and all(
+                item.get("resident_fp8_expert_layer_count", 0) > 0
+                and item.get("resident_fp8_expert_weight_bytes", 0) > 0
+                and item.get("resident_fp8_expert_scale_bytes", 0) > 0
+                and item.get("resident_fp8_weight_pool_count", 0) > 0
+                and item.get("resident_fp8_dequant_workspace_bytes", 0) > 0
+                and item.get(
+                    "resident_fp8_dequant_workspace_allocation_count", 0
+                )
+                > 0
+                and item.get("resident_fp8_dequant_workspace_reuse_count", 0)
+                > 0
+                for item in rank_stats
+            )
+        else:
+            valid = ranks_complete and all(
+                item.get("resident_fp8_expert_layer_count") == 0
+                and item.get("resident_fp8_expert_weight_bytes") == 0
+                and item.get("resident_fp8_expert_scale_bytes") == 0
+                and item.get("resident_fp8_weight_pool_count") == 0
+                and item.get("resident_fp8_dequant_workspace_bytes") == 0
+                for item in rank_stats
+            )
+        runtime_storage_by_tp[f"tp{tp_size}"] = {
+            "valid": valid,
+            "ranks": rank_stats,
+        }
+    runtime_storage_valid = (
+        set(runtime_storage_by_tp) == tp_names
+        and all(item["valid"] for item in runtime_storage_by_tp.values())
+    )
     performance_valid = (
         bool(performance_runs)
         and performance.get("all_execution_paths_valid") is True
@@ -338,6 +382,7 @@ def summarize_optional_fp8_audit(run_dir: Path, run_id: str | None = None) -> di
             and row.get("enforce_eager") is True
             for row in performance_runs
         )
+        and runtime_storage_valid
     )
     quality_valid = (
         bool(quality_cases)
@@ -394,6 +439,8 @@ def summarize_optional_fp8_audit(run_dir: Path, run_id: str | None = None) -> di
             "local_checkpoint_matches_official": local_checkpoint_valid,
             "memory_preflight_valid": memory_valid,
             "performance_valid": performance_valid,
+            "runtime_storage_valid": runtime_storage_valid,
+            "runtime_storage_by_tp": runtime_storage_by_tp,
             "quality_valid": quality_valid,
             "bf16_vs_fp8_quality_valid": checkpoint_quality_valid,
             "tensor_parallel_sizes": sorted(

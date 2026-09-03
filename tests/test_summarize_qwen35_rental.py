@@ -204,6 +204,35 @@ def write_fp8_summary_inputs(
             "repeat_output_digests_match": True,
             "execution_paths_valid": True,
             "generation_valid": True,
+            "storage": {
+                "runtime_buffer_storage_by_rank": [
+                    {
+                        "rank": rank,
+                        "resident_fp8_expert_layer_count": (
+                            40 if backend == "resident" else 0
+                        ),
+                        "resident_fp8_expert_weight_bytes": (
+                            1_000_000 if backend == "resident" else 0
+                        ),
+                        "resident_fp8_expert_scale_bytes": (
+                            10_000 if backend == "resident" else 0
+                        ),
+                        "resident_fp8_weight_pool_count": (
+                            1 if backend == "resident" else 0
+                        ),
+                        "resident_fp8_dequant_workspace_bytes": (
+                            65_536 if backend == "resident" else 0
+                        ),
+                        "resident_fp8_dequant_workspace_allocation_count": (
+                            1 if backend == "resident" else 0
+                        ),
+                        "resident_fp8_dequant_workspace_reuse_count": (
+                            10 if backend == "resident" else 0
+                        ),
+                    }
+                    for rank in range(tp)
+                ]
+            },
             "median": {
                 "output_throughput_tok_s": throughput,
                 "peak_torch_allocated_mib": memory,
@@ -319,6 +348,7 @@ def test_optional_fp8_summary_requires_reference_execution_and_quality(tmp_path)
     assert not report["native_fp8"]
     assert report["local_checkpoint_matches_official"]
     assert report["bf16_vs_fp8_quality_valid"]
+    assert report["runtime_storage_valid"]
     assert report["best_throughput"]["tensor_parallel_size"] == 8
 
     write_fp8_summary_inputs(tmp_path, "run", backend="triton")
@@ -339,8 +369,23 @@ def test_optional_fp8_summary_accepts_resident_execution_without_native_claim(tm
 
     assert report["valid"]
     assert report["runtime_backend"] == "resident"
+    assert report["runtime_storage_valid"]
+    assert report["runtime_storage_by_tp"]["tp8"]["valid"]
     assert not report["native_fp8"]
     assert "on-demand" in report["scope"]
+
+    performance_path = (
+        tmp_path / "fp8/performance/run-fp8_matrix_summary.json"
+    )
+    performance = json.loads(performance_path.read_text())
+    performance["runs"][0]["storage"]["runtime_buffer_storage_by_rank"][0][
+        "resident_fp8_dequant_workspace_reuse_count"
+    ] = 0
+    write(performance_path, performance)
+    invalid = MODULE.summarize_optional_fp8_audit(tmp_path, "run")
+    assert not invalid["runtime_storage_valid"]
+    assert not invalid["performance_valid"]
+    assert not invalid["valid"]
 
 
 def test_optional_gptq_summary_requires_actual_triton_execution(tmp_path):
