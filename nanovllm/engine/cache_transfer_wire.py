@@ -21,6 +21,7 @@ from nanovllm.engine.cache_transfer import (
 from nanovllm.engine.heterogeneous_cache_transfer import (
     PeerCacheFragment,
     PeerTensorSlice,
+    StagedPeerCacheFragments,
 )
 
 
@@ -796,6 +797,218 @@ class PendingRankCacheReceive:
         self._receiver.close()
         if self._thread_started and current_thread() is not self._thread:
             self._thread.join()
+
+
+class PendingPeerCacheSend:
+    """Send one peer fragment and wait for destination validation."""
+
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        fragment: PeerCacheFragment,
+        *,
+        timeout_s: float = 30.0,
+    ) -> None:
+        if not isinstance(host, str) or not host:
+            raise ValueError("peer cache endpoint host must not be empty")
+        if (
+            not isinstance(port, int)
+            or isinstance(port, bool)
+            or not 1 <= port <= 65535
+        ):
+            raise ValueError("peer cache endpoint port must be in [1, 65535]")
+        if timeout_s <= 0:
+            raise ValueError("peer cache endpoint timeout must be positive")
+        self._host = host
+        self._port = port
+        self._fragment = fragment
+        self._deadline = monotonic() + timeout_s
+        self._lock = Lock()
+        self._connection: socket.socket | None = None
+        self._sent_bytes: int | None = None
+        self._error: BaseException | None = None
+        self._terminal = False
+        self._thread = Thread(target=self._run, daemon=True)
+        self._thread_started = False
+
+    def start(self) -> None:
+        self._thread.start()
+        self._thread_started = True
+
+    def _run(self) -> None:
+        connection = None
+        failure = None
+        try:
+            while True:
+                with self._lock:
+                    if self._terminal:
+                        return
+                try:
+                    connection = socket.create_connection(
+                        (self._host, self._port),
+                        timeout=min(
+                            max(self._deadline - monotonic(), 0.001),
+                            0.05,
+                        ),
+                    )
+                    break
+                except (ConnectionRefusedError, TimeoutError, socket.timeout):
+                    remaining = self._deadline - monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError("peer cache send deadline expired")
+                    sleep(min(0.01, remaining))
+            with self._lock:
+                if self._terminal:
+                    connection.close()
+                    return
+                self._connection = connection
+            connection.settimeout(max(self._deadline - monotonic(), 0.001))
+            sent_bytes = send_peer_cache_fragment(connection, self._fragment)
+            acknowledgement = _recv_bytes(connection, 1)
+            if acknowledgement != _TRANSFER_ACK:
+                raise RuntimeError("peer cache receiver rejected the fragment")
+            with self._lock:
+                if not self._terminal and self._error is None:
+                    self._sent_bytes = sent_bytes
+        except BaseException as exc:
+            failure = exc
+        finally:
+            if connection is not None:
+                connection.close()
+            with self._lock:
+                self._connection = None
+                if failure is not None and not self._terminal:
+                    self._error = failure
+
+    def poll(self) -> tuple[str, str | None]:
+        connection = None
+        with self._lock:
+            if self._terminal:
+                return "closed", None
+            if self._error is not None:
+                return "failed", str(self._error)
+            if self._sent_bytes is not None:
+                return "ready", None
+            if monotonic() < self._deadline:
+                return "sending", None
+            self._error = TimeoutError("peer cache send deadline expired")
+            connection = self._connection
+        if connection is not None:
+            try:
+                connection.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            connection.close()
+        if self._thread_started and current_thread() is not self._thread:
+            self._thread.join()
+        with self._lock:
+            return "failed", str(self._error)
+
+    def result(self) -> int:
+        with self._lock:
+            if self._terminal:
+                raise RuntimeError("peer cache send is already closed")
+            if self._error is not None:
+                raise RuntimeError(f"peer cache send failed: {self._error}")
+            if self._sent_bytes is None:
+                raise RuntimeError("peer cache send is not ready")
+            return self._sent_bytes
+
+    def finish(self) -> None:
+        with self._lock:
+            if self._terminal:
+                return
+            self._terminal = True
+            connection = self._connection
+            self._connection = None
+        if connection is not None:
+            try:
+                connection.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            connection.close()
+        if self._thread_started and current_thread() is not self._thread:
+            self._thread.join()
+
+
+class PendingPeerCacheSendGroup:
+    """Own one source arena until every peer has ACKed or the group aborts."""
+
+    def __init__(
+        self,
+        staged: StagedPeerCacheFragments,
+        endpoints: list[tuple[str, int]],
+        *,
+        timeout_s: float = 30.0,
+    ) -> None:
+        if not isinstance(staged, StagedPeerCacheFragments):
+            raise ValueError("peer cache send group requires staged fragments")
+        dst_tp_size = staged.fragments[0].dst_tp_size
+        if not isinstance(endpoints, list) or len(endpoints) != dst_tp_size:
+            raise ValueError("peer cache endpoints must cover destination TP ranks")
+        senders = []
+        for fragment in staged.fragments:
+            endpoint = endpoints[fragment.dst_rank]
+            if not isinstance(endpoint, (tuple, list)) or len(endpoint) != 2:
+                raise ValueError("peer cache endpoint is invalid")
+            senders.append(
+                (
+                    fragment.dst_rank,
+                    PendingPeerCacheSend(
+                        endpoint[0],
+                        endpoint[1],
+                        fragment,
+                        timeout_s=timeout_s,
+                    ),
+                )
+            )
+        self._staged = staged
+        self._senders = tuple(senders)
+        self._started = False
+        self._closed = False
+
+    @property
+    def staged_bytes(self) -> int:
+        return 0 if self._closed else self._staged.staged_bytes
+
+    def start(self) -> None:
+        if self._started or self._closed:
+            raise RuntimeError("peer cache send group is already started")
+        self._started = True
+        try:
+            for _dst_rank, sender in self._senders:
+                sender.start()
+        except BaseException:
+            self.finish()
+            raise
+
+    def poll(self) -> tuple[str, str | None]:
+        if self._closed:
+            return "closed", None
+        if not self._started:
+            return "prepared", None
+        pending = False
+        for dst_rank, sender in self._senders:
+            state, error = sender.poll()
+            if state == "failed":
+                return "failed", f"destination {dst_rank}: {error}"
+            if state != "ready":
+                pending = True
+        return ("sending", None) if pending else ("ready", None)
+
+    def result(self) -> int:
+        if self._closed:
+            raise RuntimeError("peer cache send group is already closed")
+        return sum(sender.result() for _dst_rank, sender in self._senders)
+
+    def finish(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        for _dst_rank, sender in self._senders:
+            sender.finish()
+        self._staged.release()
 
 
 class PendingRankCacheSend:

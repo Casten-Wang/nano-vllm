@@ -417,8 +417,12 @@ class ModelRunner:
             "_pending_heterogeneous_cache_sends",
             {},
         )
-        for staged in heterogeneous_sends.values():
-            staged.release()
+        for send in heterogeneous_sends.values():
+            finish = getattr(send, "finish", None)
+            if finish is not None:
+                finish()
+            else:
+                send.release()
         heterogeneous_sends.clear()
         if self.world_size > 1 and hasattr(self, "shm"):
             self.shm.close()
@@ -1736,10 +1740,82 @@ class ModelRunner:
         """Release a prepared peer arena after failure or cancellation."""
 
         pending = getattr(self, "_pending_heterogeneous_cache_sends", {})
-        staged = pending.pop(transfer_id, None)
-        if staged is not None:
-            staged.release()
+        send = pending.pop(transfer_id, None)
+        if send is not None:
+            finish = getattr(send, "finish", None)
+            if finish is not None:
+                finish()
+            else:
+                send.release()
         return {"rank": self.rank, "aborted": 1}
+
+    def start_heterogeneous_sequence_cache_send(
+        self,
+        transfer_id: str,
+        destination_endpoints: list[tuple[str, int]],
+        timeout_s: float = 30.0,
+    ) -> dict:
+        """Start every destination peer while retaining one shared arena."""
+
+        from nanovllm.engine.cache_transfer_wire import (
+            PendingPeerCacheSendGroup,
+        )
+        from nanovllm.engine.heterogeneous_cache_transfer import (
+            StagedPeerCacheFragments,
+        )
+
+        pending = getattr(self, "_pending_heterogeneous_cache_sends", {})
+        staged = pending.get(transfer_id)
+        if not isinstance(staged, StagedPeerCacheFragments):
+            raise ValueError("heterogeneous cache send is not prepared")
+        try:
+            send = PendingPeerCacheSendGroup(
+                staged,
+                destination_endpoints,
+                timeout_s=timeout_s,
+            )
+            send.start()
+        except BaseException:
+            pending.pop(transfer_id, None)
+            staged.release()
+            raise
+        pending[transfer_id] = send
+        return {
+            "rank": self.rank,
+            "started": 1,
+            "staged_bytes": send.staged_bytes,
+        }
+
+    def poll_heterogeneous_sequence_cache_send(self, transfer_id: str) -> dict:
+        """Return aggregate peer progress for one source rank."""
+
+        pending = getattr(self, "_pending_heterogeneous_cache_sends", {})
+        send = pending.get(transfer_id)
+        if send is None or not hasattr(send, "poll"):
+            raise ValueError("heterogeneous cache send is not active")
+        state, error = send.poll()
+        result = {
+            "rank": self.rank,
+            "state": state,
+            "staged_bytes": send.staged_bytes,
+        }
+        if error is not None:
+            result["error"] = error
+        return result
+
+    def finish_heterogeneous_sequence_cache_send(self, transfer_id: str) -> dict:
+        """Collect all peer ACKs and release the shared source arena."""
+
+        pending = getattr(self, "_pending_heterogeneous_cache_sends", {})
+        send = pending.get(transfer_id)
+        if send is None or not hasattr(send, "result"):
+            raise ValueError("heterogeneous cache send is not active")
+        try:
+            sent_bytes = send.result()
+        finally:
+            send.finish()
+            pending.pop(transfer_id, None)
+        return {"rank": self.rank, "sent_bytes": sent_bytes}
 
     def import_sequence_cache(
         self,

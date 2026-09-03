@@ -1,7 +1,8 @@
 import socket
 from threading import Thread
+from time import monotonic, sleep
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 import torch
@@ -19,6 +20,7 @@ from nanovllm.engine.heterogeneous_cache_transfer import (
     stage_qwen35_sequence_cache_for_peers,
 )
 from nanovllm.engine.cache_transfer_wire import (
+    PendingPeerCacheSendGroup,
     receive_peer_cache_fragment,
     receive_rank_cache_transfer,
     send_peer_cache_fragment,
@@ -624,3 +626,126 @@ def test_model_runner_owns_selective_staging_until_abort():
     ) == {"rank": 0, "aborted": 1}
     assert runner._cache_send_staging_pool.storage_stats()["leased"] == 0
     assert not runner._pending_heterogeneous_cache_sends
+
+
+@pytest.mark.parametrize("reject_destination", [None, 1])
+def test_multi_peer_send_group_waits_for_every_ack_and_releases_once(
+    reject_destination,
+):
+    plan = make_plan(with_scales=False)
+    payload = make_payload(0, 4, with_scales=False)
+    pool = HostStagingBufferPool()
+    staged = stage_qwen35_peer_cache_fragments(
+        build_qwen35_peer_cache_fragments(payload, plan),
+        plan,
+        host_staging_pool=pool,
+    )
+    endpoints = [("127.0.0.1", 1)] * 8
+    listeners = []
+    received = []
+    threads = []
+    for fragment in staged.fragments:
+        listener = socket.socket()
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        listeners.append(listener)
+        endpoints[fragment.dst_rank] = listener.getsockname()[:2]
+
+        def receive(listener=listener, expected=fragment):
+            connection, _peer = listener.accept()
+            with connection:
+                received.append(
+                    receive_peer_cache_fragment(
+                        connection,
+                        expected_transfer_id=expected.transfer_id,
+                        expected_src_rank=expected.src_rank,
+                        expected_dst_rank=expected.dst_rank,
+                        expected_payload_bytes=expected.nbytes,
+                    )
+                )
+                connection.sendall(
+                    b"\x00"
+                    if expected.dst_rank == reject_destination
+                    else b"\x01"
+                )
+            listener.close()
+
+        thread = Thread(target=receive)
+        thread.start()
+        threads.append(thread)
+
+    group = PendingPeerCacheSendGroup(staged, endpoints, timeout_s=2.0)
+    group.start()
+    deadline = monotonic() + 2.0
+    while True:
+        state, error = group.poll()
+        if state in {"ready", "failed"}:
+            break
+        assert monotonic() < deadline
+        sleep(0.005)
+
+    assert len(received) == len(staged.fragments)
+    assert pool.storage_stats()["leased"] == 1
+    if reject_destination is None:
+        assert state == "ready"
+        assert error is None
+        assert group.result() > sum(
+            fragment.nbytes for fragment in staged.fragments
+        )
+    else:
+        assert state == "failed"
+        assert f"destination {reject_destination}" in error
+        with pytest.raises(RuntimeError, match="receiver rejected"):
+            group.result()
+    group.finish()
+    for thread in threads:
+        thread.join()
+    assert pool.storage_stats()["leased"] == 0
+
+
+def test_model_runner_drives_peer_send_group_lifecycle():
+    plan = make_plan(with_scales=False)
+    staged = stage_qwen35_peer_cache_fragments(
+        build_qwen35_peer_cache_fragments(
+            make_payload(0, 4, with_scales=False),
+            plan,
+        ),
+        plan,
+    )
+    runner = object.__new__(ModelRunner)
+    runner.rank = 0
+    runner._pending_heterogeneous_cache_sends = {"transfer-1": staged}
+    send = Mock()
+    send.staged_bytes = staged.staged_bytes
+    send.poll.return_value = ("ready", None)
+    send.result.return_value = 1_234
+    endpoints = [("127.0.0.1", 20000 + rank) for rank in range(8)]
+
+    with patch(
+        "nanovllm.engine.cache_transfer_wire.PendingPeerCacheSendGroup",
+        return_value=send,
+    ) as send_type:
+        assert runner.start_heterogeneous_sequence_cache_send(
+            "transfer-1",
+            endpoints,
+        ) == {
+            "rank": 0,
+            "started": 1,
+            "staged_bytes": staged.staged_bytes,
+        }
+
+    send_type.assert_called_once_with(staged, endpoints, timeout_s=30.0)
+    send.start.assert_called_once_with()
+    assert runner.poll_heterogeneous_sequence_cache_send("transfer-1") == {
+        "rank": 0,
+        "state": "ready",
+        "staged_bytes": staged.staged_bytes,
+    }
+    assert runner.finish_heterogeneous_sequence_cache_send("transfer-1") == {
+        "rank": 0,
+        "sent_bytes": 1_234,
+    }
+    send.finish.assert_called_once_with()
+    assert not runner._pending_heterogeneous_cache_sends
+    staged.release()
