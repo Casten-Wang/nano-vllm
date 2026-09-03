@@ -121,6 +121,126 @@ def write_gptq_summary_inputs(root, run_id, *, backend="triton"):
     )
 
 
+def write_fp8_summary_inputs(root, run_id, *, backend="reference"):
+    fp8_run_id = f"{run_id}-fp8"
+    shards = [
+        {"name": "model-00001.safetensors", "size_bytes": 123, "sha256": "d" * 64}
+    ]
+    write(
+        root / "fp8/official_checkpoint_header_audit.json",
+        {
+            "valid": True,
+            "repo": MODULE.OFFICIAL_FP8_CHECKPOINT_REPO,
+            "resolved_revision": MODULE.OFFICIAL_FP8_CHECKPOINT_REVISION,
+            "config_sha256": "e" * 64,
+            "index_sha256": "f" * 64,
+            "shard_count": 1,
+            "checkpoint_shards": shards,
+            "quantization": {"format": "fp8_block", "valid": True},
+            "results": {
+                "tp4": {
+                    "valid": True,
+                    "local_parameter_bytes": 1000,
+                    "quantized_tp_layout": {
+                        "valid": True,
+                        "requires_partial_unit_loader": False,
+                        "partial_quantization_unit_count": 0,
+                    },
+                },
+                "tp8": {
+                    "valid": True,
+                    "local_parameter_bytes": 500,
+                    "quantized_tp_layout": {
+                        "valid": True,
+                        "requires_partial_unit_loader": True,
+                        "partial_quantization_unit_count": 2,
+                    },
+                },
+            },
+        },
+    )
+    write(
+        root / "fp8/preflight/checkpoint_mapping_audit.json",
+        {
+            "valid": True,
+            "complete": True,
+            "results": {"tp4": {"valid": True}, "tp8": {"valid": True}},
+            "checkpoint_manifest": {
+                "config_sha256": "e" * 64,
+                "index_sha256": "f" * 64,
+                "shard_count": 1,
+                "present_shard_count": 1,
+                "missing_shards": [],
+                "files": [
+                    {
+                        "name": shards[0]["name"],
+                        "size_bytes": shards[0]["size_bytes"],
+                        "content_sha256": shards[0]["sha256"],
+                        "present": True,
+                    }
+                ],
+            },
+        },
+    )
+    write(
+        root / "fp8/preflight/memory_preflight.json",
+        {"valid": True, "results": {"tp4": {}, "tp8": {}}},
+    )
+    rows = [
+        {
+            "tensor_parallel_size": tp,
+            "requested_weight_quant_backend": "reference",
+            "weight_quant_backend": backend,
+            "quantization_format": "fp8_block",
+            "qwen35_moe_decode_backend": "sorted",
+            "enforce_eager": True,
+            "repeat_output_digests_match": True,
+            "execution_paths_valid": True,
+            "generation_valid": True,
+            "median": {
+                "output_throughput_tok_s": throughput,
+                "peak_torch_allocated_mib": memory,
+            },
+        }
+        for tp, throughput, memory in ((4, 90.0, 21_000.0), (8, 160.0, 13_000.0))
+    ]
+    write(
+        root / f"fp8/performance/{fp8_run_id}_matrix_summary.json",
+        {
+            "all_execution_paths_valid": True,
+            "all_generation_valid": True,
+            "all_repeat_output_digests_match": True,
+            "runs": rows,
+        },
+    )
+    write(
+        root / f"fp8/quality/{fp8_run_id}_summary.json",
+        {
+            "cases": [
+                {
+                    "tensor_parallel_size": tp,
+                    "requested_weight_quant_backend": "reference",
+                    "weight_quant_backend": backend,
+                    "qwen35_moe_decode_backend": "sorted",
+                }
+                for tp in (4, 8)
+            ],
+            "quality_gates": {"all_passed": True},
+            "cross_tp": {"all_passed": True},
+        },
+    )
+    write(
+        root / "fp8/quality/bf16_vs_fp8.json",
+        {
+            "valid": True,
+            "baseline_run_id": run_id,
+            "candidate_run_id": fp8_run_id,
+            "tensor_parallel_sizes": [4, 8],
+            "cases": {},
+        },
+    )
+
+
 def test_optional_gptq_summary_is_disabled_when_directory_is_absent(tmp_path):
     assert MODULE.summarize_optional_gptq(tmp_path, "run") == {
         "enabled": False,
@@ -179,6 +299,25 @@ def test_optional_fp8_audit_reports_tp_alignment_without_execution_claim(
         report["tensor_parallel"]["tp8"]["partial_quantization_unit_count"]
         == 30_860
     )
+
+
+def test_optional_fp8_summary_requires_reference_execution_and_quality(tmp_path):
+    write_fp8_summary_inputs(tmp_path, "run")
+
+    report = MODULE.summarize_optional_fp8_audit(tmp_path, "run")
+
+    assert report["valid"]
+    assert report["executable"]
+    assert report["execution_validated"]
+    assert not report["native_fp8"]
+    assert report["local_checkpoint_matches_official"]
+    assert report["bf16_vs_fp8_quality_valid"]
+    assert report["best_throughput"]["tensor_parallel_size"] == 8
+
+    write_fp8_summary_inputs(tmp_path, "run", backend="triton")
+    invalid = MODULE.summarize_optional_fp8_audit(tmp_path, "run")
+    assert not invalid["valid"]
+    assert not invalid["executable"]
 
 
 def test_optional_gptq_summary_requires_actual_triton_execution(tmp_path):

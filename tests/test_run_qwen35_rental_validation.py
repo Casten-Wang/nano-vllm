@@ -29,6 +29,7 @@ def args():
         gptq_model=None,
         gptq_revision=MODULE.OFFICIAL_GPTQ_CHECKPOINT_REVISION,
         fp8_audit_model=None,
+        fp8_model=None,
         fp8_revision=MODULE.OFFICIAL_FP8_CHECKPOINT_REVISION,
         tp_sizes=(4, 8),
         num_seqs=64,
@@ -266,6 +267,51 @@ def test_fp8_audit_identity_is_part_of_resume_manifest():
     assert plan["fp8_revision"] == MODULE.OFFICIAL_FP8_CHECKPOINT_REVISION
 
 
+def test_optional_fp8_checkpoint_adds_reference_execution_matrix():
+    arguments = args()
+    arguments.fp8_model = "/models/qwen35-fp8"
+
+    stages = MODULE.commands(arguments)
+    names = [name for name, _ in stages]
+
+    assert names[-6:] == [
+        "official-fp8-checkpoint-audit",
+        "fp8-preflight",
+        "fp8-performance-matrix",
+        "fp8-quality-matrix",
+        "fp8-vs-bf16-quality",
+        "final-summary",
+    ]
+    commands = dict(stages)
+    audit = commands["official-fp8-checkpoint-audit"]
+    assert audit[audit.index("--repo") + 1] == MODULE.OFFICIAL_FP8_CHECKPOINT_REPO
+    for stage in (
+        "fp8-preflight",
+        "fp8-performance-matrix",
+        "fp8-quality-matrix",
+    ):
+        command = commands[stage]
+        assert command[command.index("--weight-quant-backend") + 1] == "reference"
+    assert "--verify-checkpoint-shards" in commands["fp8-preflight"]
+    assert "--no-checkpoint-audit" in commands["fp8-performance-matrix"]
+    assert "--no-checkpoint-audit" in commands["fp8-quality-matrix"]
+    comparison = commands["fp8-vs-bf16-quality"]
+    assert comparison[comparison.index("--candidate-run-id") + 1] == (
+        f"{arguments.run_id}-fp8"
+    )
+
+
+def test_fp8_execution_identity_is_part_of_resume_manifest(tmp_path):
+    arguments = args()
+    arguments.fp8_model = str(tmp_path / "qwen35-fp8")
+
+    plan = MODULE.manifest_plan(arguments, MODULE.commands(arguments))
+
+    assert plan["fp8_model"] == str((tmp_path / "qwen35-fp8").resolve())
+    assert plan["fp8_audit_model"] == MODULE.OFFICIAL_FP8_CHECKPOINT_REPO
+    assert plan["fp8_revision"] == MODULE.OFFICIAL_FP8_CHECKPOINT_REVISION
+
+
 def test_fp8_audit_artifact_collection_is_isolated(tmp_path):
     arguments = args()
     arguments.result_dir = str(tmp_path)
@@ -280,6 +326,22 @@ def test_fp8_audit_artifact_collection_is_isolated(tmp_path):
     )
 
     assert artifacts == [expected]
+
+
+def test_fp8_execution_artifacts_are_isolated(tmp_path):
+    arguments = args()
+    arguments.result_dir = str(tmp_path)
+    preflight = tmp_path / arguments.run_id / "fp8" / "preflight"
+    preflight.mkdir(parents=True)
+    mapping = preflight / "checkpoint_mapping_audit.json"
+    memory = preflight / "memory_preflight.json"
+    mapping.write_text('{"valid": true}\n')
+    memory.write_text('{"valid": true}\n')
+
+    assert MODULE.collect_stage_artifacts(arguments, "fp8-preflight") == [
+        mapping,
+        memory,
+    ]
 
 
 def test_gptq_artifact_collection_is_isolated(tmp_path):

@@ -724,7 +724,10 @@ def commands(args: argparse.Namespace) -> list[tuple[str, list[str]]]:
                 ),
             )
         )
-    if args.fp8_audit_model is not None:
+    fp8_audit_model = args.fp8_audit_model
+    if args.fp8_model is not None and fp8_audit_model is None:
+        fp8_audit_model = OFFICIAL_FP8_CHECKPOINT_REPO
+    if fp8_audit_model is not None:
         result.append(
             (
                 "official-fp8-checkpoint-audit",
@@ -732,7 +735,7 @@ def commands(args: argparse.Namespace) -> list[tuple[str, list[str]]]:
                     sys.executable,
                     str(REMOTE_CHECKPOINT_AUDIT_SCRIPT),
                     "--repo",
-                    args.fp8_audit_model,
+                    fp8_audit_model,
                     "--revision",
                     args.fp8_revision,
                     "--tp-sizes",
@@ -740,6 +743,120 @@ def commands(args: argparse.Namespace) -> list[tuple[str, list[str]]]:
                     "--output",
                     str(root / "fp8" / "official_checkpoint_header_audit.json"),
                 ],
+            )
+        )
+    if args.fp8_model is not None:
+        fp8_run_id = f"{args.run_id}-fp8"
+        fp8_root = root / "fp8"
+        result.extend(
+            (
+                (
+                    "fp8-preflight",
+                    [
+                        sys.executable,
+                        str(MATRIX_SCRIPT),
+                        "--model",
+                        args.fp8_model,
+                        "--tp-sizes",
+                        tp_sizes,
+                        "--num-seqs",
+                        str(args.num_seqs),
+                        "--input-len",
+                        str(args.input_len),
+                        "--output-len",
+                        str(args.output_len),
+                        "--max-model-len",
+                        str(args.max_model_len),
+                        "--max-num-seqs",
+                        str(args.max_num_seqs),
+                        "--run-id",
+                        fp8_run_id,
+                        "--result-dir",
+                        str(fp8_root / "preflight"),
+                        "--weight-quant-backend",
+                        "reference",
+                        "--preflight-only",
+                        "--verify-checkpoint-shards",
+                    ],
+                ),
+                (
+                    "fp8-performance-matrix",
+                    [
+                        sys.executable,
+                        str(MATRIX_SCRIPT),
+                        "--model",
+                        args.fp8_model,
+                        "--tp-sizes",
+                        tp_sizes,
+                        "--num-seqs",
+                        str(args.num_seqs),
+                        "--input-len",
+                        str(args.input_len),
+                        "--output-len",
+                        str(args.output_len),
+                        "--max-model-len",
+                        str(args.max_model_len),
+                        "--max-num-seqs",
+                        str(args.max_num_seqs),
+                        "--repeats",
+                        str(args.repeats),
+                        "--run-id",
+                        fp8_run_id,
+                        "--result-dir",
+                        str(fp8_root / "performance"),
+                        "--weight-quant-backend",
+                        "reference",
+                        "--no-checkpoint-audit",
+                        "--no-memory-preflight",
+                    ],
+                ),
+                (
+                    "fp8-quality-matrix",
+                    [
+                        sys.executable,
+                        str(QUALITY_SCRIPT),
+                        "--model",
+                        args.fp8_model,
+                        "--tp-sizes",
+                        tp_sizes,
+                        "--run-id",
+                        fp8_run_id,
+                        "--result-dir",
+                        str(fp8_root / "quality"),
+                        "--weight-quant-backend",
+                        "reference",
+                        "--qwen35-moe-decode-backend",
+                        "sorted",
+                        "--no-checkpoint-audit",
+                        "--prompt-lengths",
+                        f"128,1024,3072,{QUALITY_MAX_PROMPT_LENGTH}",
+                        "--continuation-len",
+                        str(QUALITY_CONTINUATION_LENGTH),
+                        "--max-model-len",
+                        str(args.max_model_len),
+                        "--max-num-batched-tokens",
+                        str(args.max_model_len),
+                    ],
+                ),
+                (
+                    "fp8-vs-bf16-quality",
+                    [
+                        sys.executable,
+                        str(CHECKPOINT_QUALITY_SCRIPT),
+                        "--baseline-dir",
+                        str(root / "quality"),
+                        "--baseline-run-id",
+                        args.run_id,
+                        "--candidate-dir",
+                        str(fp8_root / "quality"),
+                        "--candidate-run-id",
+                        fp8_run_id,
+                        "--tp-sizes",
+                        tp_sizes,
+                        "--output",
+                        str(fp8_root / "quality" / "bf16_vs_fp8.json"),
+                    ],
+                ),
             )
         )
     result.append(
@@ -773,8 +890,25 @@ def manifest_plan(
             else None
         ),
         "gptq_revision": args.gptq_revision if args.gptq_model else None,
-        "fp8_audit_model": args.fp8_audit_model,
-        "fp8_revision": args.fp8_revision if args.fp8_audit_model else None,
+        "fp8_audit_model": (
+            args.fp8_audit_model
+            if args.fp8_audit_model is not None
+            else (
+                OFFICIAL_FP8_CHECKPOINT_REPO
+                if args.fp8_model is not None
+                else None
+            )
+        ),
+        "fp8_model": (
+            canonical_model_reference(args.fp8_model)
+            if args.fp8_model is not None
+            else None
+        ),
+        "fp8_revision": (
+            args.fp8_revision
+            if args.fp8_audit_model is not None or args.fp8_model is not None
+            else None
+        ),
         "source_tree_sha256": source_tree_sha256(),
         "stages": [
             {"name": name, "command": command}
@@ -834,6 +968,12 @@ def collect_stage_artifacts(
     elif stage_name == "official-fp8-checkpoint-audit":
         required = [root / "fp8" / "official_checkpoint_header_audit.json"]
         search_root = root / "fp8"
+    elif stage_name == "fp8-preflight":
+        search_root = root / "fp8" / "preflight"
+        required = [
+            search_root / "checkpoint_mapping_audit.json",
+            search_root / "memory_preflight.json",
+        ]
     elif stage_name == "gptq-preflight":
         search_root = root / "gptq" / "preflight"
         required = [
@@ -912,6 +1052,15 @@ def collect_stage_artifacts(
     elif stage_name == "gptq-vs-bf16-quality":
         search_root = root / "gptq" / "quality"
         required = [search_root / "bf16_vs_gptq.json"]
+    elif stage_name == "fp8-performance-matrix":
+        search_root = root / "fp8" / "performance"
+        required = [search_root / f"{args.run_id}-fp8_matrix_summary.json"]
+    elif stage_name == "fp8-quality-matrix":
+        search_root = root / "fp8" / "quality"
+        required = [search_root / f"{args.run_id}-fp8_summary.json"]
+    elif stage_name == "fp8-vs-bf16-quality":
+        search_root = root / "fp8" / "quality"
+        required = [search_root / "bf16_vs_fp8.json"]
     elif stage_name == "final-summary":
         required = [root / "summary.json"]
         search_root = root
@@ -928,6 +1077,8 @@ def collect_stage_artifacts(
             "official-checkpoint-audit",
             "official-gptq-checkpoint-audit",
             "official-fp8-checkpoint-audit",
+            "fp8-preflight",
+            "fp8-vs-bf16-quality",
             "gptq-preflight",
             "gptq-vs-bf16-quality",
             "preflight",
@@ -1001,6 +1152,7 @@ def prepare_manifest(
             "gptq_model": manifest.get("gptq_model"),
             "gptq_revision": manifest.get("gptq_revision"),
             "fp8_audit_model": manifest.get("fp8_audit_model"),
+            "fp8_model": manifest.get("fp8_model"),
             "fp8_revision": manifest.get("fp8_revision"),
             "source_tree_sha256": manifest.get("source_tree_sha256"),
             "stages": manifest.get("stages"),
@@ -1058,6 +1210,14 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Optional official FP8 checkpoint whose remote headers are audited; "
             "this does not enable FP8 execution."
+        ),
+    )
+    parser.add_argument(
+        "--fp8-model",
+        default=None,
+        help=(
+            "Optional local official FP8 checkpoint to validate with the "
+            "BF16 reference-dequantization backend."
         ),
     )
     parser.add_argument(

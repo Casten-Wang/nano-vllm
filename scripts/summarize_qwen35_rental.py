@@ -238,8 +238,8 @@ def summarize_optional_gptq(run_dir: Path, run_id: str) -> dict:
     }
 
 
-def summarize_optional_fp8_audit(run_dir: Path) -> dict:
-    """Summarize FP8 layout evidence without claiming executable support."""
+def summarize_optional_fp8_audit(run_dir: Path, run_id: str | None = None) -> dict:
+    """Summarize optional FP8 layout and reference-execution evidence."""
 
     path = run_dir / "fp8" / "official_checkpoint_header_audit.json"
     if not path.is_file():
@@ -258,7 +258,7 @@ def summarize_optional_fp8_audit(run_dir: Path) -> dict:
         and bool(results)
         and all(result.get("valid") is True for result in results.values())
     )
-    return {
+    report = {
         "enabled": True,
         "valid": audit_valid,
         "executable": False,
@@ -287,6 +287,133 @@ def summarize_optional_fp8_audit(run_dir: Path) -> dict:
             for name in sorted(results)
         },
     }
+    preflight_dir = run_dir / "fp8" / "preflight"
+    if not preflight_dir.exists():
+        return report
+    if run_id is None:
+        raise ValueError("run_id is required for FP8 execution evidence")
+
+    fp8_run_id = f"{run_id}-fp8"
+    local_audit = load_json(preflight_dir / "checkpoint_mapping_audit.json")
+    memory = load_json(preflight_dir / "memory_preflight.json")
+    performance = load_json(
+        run_dir / "fp8" / "performance" / f"{fp8_run_id}_matrix_summary.json"
+    )
+    quality = load_json(
+        run_dir / "fp8" / "quality" / f"{fp8_run_id}_summary.json"
+    )
+    checkpoint_quality = load_json(
+        run_dir / "fp8" / "quality" / "bf16_vs_fp8.json"
+    )
+    performance_runs = performance.get("runs", [])
+    quality_cases = quality.get("cases", [])
+    tp_names = {
+        f"tp{row.get('tensor_parallel_size')}" for row in performance_runs
+    }
+    audit_valid = audit_valid and set(results) == tp_names
+    local_checkpoint_valid = (
+        local_audit.get("valid") is True
+        and local_audit.get("complete") is True
+        and set(local_audit.get("results", {})) == tp_names
+        and checkpoint_manifest_matches_remote(
+            local_audit.get("checkpoint_manifest", {}),
+            audit,
+        )
+    )
+    memory_valid = (
+        memory.get("valid") is True
+        and set(memory.get("results", {})) == tp_names
+    )
+    performance_valid = (
+        bool(performance_runs)
+        and performance.get("all_execution_paths_valid") is True
+        and performance.get("all_generation_valid") is True
+        and performance.get("all_repeat_output_digests_match") is True
+        and all(
+            row.get("requested_weight_quant_backend") == "reference"
+            and row.get("weight_quant_backend") == "reference"
+            and row.get("quantization_format") == "fp8_block"
+            and row.get("enforce_eager") is True
+            for row in performance_runs
+        )
+    )
+    quality_valid = (
+        bool(quality_cases)
+        and {f"tp{row.get('tensor_parallel_size')}" for row in quality_cases}
+        == tp_names
+        and quality.get("quality_gates", {}).get("all_passed") is True
+        and quality.get("cross_tp", {}).get("all_passed") is True
+        and all(
+            row.get("requested_weight_quant_backend") == "reference"
+            and row.get("weight_quant_backend") == "reference"
+            and row.get("qwen35_moe_decode_backend") == "sorted"
+            for row in quality_cases
+        )
+    )
+    checkpoint_quality_valid = (
+        checkpoint_quality.get("valid") is True
+        and checkpoint_quality.get("baseline_run_id") == run_id
+        and checkpoint_quality.get("candidate_run_id") == fp8_run_id
+        and checkpoint_quality.get("tensor_parallel_sizes")
+        == sorted(int(name.removeprefix("tp")) for name in tp_names)
+    )
+    valid_runs = [
+        row
+        for row in performance_runs
+        if row.get("repeat_output_digests_match")
+        and row.get("execution_paths_valid")
+        and row.get("generation_valid")
+    ]
+    execution_valid = (
+        audit_valid
+        and local_checkpoint_valid
+        and memory_valid
+        and performance_valid
+        and quality_valid
+        and checkpoint_quality_valid
+    )
+    report.update(
+        {
+            "valid": execution_valid,
+            "executable": performance_valid,
+            "execution_validated": execution_valid,
+            "runtime_backend": "reference_dequantization_to_model_dtype",
+            "native_fp8": False,
+            "scope": (
+                "official FP8 checkpoint dequantized to model dtype at load; "
+                "this validates checkpoint execution and quality, not native "
+                "FP8 kernels or FP8 runtime memory savings"
+            ),
+            "local_checkpoint_matches_official": local_checkpoint_valid,
+            "memory_preflight_valid": memory_valid,
+            "performance_valid": performance_valid,
+            "quality_valid": quality_valid,
+            "bf16_vs_fp8_quality_valid": checkpoint_quality_valid,
+            "tensor_parallel_sizes": sorted(
+                {row["tensor_parallel_size"] for row in performance_runs}
+            ),
+            "best_throughput": (
+                max(
+                    valid_runs,
+                    key=lambda row: row["median"]["output_throughput_tok_s"],
+                )
+                if valid_runs
+                else None
+            ),
+            "lowest_peak_memory": (
+                min(
+                    valid_runs,
+                    key=lambda row: row["median"]["peak_torch_allocated_mib"],
+                )
+                if valid_runs
+                else None
+            ),
+            "quality_gates": quality.get("quality_gates"),
+            "cross_tp": quality.get("cross_tp"),
+            "bf16_vs_fp8": checkpoint_quality,
+        }
+    )
+    return report
 
 
 def summarize_normalization_candidate(
@@ -1670,7 +1797,7 @@ def summarize(run_dir: Path, run_id: str) -> dict:
     )
     quality = load_json(run_dir / "quality" / f"{run_id}_summary.json")
     gptq = summarize_optional_gptq(run_dir, run_id)
-    fp8 = summarize_optional_fp8_audit(run_dir)
+    fp8 = summarize_optional_fp8_audit(run_dir, run_id)
     kernel_paths = sorted((run_dir / "kernels").glob("tp*.json"))
     if not kernel_paths:
         raise ValueError("no kernel benchmark artifacts were found")
