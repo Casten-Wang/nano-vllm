@@ -11,6 +11,7 @@ from nanovllm.engine.cache_transfer import RankCacheTransfer
 from nanovllm.engine.model_runner import ModelRunner
 from nanovllm.engine.cache_transfer_wire import (
     PendingRankCacheReceive,
+    PendingRankCacheSend,
     RankCacheReceiver,
     WIRE_HEADER,
     WIRE_MAGIC,
@@ -233,6 +234,43 @@ def test_pending_receive_nacks_sender_when_install_is_rejected():
 
     assert len(sender_failure) == 1
     assert "rejected" in str(sender_failure[0])
+
+
+def test_pending_receive_enforces_end_to_end_deadline(monkeypatch):
+    clock = iter((10.0, 12.0))
+    monkeypatch.setattr(
+        "nanovllm.engine.cache_transfer_wire.monotonic",
+        lambda: next(clock),
+    )
+    receiver = PendingRankCacheReceive("127.0.0.1", 0, timeout_s=2.0)
+
+    state, error = receiver.poll()
+
+    assert state == "failed"
+    assert "deadline expired" in error
+    receiver.finish(accepted=False)
+
+
+def test_pending_send_enforces_end_to_end_deadline(monkeypatch):
+    clock = iter((20.0, 22.0))
+    monkeypatch.setattr(
+        "nanovllm.engine.cache_transfer_wire.monotonic",
+        lambda: next(clock),
+    )
+    sender = PendingRankCacheSend(
+        "127.0.0.1",
+        12345,
+        make_payload(),
+        timeout_s=2.0,
+    )
+
+    state, error = sender.poll()
+
+    assert state == "failed"
+    assert "deadline expired" in error
+    with pytest.raises(RuntimeError, match="deadline expired"):
+        sender.result()
+    sender.finish()
 
 
 def test_model_runner_rank_endpoint_exports_receives_and_installs():

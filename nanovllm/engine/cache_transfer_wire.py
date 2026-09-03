@@ -319,6 +319,7 @@ class PendingRankCacheReceive:
             max_payload_bytes=max_payload_bytes,
         )
         self._timeout_s = timeout_s
+        self._deadline = monotonic() + timeout_s
         self._lock = Lock()
         self._connection: socket.socket | None = None
         self._payload: RankCacheTransfer | None = None
@@ -371,6 +372,11 @@ class PendingRankCacheReceive:
                 return "failed", str(self._error)
             if self._payload is not None:
                 return "ready", None
+            if monotonic() >= self._deadline:
+                self._error = TimeoutError(
+                    "cache transfer receive deadline expired"
+                )
+                return "failed", str(self._error)
             return "receiving", None
 
     def payload(self) -> RankCacheTransfer:
@@ -419,7 +425,7 @@ class PendingRankCacheSend:
         self._host = host
         self._port = port
         self._payload = payload
-        self._timeout_s = timeout_s
+        self._deadline = monotonic() + timeout_s
         self._lock = Lock()
         self._connection: socket.socket | None = None
         self._sent_bytes: int | None = None
@@ -433,7 +439,6 @@ class PendingRankCacheSend:
     def _run(self) -> None:
         connection = None
         try:
-            deadline = monotonic() + self._timeout_s
             while True:
                 with self._lock:
                     if self._terminal:
@@ -441,11 +446,11 @@ class PendingRankCacheSend:
                 try:
                     connection = socket.create_connection(
                         (self._host, self._port),
-                        timeout=max(deadline - monotonic(), 0.001),
+                        timeout=max(self._deadline - monotonic(), 0.001),
                     )
                     break
                 except (ConnectionRefusedError, TimeoutError, socket.timeout):
-                    remaining = deadline - monotonic()
+                    remaining = self._deadline - monotonic()
                     if remaining <= 0:
                         raise TimeoutError(
                             "cache transfer endpoint connection timed out"
@@ -456,13 +461,15 @@ class PendingRankCacheSend:
                     connection.close()
                     return
                 self._connection = connection
-            connection.settimeout(self._timeout_s)
+            connection.settimeout(
+                max(self._deadline - monotonic(), 0.001)
+            )
             sent_bytes = send_rank_cache_transfer(connection, self._payload)
             acknowledgement = _recv_bytes(connection, 1)
             if acknowledgement != _TRANSFER_ACK:
                 raise RuntimeError("cache transfer receiver rejected the payload")
             with self._lock:
-                if not self._terminal:
+                if not self._terminal and self._error is None:
                     self._sent_bytes = sent_bytes
                     self._payload = None
         except BaseException as exc:
@@ -484,6 +491,12 @@ class PendingRankCacheSend:
                 return "failed", str(self._error)
             if self._sent_bytes is not None:
                 return "ready", None
+            if monotonic() >= self._deadline:
+                self._error = TimeoutError(
+                    "cache transfer send deadline expired"
+                )
+                self._payload = None
+                return "failed", str(self._error)
             return "sending", None
 
     def result(self) -> int:
