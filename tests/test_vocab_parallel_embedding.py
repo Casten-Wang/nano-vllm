@@ -192,6 +192,11 @@ def test_lm_head_tp_greedy_reduces_only_rank_local_candidates():
             "stack",
             side_effect=AssertionError("inference greedy must reuse storage"),
         ),
+        patch.object(
+            embed_head.torch,
+            "arange",
+            side_effect=AssertionError("greedy winner lookup must not allocate indices"),
+        ),
     ):
         tokens = head(hidden, greedy=True)
 
@@ -295,9 +300,9 @@ def test_lm_head_tp_top_k_reduces_exact_global_candidates():
     assert calls == [(torch.float32, (2, 2)), (torch.int64, (2, 2))]
     stats = head.tp_logits_storage_stats()
     assert stats["top_k_reduction_count"] == 1
-    assert stats["gathered_bytes"] == 96
-    assert stats["total_bytes"] == 96
-    assert stats["allocation_count"] == 2
+    assert stats["gathered_bytes"] == 192
+    assert stats["total_bytes"] == 192
+    assert stats["allocation_count"] == 4
     assert stats["top_k_candidate_bytes"] == 48
     assert stats["top_k_full_gather_avoided_bytes"] == 32
 
@@ -322,15 +327,22 @@ def test_lm_head_reuses_compact_tp_gather_buffers_for_smaller_batches():
         head(torch.randn(3, 2), top_k=2)
         top_k_value_storage = head._tp_top_k_values_buffer.data_ptr()
         top_k_id_storage = head._tp_top_k_ids_buffer.data_ptr()
+        top_k_flat_value_storage = head._tp_top_k_flat_values_buffer.data_ptr()
+        top_k_flat_id_storage = head._tp_top_k_flat_ids_buffer.data_ptr()
         head(torch.randn(1, 2), top_k=2)
 
     assert head._tp_greedy_local_buffer.data_ptr() == greedy_local_storage
     assert head._tp_greedy_gather_buffer.data_ptr() == greedy_storage
     assert head._tp_top_k_values_buffer.data_ptr() == top_k_value_storage
     assert head._tp_top_k_ids_buffer.data_ptr() == top_k_id_storage
+    assert (
+        head._tp_top_k_flat_values_buffer.data_ptr()
+        == top_k_flat_value_storage
+    )
+    assert head._tp_top_k_flat_ids_buffer.data_ptr() == top_k_flat_id_storage
     stats = head.tp_logits_storage_stats()
-    assert stats["allocation_count"] == 4
-    assert stats["reuse_count"] == 4
+    assert stats["allocation_count"] == 6
+    assert stats["reuse_count"] == 6
 
 
 def test_nonzero_lm_head_rank_participates_in_top_k_reduction():

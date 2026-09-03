@@ -95,6 +95,16 @@ class ParallelLMHead(VocabParallelEmbedding):
             torch.empty(0, dtype=torch.int64),
             persistent=False,
         )
+        self.register_buffer(
+            "_tp_top_k_flat_values_buffer",
+            torch.empty(0),
+            persistent=False,
+        )
+        self.register_buffer(
+            "_tp_top_k_flat_ids_buffer",
+            torch.empty(0, dtype=torch.int64),
+            persistent=False,
+        )
         self.tp_logits_allocation_count = 0
         self.tp_logits_reuse_count = 0
         self.tp_greedy_reduction_count = 0
@@ -145,6 +155,8 @@ class ParallelLMHead(VocabParallelEmbedding):
                 self._tp_greedy_gather_buffer,
                 self._tp_top_k_values_buffer,
                 self._tp_top_k_ids_buffer,
+                self._tp_top_k_flat_values_buffer,
+                self._tp_top_k_flat_ids_buffer,
             )
         )
         return {
@@ -262,15 +274,11 @@ class ParallelLMHead(VocabParallelEmbedding):
             if gathered_candidates is None:
                 return None
             winning_ranks = gathered_candidates[:, :, 0].argmax(dim=0)
-            batch_indices = torch.arange(
-                logits.shape[0],
-                device=logits.device,
+            winning_ids = gathered_candidates[:, :, 1].gather(
+                0,
+                winning_ranks.unsqueeze(0),
             )
-            return gathered_candidates[
-                winning_ranks,
-                batch_indices,
-                1,
-            ].to(torch.int64)
+            return winning_ids.squeeze(0).to(torch.int64)
         if top_k is not None:
             self.tp_top_k_reduction_count += 1
             local_k = min(top_k, self.num_embeddings_per_partition)
@@ -322,8 +330,25 @@ class ParallelLMHead(VocabParallelEmbedding):
             )
             if gathered_values is None or gathered_ids is None:
                 return None
-            all_values = gathered_values.permute(1, 0, 2).flatten(1)
-            all_ids = gathered_ids.permute(1, 0, 2).flatten(1)
+            if torch.is_grad_enabled():
+                all_values = gathered_values.permute(1, 0, 2).flatten(1)
+                all_ids = gathered_ids.permute(1, 0, 2).flatten(1)
+            else:
+                flat_shape = (logits.shape[0], self.tp_size * local_k)
+                all_values_storage = self._tp_logits_buffer(
+                    "_tp_top_k_flat_values_buffer",
+                    required,
+                    local_values,
+                ).view(logits.shape[0], self.tp_size, local_k)
+                all_ids_storage = self._tp_logits_buffer(
+                    "_tp_top_k_flat_ids_buffer",
+                    required,
+                    local_ids,
+                ).view(logits.shape[0], self.tp_size, local_k)
+                all_values_storage.copy_(gathered_values.permute(1, 0, 2))
+                all_ids_storage.copy_(gathered_ids.permute(1, 0, 2))
+                all_values = all_values_storage.view(flat_shape)
+                all_ids = all_ids_storage.view(flat_shape)
             selected_values, selected_offsets = torch.topk(
                 all_values,
                 top_k,
