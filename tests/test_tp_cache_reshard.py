@@ -7,6 +7,7 @@ from nanovllm.engine.tp_cache_reshard import (
     plan_grouped_uniform_reshard,
     plan_kv_head_reshard,
     plan_uniform_reshard,
+    profile_tp_transfer_plan,
     reshard_kv_heads,
     reshard_qwen35_convolution_state,
     reshard_uniform_tensor,
@@ -99,6 +100,34 @@ def test_direct_kv_transfer_plan_matches_qwen36_oracle(src_tp, dst_tp):
         torch.testing.assert_close(actual_rank, expected_rank)
 
 
+def test_qwen36_kv_fanout_uses_all_available_source_replicas():
+    global_kv = torch.arange(2 * 3 * 2 * 4 * 2 * 2).reshape(
+        2, 3, 2, 4, 2, 2
+    )
+    source = make_kv_head_shards(
+        global_kv,
+        4,
+        total_kv_heads=2,
+        dim=4,
+    )
+    plan = plan_kv_head_reshard(2, 4, 8)
+
+    profile = profile_tp_transfer_plan(
+        source,
+        plan,
+        8,
+        shard_dim=4,
+        dst_width=1,
+    )
+
+    per_head_bytes = global_kv.numel() // 2 * global_kv.element_size()
+    assert profile.source_bytes == (per_head_bytes * 2,) * 4
+    assert profile.destination_bytes == (per_head_bytes,) * 8
+    assert profile.source_peer_counts == (2, 2, 2, 2)
+    assert profile.destination_peer_counts == (1,) * 8
+    assert profile.wire_bytes == per_head_bytes * 8
+
+
 @pytest.mark.parametrize("src_tp,dst_tp", [(4, 8), (8, 4), (4, 4)])
 def test_int8_scale_reshard_uses_kv_head_dimension(src_tp, dst_tp):
     global_scale = torch.arange(2 * 3 * 2 * 4 * 2, dtype=torch.float16).reshape(
@@ -154,6 +183,38 @@ def test_direct_recurrent_transfer_plan_matches_oracle(src_tp, dst_tp):
 
     for actual_rank, expected_rank in zip(actual, expected):
         torch.testing.assert_close(actual_rank, expected_rank)
+
+
+@pytest.mark.parametrize(
+    "src_tp,dst_tp,source_peers,destination_peers",
+    [
+        (4, 8, (2,) * 4, (1,) * 8),
+        (8, 4, (1,) * 8, (2,) * 4),
+        (4, 4, (1,) * 4, (1,) * 4),
+    ],
+)
+def test_uniform_transfer_profile_reports_fanout_and_fanin(
+    src_tp,
+    dst_tp,
+    source_peers,
+    destination_peers,
+):
+    global_state = torch.arange(32 * 2 * 3, dtype=torch.float32).reshape(32, 2, 3)
+    source = make_uniform_shards(global_state, src_tp, dim=0)
+
+    profile = profile_tp_transfer_plan(
+        source,
+        plan_uniform_reshard(32, src_tp, dst_tp),
+        dst_tp,
+        shard_dim=0,
+        dst_width=32 // dst_tp,
+    )
+
+    assert profile.source_peer_counts == source_peers
+    assert profile.destination_peer_counts == destination_peers
+    assert profile.wire_bytes == global_state.numel() * global_state.element_size()
+    assert sum(profile.source_bytes) == profile.wire_bytes
+    assert sum(profile.destination_bytes) == profile.wire_bytes
 
 
 def make_convolution_shards(
@@ -342,3 +403,26 @@ def test_transfer_plan_rejects_out_of_bounds_entries(entry):
             shard_dim=0,
             dst_width=4,
         )
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        (True, 0, 0, 0, 1),
+        (0, -1, 0, 0, 1),
+        (0, 0, 0, 0, 0),
+    ],
+)
+def test_transfer_slice_rejects_invalid_metadata(args):
+    with pytest.raises(ValueError):
+        TPTransferSlice(*args)
+
+
+def test_uniform_plan_rejects_non_divisible_topology():
+    with pytest.raises(ValueError, match="divide both"):
+        plan_uniform_reshard(6, 4, 2)
+
+
+def test_grouped_plan_requires_groups():
+    with pytest.raises(ValueError, match="at least one"):
+        plan_grouped_uniform_reshard((), 4, 8)

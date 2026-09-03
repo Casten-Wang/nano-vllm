@@ -40,6 +40,18 @@ class TPTransferSlice:
             raise ValueError("length must be a positive integer")
 
 
+@dataclass(frozen=True, slots=True)
+class TPTransferProfile:
+    """Per-rank pressure produced by a direct tensor transfer plan."""
+
+    wire_bytes: int
+    source_bytes: tuple[int, ...]
+    destination_bytes: tuple[int, ...]
+    source_peer_counts: tuple[int, ...]
+    destination_peer_counts: tuple[int, ...]
+    slice_count: int
+
+
 def _validate_tp_size(tp_size: int) -> None:
     if not isinstance(tp_size, int) or isinstance(tp_size, bool) or tp_size <= 0:
         raise ValueError("destination TP size must be a positive integer")
@@ -241,12 +253,6 @@ def plan_kv_head_reshard(
     )
     slices = []
     for head_index in range(total_kv_heads):
-        if src_replication == 1:
-            src_rank = head_index // src_local_heads
-            src_start = head_index % src_local_heads
-        else:
-            src_rank = head_index * src_replication
-            src_start = 0
         if dst_replication == 1:
             destinations = ((head_index // dst_local_heads, head_index % dst_local_heads),)
         else:
@@ -254,17 +260,107 @@ def plan_kv_head_reshard(
                 (head_index * dst_replication + replica, 0)
                 for replica in range(dst_replication)
             )
-        slices.extend(
-            TPTransferSlice(
-                src_rank=src_rank,
-                dst_rank=dst_rank,
-                src_start=src_start,
-                dst_start=dst_start,
-                length=1,
+        for destination_index, (dst_rank, dst_start) in enumerate(destinations):
+            if src_replication == 1:
+                src_rank = head_index // src_local_heads
+                src_start = head_index % src_local_heads
+            else:
+                # Replicated source heads are interchangeable. Spread fan-out
+                # across them instead of turning the first replica into a
+                # per-head network hotspot.
+                src_rank = (
+                    head_index * src_replication
+                    + destination_index % src_replication
+                )
+                src_start = 0
+            slices.append(
+                TPTransferSlice(
+                    src_rank=src_rank,
+                    dst_rank=dst_rank,
+                    src_start=src_start,
+                    dst_start=dst_start,
+                    length=1,
+                )
             )
-            for dst_rank, dst_start in destinations
-        )
     return tuple(slices)
+
+
+def _validate_transfer_plan(
+    shards: Sequence[torch.Tensor],
+    plan: Sequence[TPTransferSlice],
+    dst_tp_size: int,
+    *,
+    shard_dim: int,
+    dst_width: int,
+) -> int:
+    _validate_tp_size(dst_tp_size)
+    normalized_dim = _validate_shards(shards, shard_dim=shard_dim)
+    if not isinstance(dst_width, int) or isinstance(dst_width, bool) or dst_width <= 0:
+        raise ValueError("destination width must be a positive integer")
+    if not plan:
+        raise ValueError("tensor-parallel transfer plan must not be empty")
+
+    covered = [[False] * dst_width for _ in range(dst_tp_size)]
+    for entry in plan:
+        if not isinstance(entry, TPTransferSlice):
+            raise ValueError("tensor-parallel transfer plan entry is invalid")
+        if entry.src_rank >= len(shards) or entry.dst_rank >= dst_tp_size:
+            raise ValueError("tensor-parallel transfer rank is out of bounds")
+        if entry.src_start + entry.length > shards[entry.src_rank].shape[normalized_dim]:
+            raise ValueError("tensor-parallel source slice is out of bounds")
+        if entry.dst_start + entry.length > dst_width:
+            raise ValueError("tensor-parallel destination slice is out of bounds")
+        destination_coverage = covered[entry.dst_rank]
+        if any(destination_coverage[entry.dst_start : entry.dst_start + entry.length]):
+            raise ValueError("tensor-parallel transfer plan has overlapping writes")
+        destination_coverage[entry.dst_start : entry.dst_start + entry.length] = (
+            [True] * entry.length
+        )
+    if any(not all(destination_coverage) for destination_coverage in covered):
+        raise ValueError("tensor-parallel transfer plan leaves destination gaps")
+    return normalized_dim
+
+
+def profile_tp_transfer_plan(
+    shards: Sequence[torch.Tensor],
+    plan: Sequence[TPTransferSlice],
+    dst_tp_size: int,
+    *,
+    shard_dim: int,
+    dst_width: int,
+) -> TPTransferProfile:
+    """Calculate exact tensor bytes and peer fan-out without copying data."""
+
+    normalized_dim = _validate_transfer_plan(
+        shards,
+        plan,
+        dst_tp_size,
+        shard_dim=shard_dim,
+        dst_width=dst_width,
+    )
+    bytes_per_dim = (
+        shards[0].numel()
+        // shards[0].shape[normalized_dim]
+        * shards[0].element_size()
+    )
+    source_bytes = [0] * len(shards)
+    destination_bytes = [0] * dst_tp_size
+    source_peers = [set() for _ in shards]
+    destination_peers = [set() for _ in range(dst_tp_size)]
+    for entry in plan:
+        transfer_bytes = entry.length * bytes_per_dim
+        source_bytes[entry.src_rank] += transfer_bytes
+        destination_bytes[entry.dst_rank] += transfer_bytes
+        source_peers[entry.src_rank].add(entry.dst_rank)
+        destination_peers[entry.dst_rank].add(entry.src_rank)
+    return TPTransferProfile(
+        wire_bytes=sum(source_bytes),
+        source_bytes=tuple(source_bytes),
+        destination_bytes=tuple(destination_bytes),
+        source_peer_counts=tuple(len(peers) for peers in source_peers),
+        destination_peer_counts=tuple(len(peers) for peers in destination_peers),
+        slice_count=len(plan),
+    )
 
 
 def apply_tp_transfer_plan(
@@ -277,33 +373,22 @@ def apply_tp_transfer_plan(
 ) -> tuple[torch.Tensor, ...]:
     """Apply a direct-copy plan on CPU and reject gaps or overlapping writes."""
 
-    _validate_tp_size(dst_tp_size)
-    normalized_dim = _validate_shards(shards, shard_dim=shard_dim)
-    if not isinstance(dst_width, int) or isinstance(dst_width, bool) or dst_width <= 0:
-        raise ValueError("destination width must be a positive integer")
-    if not plan:
-        raise ValueError("tensor-parallel transfer plan must not be empty")
+    normalized_dim = _validate_transfer_plan(
+        shards,
+        plan,
+        dst_tp_size,
+        shard_dim=shard_dim,
+        dst_width=dst_width,
+    )
 
     destination_shape = list(shards[0].shape)
     destination_shape[normalized_dim] = dst_width
     destinations = tuple(
         shards[0].new_empty(destination_shape) for _ in range(dst_tp_size)
     )
-    covered = [[False] * dst_width for _ in range(dst_tp_size)]
     for entry in plan:
-        if not isinstance(entry, TPTransferSlice):
-            raise ValueError("tensor-parallel transfer plan entry is invalid")
-        if entry.src_rank >= len(shards) or entry.dst_rank >= dst_tp_size:
-            raise ValueError("tensor-parallel transfer rank is out of bounds")
         source = shards[entry.src_rank]
         destination = destinations[entry.dst_rank]
-        if entry.src_start + entry.length > source.shape[normalized_dim]:
-            raise ValueError("tensor-parallel source slice is out of bounds")
-        if entry.dst_start + entry.length > dst_width:
-            raise ValueError("tensor-parallel destination slice is out of bounds")
-        destination_coverage = covered[entry.dst_rank]
-        if any(destination_coverage[entry.dst_start : entry.dst_start + entry.length]):
-            raise ValueError("tensor-parallel transfer plan has overlapping writes")
         destination.narrow(
             normalized_dim,
             entry.dst_start,
@@ -315,11 +400,6 @@ def apply_tp_transfer_plan(
                 entry.length,
             )
         )
-        destination_coverage[entry.dst_start : entry.dst_start + entry.length] = (
-            [True] * entry.length
-        )
-    if any(not all(destination_coverage) for destination_coverage in covered):
-        raise ValueError("tensor-parallel transfer plan leaves destination gaps")
     return destinations
 
 
