@@ -2,7 +2,9 @@ import pytest
 import torch
 
 from nanovllm.engine.tp_cache_reshard import (
+    TPTransferProfile,
     TPTransferSlice,
+    aggregate_tp_transfer_profiles,
     apply_tp_transfer_plan,
     plan_grouped_uniform_reshard,
     plan_kv_head_reshard,
@@ -126,6 +128,126 @@ def test_qwen36_kv_fanout_uses_all_available_source_replicas():
     assert profile.source_peer_counts == (2, 2, 2, 2)
     assert profile.destination_peer_counts == (1,) * 8
     assert profile.wire_bytes == per_head_bytes * 8
+    assert sum(byte_count for _, _, byte_count in profile.peer_bytes) == (
+        profile.wire_bytes
+    )
+    assert {(src, dst) for src, dst, _ in profile.peer_bytes} == {
+        (0, 0),
+        (0, 1),
+        (1, 2),
+        (1, 3),
+        (2, 4),
+        (2, 5),
+        (3, 6),
+        (3, 7),
+    }
+
+
+@pytest.mark.parametrize(
+    "src_tp,dst_tp,source_peers,destination_peers",
+    [
+        (4, 8, (2,) * 4, (1,) * 8),
+        (8, 4, (1,) * 8, (2,) * 4),
+        (4, 4, (1,) * 4, (1,) * 4),
+    ],
+)
+def test_request_profile_aggregates_all_qwen36_cache_components(
+    src_tp,
+    dst_tp,
+    source_peers,
+    destination_peers,
+):
+    global_kv = torch.arange(2 * 3 * 2 * 4 * 2 * 2).reshape(
+        2, 3, 2, 4, 2, 2
+    )
+    global_scale = torch.arange(2 * 3 * 2 * 4 * 2, dtype=torch.float16).reshape(
+        2, 3, 2, 4, 2
+    )
+    kv_source = make_kv_head_shards(
+        global_kv,
+        src_tp,
+        total_kv_heads=2,
+        dim=4,
+    )
+    scale_source = make_kv_head_shards(
+        global_scale,
+        src_tp,
+        total_kv_heads=2,
+        dim=4,
+    )
+    plan = plan_kv_head_reshard(2, src_tp, dst_tp)
+    kv_profile = profile_tp_transfer_plan(
+        kv_source,
+        plan,
+        dst_tp,
+        shard_dim=4,
+        dst_width=1,
+    )
+    scale_profile = profile_tp_transfer_plan(
+        scale_source,
+        plan,
+        dst_tp,
+        shard_dim=4,
+        dst_width=1,
+    )
+    global_recurrent = torch.arange(32 * 2 * 3, dtype=torch.float32).reshape(
+        32, 2, 3
+    )
+    recurrent_source = make_uniform_shards(global_recurrent, src_tp, dim=0)
+    recurrent_profile = profile_tp_transfer_plan(
+        recurrent_source,
+        plan_uniform_reshard(32, src_tp, dst_tp),
+        dst_tp,
+        shard_dim=0,
+        dst_width=32 // dst_tp,
+    )
+    query = torch.arange(16 * 3).reshape(16, 3)
+    key = 1_000 + torch.arange(16 * 3).reshape(16, 3)
+    value = 2_000 + torch.arange(32 * 3).reshape(32, 3)
+    convolution_source = make_convolution_shards(query, key, value, src_tp)
+    convolution_profile = profile_tp_transfer_plan(
+        convolution_source,
+        plan_grouped_uniform_reshard((16, 16, 32), src_tp, dst_tp),
+        dst_tp,
+        shard_dim=0,
+        dst_width=64 // dst_tp,
+    )
+
+    request_profile = aggregate_tp_transfer_profiles(
+        (
+            kv_profile,
+            scale_profile,
+            recurrent_profile,
+            convolution_profile,
+        )
+    )
+
+    component_profiles = (
+        kv_profile,
+        scale_profile,
+        recurrent_profile,
+        convolution_profile,
+    )
+    assert request_profile.wire_bytes == sum(
+        profile.wire_bytes for profile in component_profiles
+    )
+    assert request_profile.source_bytes == tuple(
+        sum(profile.source_bytes[rank] for profile in component_profiles)
+        for rank in range(src_tp)
+    )
+    assert request_profile.destination_bytes == tuple(
+        sum(
+            profile.destination_bytes[rank]
+            for profile in component_profiles
+        )
+        for rank in range(dst_tp)
+    )
+    assert request_profile.source_peer_counts == source_peers
+    assert request_profile.destination_peer_counts == destination_peers
+    assert request_profile.slice_count == sum(
+        profile.slice_count for profile in component_profiles
+    )
+    assert len(request_profile.peer_bytes) == max(src_tp, dst_tp)
 
 
 @pytest.mark.parametrize("src_tp,dst_tp", [(4, 8), (8, 4), (4, 4)])
@@ -426,3 +548,39 @@ def test_uniform_plan_rejects_non_divisible_topology():
 def test_grouped_plan_requires_groups():
     with pytest.raises(ValueError, match="at least one"):
         plan_grouped_uniform_reshard((), 4, 8)
+
+
+def test_request_profile_rejects_mixed_tp_topologies():
+    global_state = torch.arange(32 * 2, dtype=torch.float32).reshape(32, 2)
+    source4 = make_uniform_shards(global_state, 4, dim=0)
+    source8 = make_uniform_shards(global_state, 8, dim=0)
+    profile4_to_8 = profile_tp_transfer_plan(
+        source4,
+        plan_uniform_reshard(32, 4, 8),
+        8,
+        shard_dim=0,
+        dst_width=4,
+    )
+    profile8_to_4 = profile_tp_transfer_plan(
+        source8,
+        plan_uniform_reshard(32, 8, 4),
+        4,
+        shard_dim=0,
+        dst_width=8,
+    )
+
+    with pytest.raises(ValueError, match="different TP topologies"):
+        aggregate_tp_transfer_profiles((profile4_to_8, profile8_to_4))
+
+
+def test_transfer_profile_rejects_inconsistent_peer_ledger():
+    with pytest.raises(ValueError, match="peer bytes do not match"):
+        TPTransferProfile(
+            wire_bytes=4,
+            source_bytes=(4,),
+            destination_bytes=(4,),
+            source_peer_counts=(1,),
+            destination_peer_counts=(1,),
+            peer_bytes=((0, 0, 3),),
+            slice_count=1,
+        )

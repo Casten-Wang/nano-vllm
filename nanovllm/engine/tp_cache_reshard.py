@@ -49,7 +49,68 @@ class TPTransferProfile:
     destination_bytes: tuple[int, ...]
     source_peer_counts: tuple[int, ...]
     destination_peer_counts: tuple[int, ...]
+    peer_bytes: tuple[tuple[int, int, int], ...]
     slice_count: int
+
+    def __post_init__(self) -> None:
+        if not self.source_bytes or not self.destination_bytes:
+            raise ValueError("transfer profile must include source and destination ranks")
+        integer_fields = (
+            self.wire_bytes,
+            self.slice_count,
+            *self.source_bytes,
+            *self.destination_bytes,
+            *self.source_peer_counts,
+            *self.destination_peer_counts,
+        )
+        if any(
+            not isinstance(value, int) or isinstance(value, bool) or value < 0
+            for value in integer_fields
+        ):
+            raise ValueError("transfer profile counters must be non-negative integers")
+        if self.wire_bytes <= 0 or self.slice_count <= 0:
+            raise ValueError("transfer profile wire bytes and slice count must be positive")
+        if (
+            len(self.source_bytes) != len(self.source_peer_counts)
+            or len(self.destination_bytes) != len(self.destination_peer_counts)
+        ):
+            raise ValueError("transfer profile rank vectors have inconsistent lengths")
+        if (
+            sum(self.source_bytes) != self.wire_bytes
+            or sum(self.destination_bytes) != self.wire_bytes
+        ):
+            raise ValueError("transfer profile rank bytes do not match wire bytes")
+
+        peer_map = {}
+        source_peers = [set() for _ in self.source_bytes]
+        destination_peers = [set() for _ in self.destination_bytes]
+        for peer in self.peer_bytes:
+            if (
+                not isinstance(peer, tuple)
+                or len(peer) != 3
+                or any(
+                    not isinstance(value, int) or isinstance(value, bool)
+                    for value in peer
+                )
+            ):
+                raise ValueError("transfer profile peer bytes are invalid")
+            src_rank, dst_rank, byte_count = peer
+            if (
+                not 0 <= src_rank < len(self.source_bytes)
+                or not 0 <= dst_rank < len(self.destination_bytes)
+                or byte_count <= 0
+                or (src_rank, dst_rank) in peer_map
+            ):
+                raise ValueError("transfer profile peer bytes are invalid")
+            peer_map[src_rank, dst_rank] = byte_count
+            source_peers[src_rank].add(dst_rank)
+            destination_peers[dst_rank].add(src_rank)
+        if sum(peer_map.values()) != self.wire_bytes:
+            raise ValueError("transfer profile peer bytes do not match wire bytes")
+        if tuple(map(len, source_peers)) != self.source_peer_counts:
+            raise ValueError("transfer profile source peer counts do not match")
+        if tuple(map(len, destination_peers)) != self.destination_peer_counts:
+            raise ValueError("transfer profile destination peer counts do not match")
 
 
 def _validate_tp_size(tp_size: int) -> None:
@@ -239,7 +300,7 @@ def plan_kv_head_reshard(
     src_tp_size: int,
     dst_tp_size: int,
 ) -> tuple[TPTransferSlice, ...]:
-    """Plan direct KV-head copies, selecting one canonical source replica."""
+    """Plan direct KV-head copies while balancing equivalent source replicas."""
 
     _validate_tp_size(src_tp_size)
     _validate_tp_size(dst_tp_size)
@@ -266,11 +327,12 @@ def plan_kv_head_reshard(
                 src_start = head_index % src_local_heads
             else:
                 # Replicated source heads are interchangeable. Spread fan-out
-                # across them instead of turning the first replica into a
-                # per-head network hotspot.
+                # across contiguous destination groups. This both avoids a
+                # per-head hotspot and aligns peer edges with uniformly
+                # sharded recurrent/QKV state.
                 src_rank = (
                     head_index * src_replication
-                    + destination_index % src_replication
+                    + destination_index * src_replication // dst_replication
                 )
                 src_start = 0
             slices.append(
@@ -347,19 +409,75 @@ def profile_tp_transfer_plan(
     destination_bytes = [0] * dst_tp_size
     source_peers = [set() for _ in shards]
     destination_peers = [set() for _ in range(dst_tp_size)]
+    peer_bytes = {}
     for entry in plan:
         transfer_bytes = entry.length * bytes_per_dim
         source_bytes[entry.src_rank] += transfer_bytes
         destination_bytes[entry.dst_rank] += transfer_bytes
         source_peers[entry.src_rank].add(entry.dst_rank)
         destination_peers[entry.dst_rank].add(entry.src_rank)
+        peer = (entry.src_rank, entry.dst_rank)
+        peer_bytes[peer] = peer_bytes.get(peer, 0) + transfer_bytes
     return TPTransferProfile(
         wire_bytes=sum(source_bytes),
         source_bytes=tuple(source_bytes),
         destination_bytes=tuple(destination_bytes),
         source_peer_counts=tuple(len(peers) for peers in source_peers),
         destination_peer_counts=tuple(len(peers) for peers in destination_peers),
+        peer_bytes=tuple(
+            (src_rank, dst_rank, byte_count)
+            for (src_rank, dst_rank), byte_count in sorted(peer_bytes.items())
+        ),
         slice_count=len(plan),
+    )
+
+
+def aggregate_tp_transfer_profiles(
+    profiles: Sequence[TPTransferProfile],
+) -> TPTransferProfile:
+    """Combine tensor profiles into one request-level capacity ledger."""
+
+    if not profiles:
+        raise ValueError("at least one tensor transfer profile is required")
+    if any(not isinstance(profile, TPTransferProfile) for profile in profiles):
+        raise ValueError("tensor transfer profile is invalid")
+    src_tp_size = len(profiles[0].source_bytes)
+    dst_tp_size = len(profiles[0].destination_bytes)
+    if any(
+        len(profile.source_bytes) != src_tp_size
+        or len(profile.destination_bytes) != dst_tp_size
+        for profile in profiles
+    ):
+        raise ValueError("tensor transfer profiles use different TP topologies")
+
+    source_bytes = [0] * src_tp_size
+    destination_bytes = [0] * dst_tp_size
+    peer_bytes = {}
+    for profile in profiles:
+        for rank, byte_count in enumerate(profile.source_bytes):
+            source_bytes[rank] += byte_count
+        for rank, byte_count in enumerate(profile.destination_bytes):
+            destination_bytes[rank] += byte_count
+        for src_rank, dst_rank, byte_count in profile.peer_bytes:
+            peer = (src_rank, dst_rank)
+            peer_bytes[peer] = peer_bytes.get(peer, 0) + byte_count
+
+    source_peers = [set() for _ in range(src_tp_size)]
+    destination_peers = [set() for _ in range(dst_tp_size)]
+    for src_rank, dst_rank in peer_bytes:
+        source_peers[src_rank].add(dst_rank)
+        destination_peers[dst_rank].add(src_rank)
+    return TPTransferProfile(
+        wire_bytes=sum(profile.wire_bytes for profile in profiles),
+        source_bytes=tuple(source_bytes),
+        destination_bytes=tuple(destination_bytes),
+        source_peer_counts=tuple(len(peers) for peers in source_peers),
+        destination_peer_counts=tuple(len(peers) for peers in destination_peers),
+        peer_bytes=tuple(
+            (src_rank, dst_rank, byte_count)
+            for (src_rank, dst_rank), byte_count in sorted(peer_bytes.items())
+        ),
+        slice_count=sum(profile.slice_count for profile in profiles),
     )
 
 
