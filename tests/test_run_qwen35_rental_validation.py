@@ -37,6 +37,7 @@ def args():
         output_len=128,
         max_model_len=16_384,
         max_num_seqs=64,
+        sampling_chunk_size=32,
         repeats=3,
         run_id="rental-a",
         result_dir="benchmark_results/qwen35_rental",

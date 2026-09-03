@@ -59,6 +59,7 @@ def write_markdown(path: Path, result: dict) -> None:
         f"- recurrent_state_dtype: `{result['recurrent_state_dtype']}`",
         f"- qwen35_moe_decode_backend: `{result['qwen35_moe_decode_backend']}`",
         f"- qwen35_moe_decode_chunk_size: `{result['qwen35_moe_decode_chunk_size']}`",
+        f"- sampling_chunk_size: `{result['sampling_chunk_size']}`",
         f"- quantization_format: `{result['quantization_format']}`",
         f"- requested_weight_quant_backend: `{result['requested_weight_quant_backend']}`",
         f"- weight_quant_backend: `{result['weight_quant_backend']}`",
@@ -135,6 +136,7 @@ def parse_args() -> argparse.Namespace:
         help="Qwen3.5 single-token MoE dispatch implementation.",
     )
     parser.add_argument("--qwen35-moe-decode-chunk-size", type=int, default=8)
+    parser.add_argument("--sampling-chunk-size", type=int, default=32)
     parser.add_argument(
         "--weight-quant-backend",
         choices=("auto", "reference", "triton"),
@@ -205,6 +207,7 @@ def main() -> None:
         recurrent_state_dtype=args.recurrent_state_dtype,
         qwen35_moe_decode_backend=args.qwen35_moe_decode_backend,
         qwen35_moe_decode_chunk_size=args.qwen35_moe_decode_chunk_size,
+        sampling_chunk_size=args.sampling_chunk_size,
         weight_quant_backend=args.weight_quant_backend,
         kv_cache_dtype=args.kv_cache_dtype,
         kv_dequant_backend=args.kv_dequant_backend,
@@ -299,6 +302,7 @@ def main() -> None:
         "recurrent_state_dtype": args.recurrent_state_dtype,
         "qwen35_moe_decode_backend": args.qwen35_moe_decode_backend,
         "qwen35_moe_decode_chunk_size": args.qwen35_moe_decode_chunk_size,
+        "sampling_chunk_size": args.sampling_chunk_size,
         "quantization_format": llm.model_runner.config.model_spec.quantization.format,
         "requested_weight_quant_backend": requested_weight_quant_backend,
         "weight_quant_backend": args.weight_quant_backend,

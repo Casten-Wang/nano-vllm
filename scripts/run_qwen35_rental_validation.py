@@ -149,6 +149,8 @@ def commands(args: argparse.Namespace) -> list[tuple[str, list[str]]]:
         str(args.max_model_len),
         "--max-num-seqs",
         str(args.max_num_seqs),
+        "--sampling-chunk-size",
+        str(getattr(args, "sampling_chunk_size", 32)),
         "--repeats",
         str(args.repeats),
         "--run-id",
@@ -1245,6 +1247,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-len", type=int, default=128)
     parser.add_argument("--max-model-len", type=int, default=16_384)
     parser.add_argument("--max-num-seqs", type=int, default=64)
+    parser.add_argument("--sampling-chunk-size", type=int, default=32)
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument(
         "--run-id",
@@ -1271,6 +1274,7 @@ def parse_args() -> argparse.Namespace:
         args.output_len,
         args.max_model_len,
         args.max_num_seqs,
+        args.sampling_chunk_size,
         args.repeats,
     ) <= 0:
         parser.error("workload sizes and repeats must be positive")

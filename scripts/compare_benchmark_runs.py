@@ -38,6 +38,7 @@ OPTIMIZATION_FIELDS = (
     "recurrent_state_dtype",
     "qwen35_moe_decode_backend",
     "qwen35_moe_decode_chunk_size",
+    "sampling_chunk_size",
     "quantization_format",
     "requested_weight_quant_backend",
     "weight_quant_backend",

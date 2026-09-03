@@ -111,6 +111,8 @@ def command_for_case(
         str(args.max_num_batched_tokens),
         "--max-num-seqs",
         str(args.max_num_seqs),
+        "--sampling-chunk-size",
+        str(getattr(args, "sampling_chunk_size", 32)),
         "--seed",
         str(args.seed),
         "--name",
@@ -573,6 +575,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-len", type=int, default=128)
     parser.add_argument("--max-model-len", type=int, default=4096)
     parser.add_argument("--max-num-batched-tokens", type=int, default=16384)
+    parser.add_argument("--sampling-chunk-size", type=int, default=32)
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.9)
     parser.add_argument(
         "--weight-quant-backend",
@@ -629,6 +632,8 @@ def normalize_args(args: argparse.Namespace) -> argparse.Namespace:
         args.max_num_seqs = args.num_seqs
     if args.repeats <= 0:
         raise ValueError("--repeats must be positive")
+    if args.sampling_chunk_size <= 0:
+        raise ValueError("--sampling-chunk-size must be positive")
     if args.num_seqs <= 0 or args.input_len <= 0 or args.output_len <= 0:
         raise ValueError("workload sizes must be positive")
     if args.input_len + args.output_len > args.max_model_len:

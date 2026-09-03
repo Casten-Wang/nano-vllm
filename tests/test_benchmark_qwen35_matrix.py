@@ -23,6 +23,7 @@ def args(**overrides):
         "output_len": 32,
         "max_model_len": 4096,
         "max_num_batched_tokens": 8192,
+        "sampling_chunk_size": 32,
         "gpu_memory_utilization": 0.9,
         "weight_quant_backend": "auto",
         "max_num_seqs": 64,
@@ -126,6 +127,16 @@ def test_explicit_sequence_capacity_is_preserved():
     parsed = args(max_num_seqs=32)
 
     assert MODULE.normalize_args(parsed).max_num_seqs == 32
+
+
+def test_matrix_forwards_sampling_chunk_size_to_baseline():
+    parsed = args(sampling_chunk_size=7)
+    case = MODULE.build_cases((4,))[0]
+
+    command = MODULE.command_for_case(parsed, case)
+
+    index = command.index("--sampling-chunk-size")
+    assert command[index + 1] == "7"
 
 
 def test_non_positive_repeat_count_is_rejected():
