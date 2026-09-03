@@ -323,6 +323,83 @@ def test_resident_fp8_experts_preserve_tp8_partial_block_scales():
     )
 
 
+def test_resident_fp8_tp8_partials_sum_to_full_expert():
+    torch.manual_seed(103)
+    hidden_size = 8
+    intermediate_size = 512
+    block_size = (128, 128)
+    gate = torch.randint(-3, 4, (intermediate_size, hidden_size)).to(
+        torch.float8_e4m3fn
+    )
+    up = torch.randint(-3, 4, (intermediate_size, hidden_size)).to(
+        torch.float8_e4m3fn
+    )
+    down = torch.randint(-3, 4, (hidden_size, intermediate_size)).to(
+        torch.float8_e4m3fn
+    )
+    gate_scale = torch.tensor([[0.5], [1.0], [1.5], [2.0]])
+    up_scale = torch.tensor([[1.0], [0.75], [1.25], [0.5]])
+    down_scale = torch.tensor([[0.5, 1.0, 1.5, 2.0]])
+    hidden = torch.randn(3, hidden_size)
+    full_gate = dequantize_fp8_block_weight(
+        gate, gate_scale, block_size, output_dtype=hidden.dtype
+    )
+    full_up = dequantize_fp8_block_weight(
+        up, up_scale, block_size, output_dtype=hidden.dtype
+    )
+    full_down = dequantize_fp8_block_weight(
+        down, down_scale, block_size, output_dtype=hidden.dtype
+    )
+    expected = torch.nn.functional.linear(
+        torch.nn.functional.silu(torch.nn.functional.linear(hidden, full_gate))
+        * torch.nn.functional.linear(hidden, full_up),
+        full_down,
+    )
+
+    partials = []
+    for rank in range(8):
+        with (
+            patch("torch.distributed.get_world_size", return_value=8),
+            patch("torch.distributed.get_rank", return_value=rank),
+        ):
+            experts = Qwen35Experts(
+                hidden_size=hidden_size,
+                intermediate_size=intermediate_size,
+                num_experts=1,
+                checkpoint_format="fp8_block",
+                fp8_block_size=block_size,
+                resident_fp8=True,
+            )
+        for projection, weight, scale in (
+            ("gate", gate, gate_scale),
+            ("up", up, up_scale),
+        ):
+            experts._load_gate_up_fp8_slice(
+                experts.gate_up_proj,
+                weight,
+                scale,
+                (0, projection),
+                block_size,
+            )
+        experts._load_down_fp8_slice(
+            experts.down_proj,
+            down,
+            down_scale,
+            (0, "down"),
+            block_size,
+        )
+        experts.resident_weight_buffer_pool = ResidentFP8WeightBufferPool()
+        partials.append(
+            experts._forward_sorted(
+                hidden,
+                torch.zeros(hidden.shape[0], 1, dtype=torch.long),
+                torch.ones(hidden.shape[0], 1),
+            )
+        )
+
+    torch.testing.assert_close(sum(partials), expected, rtol=2e-5, atol=2e-5)
+
+
 class TinyFP8Model(nn.Module):
     def __init__(self):
         super().__init__()
