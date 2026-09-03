@@ -16,6 +16,7 @@ import torch
 from nanovllm.engine.cache_transfer import (
     HostStagingBufferPool,
     RankCacheTransfer,
+    TRANSFER_FORMAT_VERSION,
 )
 
 
@@ -151,6 +152,12 @@ def receive_rank_cache_transfer(
     *,
     max_payload_bytes: int = DEFAULT_MAX_PAYLOAD_BYTES,
     host_staging_pool: HostStagingBufferPool | None = None,
+    expected_transfer_id: str | None = None,
+    expected_tensor_parallel_rank: int | None = None,
+    expected_tensor_parallel_size: int | None = None,
+    expected_block_size: int | None = None,
+    expected_cached_tokens: int | None = None,
+    expected_payload_bytes: int | None = None,
 ) -> RankCacheTransfer:
     """Receive and verify one payload into newly owned CPU tensors."""
 
@@ -171,6 +178,53 @@ def receive_rank_cache_transfer(
         header = json.loads(raw_header)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ValueError("cache transfer wire header is invalid") from exc
+    if not isinstance(header, dict):
+        raise ValueError("cache transfer wire header is invalid")
+    format_version = header.get("format_version")
+    transfer_id = header.get("transfer_id")
+    tensor_parallel_rank = header.get("tensor_parallel_rank")
+    tensor_parallel_size = header.get("tensor_parallel_size")
+    block_size = header.get("block_size")
+    cached_tokens = header.get("cached_tokens")
+    if (
+        not isinstance(format_version, int)
+        or isinstance(format_version, bool)
+        or format_version != TRANSFER_FORMAT_VERSION
+        or not isinstance(transfer_id, str)
+        or not transfer_id
+        or not isinstance(tensor_parallel_rank, int)
+        or isinstance(tensor_parallel_rank, bool)
+        or not isinstance(tensor_parallel_size, int)
+        or isinstance(tensor_parallel_size, bool)
+        or tensor_parallel_size <= 0
+        or not 0 <= tensor_parallel_rank < tensor_parallel_size
+        or not isinstance(block_size, int)
+        or isinstance(block_size, bool)
+        or block_size <= 0
+        or not isinstance(cached_tokens, int)
+        or isinstance(cached_tokens, bool)
+        or cached_tokens <= 0
+    ):
+        raise ValueError("cache transfer wire header metadata is invalid")
+    expectations = (
+        ("transfer id", transfer_id, expected_transfer_id),
+        (
+            "tensor-parallel rank",
+            tensor_parallel_rank,
+            expected_tensor_parallel_rank,
+        ),
+        (
+            "tensor-parallel size",
+            tensor_parallel_size,
+            expected_tensor_parallel_size,
+        ),
+        ("block size", block_size, expected_block_size),
+        ("cached token count", cached_tokens, expected_cached_tokens),
+        ("payload byte count", body_bytes, expected_payload_bytes),
+    )
+    for name, actual, expected in expectations:
+        if expected is not None and actual != expected:
+            raise ValueError(f"cache transfer wire {name} does not match destination")
     descriptors = header.get("tensors")
     if not isinstance(descriptors, list) or not descriptors:
         raise ValueError("cache transfer wire tensor descriptors are invalid")
@@ -252,12 +306,12 @@ def receive_rank_cache_transfer(
         if tensors:
             raise ValueError("cache transfer wire tensor names are invalid")
         return RankCacheTransfer(
-            format_version=int(header["format_version"]),
-            transfer_id=header["transfer_id"],
-            tensor_parallel_rank=int(header["tensor_parallel_rank"]),
-            tensor_parallel_size=int(header["tensor_parallel_size"]),
-            block_size=int(header["block_size"]),
-            cached_tokens=int(header["cached_tokens"]),
+            format_version=format_version,
+            transfer_id=transfer_id,
+            tensor_parallel_rank=tensor_parallel_rank,
+            tensor_parallel_size=tensor_parallel_size,
+            block_size=block_size,
+            cached_tokens=cached_tokens,
             kv_blocks=kv_blocks,
             kv_scales=kv_scales,
             recurrent_states=recurrent,
@@ -289,6 +343,12 @@ class RankCacheReceiver:
         timeout_s: float = 30.0,
         max_payload_bytes: int = DEFAULT_MAX_PAYLOAD_BYTES,
         host_staging_pool: HostStagingBufferPool | None = None,
+        expected_transfer_id: str | None = None,
+        expected_tensor_parallel_rank: int | None = None,
+        expected_tensor_parallel_size: int | None = None,
+        expected_block_size: int | None = None,
+        expected_cached_tokens: int | None = None,
+        expected_payload_bytes: int | None = None,
     ) -> None:
         if not isinstance(host, str) or not host:
             raise ValueError("cache transfer receiver host must not be empty")
@@ -300,6 +360,14 @@ class RankCacheReceiver:
             raise ValueError("max_payload_bytes must be positive")
         self.max_payload_bytes = max_payload_bytes
         self.host_staging_pool = host_staging_pool
+        self._expected_header = {
+            "expected_transfer_id": expected_transfer_id,
+            "expected_tensor_parallel_rank": expected_tensor_parallel_rank,
+            "expected_tensor_parallel_size": expected_tensor_parallel_size,
+            "expected_block_size": expected_block_size,
+            "expected_cached_tokens": expected_cached_tokens,
+            "expected_payload_bytes": expected_payload_bytes,
+        }
         self._listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self._listener.settimeout(timeout_s)
@@ -331,6 +399,7 @@ class RankCacheReceiver:
                     connection,
                     max_payload_bytes=self.max_payload_bytes,
                     host_staging_pool=self.host_staging_pool,
+                    **self._expected_header,
                 )
                 if on_verified is not None:
                     on_verified(payload)
@@ -366,6 +435,12 @@ class PendingRankCacheReceive:
         timeout_s: float = 30.0,
         max_payload_bytes: int = DEFAULT_MAX_PAYLOAD_BYTES,
         host_staging_pool: HostStagingBufferPool | None = None,
+        expected_transfer_id: str | None = None,
+        expected_tensor_parallel_rank: int | None = None,
+        expected_tensor_parallel_size: int | None = None,
+        expected_block_size: int | None = None,
+        expected_cached_tokens: int | None = None,
+        expected_payload_bytes: int | None = None,
     ) -> None:
         self._receiver = RankCacheReceiver(
             host,
@@ -373,6 +448,12 @@ class PendingRankCacheReceive:
             timeout_s=timeout_s,
             max_payload_bytes=max_payload_bytes,
             host_staging_pool=host_staging_pool,
+            expected_transfer_id=expected_transfer_id,
+            expected_tensor_parallel_rank=expected_tensor_parallel_rank,
+            expected_tensor_parallel_size=expected_tensor_parallel_size,
+            expected_block_size=expected_block_size,
+            expected_cached_tokens=expected_cached_tokens,
+            expected_payload_bytes=expected_payload_bytes,
         )
         self._timeout_s = timeout_s
         self._deadline = monotonic() + timeout_s
@@ -418,6 +499,7 @@ class PendingRankCacheReceive:
                 connection,
                 max_payload_bytes=self._receiver.max_payload_bytes,
                 host_staging_pool=self._receiver.host_staging_pool,
+                **self._receiver._expected_header,
             )
             release_payload = False
             with self._lock:
@@ -437,6 +519,9 @@ class PendingRankCacheReceive:
                 except OSError:
                     pass
                 connection.close()
+                with self._lock:
+                    if self._connection is connection:
+                        self._connection = None
         finally:
             self._receiver.close()
 
@@ -479,7 +564,12 @@ class PendingRankCacheReceive:
             payload.release_host_staging()
         if connection is not None:
             try:
-                connection.sendall(_TRANSFER_ACK if accepted else _TRANSFER_NACK)
+                try:
+                    connection.sendall(
+                        _TRANSFER_ACK if accepted else _TRANSFER_NACK
+                    )
+                except OSError:
+                    pass
             finally:
                 try:
                     connection.shutdown(socket.SHUT_RDWR)

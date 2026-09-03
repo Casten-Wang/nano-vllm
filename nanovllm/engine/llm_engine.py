@@ -496,6 +496,7 @@ class LLMEngine:
                 timeout_s,
                 max_payload_bytes,
                 [expected_by_rank[rank] for rank in range(self.config.tensor_parallel_size)],
+                seq.num_prompt_tokens,
             )
             _validate_rank_results(
                 rank_results,

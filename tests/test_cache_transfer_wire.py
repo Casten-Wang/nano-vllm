@@ -1,3 +1,4 @@
+import json
 import socket
 from dataclasses import replace
 from threading import Thread
@@ -63,6 +64,26 @@ def make_payload(*, int8: bool = False) -> RankCacheTransfer:
         ),
         recurrent_states=(torch.arange(12, dtype=torch.float32).reshape(2, 2, 3),),
         convolution_states=(torch.arange(8, dtype=torch.bfloat16).reshape(2, 4),),
+    )
+
+
+def replace_wire_header_field(frame: bytes, name: str, value) -> bytes:
+    prefix_end = WIRE_HEADER.size
+    magic, version, header_bytes, body_bytes = WIRE_HEADER.unpack(
+        frame[:prefix_end]
+    )
+    body_start = prefix_end + header_bytes
+    header = json.loads(frame[prefix_end:body_start])
+    header[name] = value
+    encoded = json.dumps(
+        header,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return (
+        WIRE_HEADER.pack(magic, version, len(encoded), body_bytes)
+        + encoded
+        + frame[body_start:]
     )
 
 
@@ -202,6 +223,50 @@ def test_socket_wire_rejects_payload_above_receiver_limit():
     with pytest.raises(ValueError, match="exceeds configured byte limit"):
         receive_rank_cache_transfer(receiver, max_payload_bytes=1)
     receiver.close()
+
+
+def test_receive_rejects_mismatched_header_before_payload_allocation():
+    sink = BufferSocket()
+    send_rank_cache_transfer(sink, make_payload())
+    source = BufferSocket(sink.data)
+    pool = HostStagingBufferPool()
+
+    with pytest.raises(ValueError, match="transfer id does not match"):
+        receive_rank_cache_transfer(
+            source,
+            host_staging_pool=pool,
+            expected_transfer_id="another-request",
+        )
+
+    assert source.offset < len(source.data)
+    assert pool.storage_stats()["allocation_count"] == 0
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("format_version", True),
+        ("tensor_parallel_rank", "1"),
+        ("tensor_parallel_size", 0),
+        ("block_size", False),
+        ("cached_tokens", -1),
+    ],
+)
+def test_receive_rejects_malformed_header_metadata_before_payload(
+    name,
+    value,
+):
+    sink = BufferSocket()
+    send_rank_cache_transfer(sink, make_payload())
+    frame = replace_wire_header_field(bytes(sink.data), name, value)
+    source = BufferSocket(frame)
+    pool = HostStagingBufferPool()
+
+    with pytest.raises(ValueError, match="header metadata is invalid"):
+        receive_rank_cache_transfer(source, host_staging_pool=pool)
+
+    assert source.offset < len(source.data)
+    assert pool.storage_stats()["allocation_count"] == 0
 
 
 def test_socket_wire_rejects_truncated_payload():
@@ -388,7 +453,11 @@ def test_model_runner_rank_endpoint_exports_receives_and_installs():
     port = probe.getsockname()[1]
     probe.close()
     endpoints = [("127.0.0.1", port)]
-    payload = make_payload()
+    payload = replace(
+        make_payload(),
+        tensor_parallel_rank=0,
+        tensor_parallel_size=1,
+    )
 
     source = object.__new__(ModelRunner)
     source.rank = 0
@@ -402,6 +471,8 @@ def test_model_runner_rank_endpoint_exports_receives_and_installs():
     destination = object.__new__(ModelRunner)
     destination.rank = 0
     destination.world_size = 1
+    destination.block_size = payload.block_size
+    destination_seq = SimpleNamespace(num_prompt_tokens=payload.cached_tokens)
     installed = []
     destination.import_sequence_cache = (
         lambda seq, received, transfer_id: installed.append(
@@ -412,7 +483,7 @@ def test_model_runner_rank_endpoint_exports_receives_and_installs():
     receiver_thread = Thread(
         target=lambda: receive_result.append(
             destination.receive_sequence_cache_from_endpoint(
-                "destination-seq",
+                destination_seq,
                 payload.transfer_id,
                 endpoints,
                 timeout_s=2.0,
@@ -435,7 +506,7 @@ def test_model_runner_rank_endpoint_exports_receives_and_installs():
         {"rank": 0, "cached_tokens": 5, "received_bytes": payload.nbytes}
     ]
     assert len(installed) == 1
-    assert installed[0][0] == "destination-seq"
+    assert installed[0][0] is destination_seq
     assert installed[0][1].transfer_id == payload.transfer_id
     assert installed[0][2] == payload.transfer_id
     torch.testing.assert_close(installed[0][1].kv_blocks, payload.kv_blocks)
@@ -447,7 +518,11 @@ def test_model_runner_async_receive_polls_then_installs_before_ack():
     port = probe.getsockname()[1]
     probe.close()
     endpoints = [("127.0.0.1", port)]
-    payload = make_payload()
+    payload = replace(
+        make_payload(),
+        tensor_parallel_rank=0,
+        tensor_parallel_size=1,
+    )
 
     source = object.__new__(ModelRunner)
     source.rank = 0
@@ -456,6 +531,7 @@ def test_model_runner_async_receive_polls_then_installs_before_ack():
     destination = object.__new__(ModelRunner)
     destination.rank = 0
     destination.world_size = 1
+    destination.block_size = payload.block_size
     destination._pending_cache_receives = {}
     installed = []
     destination.import_sequence_cache = (
@@ -468,6 +544,7 @@ def test_model_runner_async_receive_polls_then_installs_before_ack():
         payload.transfer_id,
         endpoints,
         2.0,
+        expected_cached_tokens=payload.cached_tokens,
     ) == {"rank": 0, "started": 1}
     sender_result = []
     sender_thread = Thread(
@@ -539,7 +616,11 @@ def test_model_runner_async_receive_nacks_payload_smaller_than_preflight():
     port = probe.getsockname()[1]
     probe.close()
     endpoints = [("127.0.0.1", port)]
-    payload = make_payload()
+    payload = replace(
+        make_payload(),
+        tensor_parallel_rank=0,
+        tensor_parallel_size=1,
+    )
 
     source = object.__new__(ModelRunner)
     source.rank = 0
@@ -548,6 +629,7 @@ def test_model_runner_async_receive_nacks_payload_smaller_than_preflight():
     destination = object.__new__(ModelRunner)
     destination.rank = 0
     destination.world_size = 1
+    destination.block_size = payload.block_size
     destination._pending_cache_receives = {}
     destination.import_sequence_cache = Mock()
     destination.start_sequence_cache_receive(
@@ -555,6 +637,7 @@ def test_model_runner_async_receive_nacks_payload_smaller_than_preflight():
         endpoints,
         2.0,
         expected_payload_bytes=[payload.nbytes + 1],
+        expected_cached_tokens=payload.cached_tokens,
     )
     sender_errors = []
 
@@ -577,18 +660,15 @@ def test_model_runner_async_receive_nacks_payload_smaller_than_preflight():
         sleep(0.001)
         poll = destination.poll_sequence_cache_receive(payload.transfer_id)
 
-    assert poll == {"rank": 0, "state": "ready"}
-    with pytest.raises(ValueError, match="differ from the preflight"):
-        destination.install_sequence_cache_receive(
-            "destination-seq",
-            payload.transfer_id,
-            [payload.nbytes + 1],
-        )
+    assert poll["rank"] == 0
+    assert poll["state"] == "failed"
+    assert "payload byte count does not match" in poll["error"]
+    destination.abort_sequence_cache_receive(payload.transfer_id)
     sender_thread.join(timeout=2.0)
 
     assert not sender_thread.is_alive()
     assert len(sender_errors) == 1
-    assert "receiver rejected" in str(sender_errors[0])
+    assert isinstance(sender_errors[0], (OSError, RuntimeError))
     destination.import_sequence_cache.assert_not_called()
 
 

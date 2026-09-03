@@ -1591,6 +1591,12 @@ class ModelRunner:
             timeout_s=timeout_s,
             max_payload_bytes=max_payload_bytes,
             host_staging_pool=self._host_receive_staging_pool(),
+            expected_transfer_id=transfer_id,
+            expected_tensor_parallel_rank=self.rank,
+            expected_tensor_parallel_size=self.world_size,
+            expected_block_size=self.block_size,
+            expected_cached_tokens=seq.num_prompt_tokens,
+            expected_payload_bytes=expected_bytes,
         ) as receiver:
             payload = receiver.receive(
                 timeout_s=timeout_s,
@@ -1614,6 +1620,7 @@ class ModelRunner:
         timeout_s: float = 30.0,
         max_payload_bytes: int = 16 * 1024**3,
         expected_payload_bytes: list[int] | None = None,
+        expected_cached_tokens: int | None = None,
     ) -> dict:
         """Start rank-local TCP receive without touching CUDA state."""
 
@@ -1643,6 +1650,16 @@ class ModelRunner:
             timeout_s=timeout_s,
             max_payload_bytes=max_payload_bytes,
             host_staging_pool=self._host_receive_staging_pool(),
+            expected_transfer_id=transfer_id,
+            expected_tensor_parallel_rank=self.rank,
+            expected_tensor_parallel_size=self.world_size,
+            expected_block_size=self.block_size,
+            expected_cached_tokens=expected_cached_tokens,
+            expected_payload_bytes=(
+                None
+                if expected_payload_bytes is None
+                else expected_payload_bytes[self.rank]
+            ),
         )
         self._pending_cache_receives[transfer_id] = receive
         try:
