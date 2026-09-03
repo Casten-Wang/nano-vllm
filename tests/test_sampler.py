@@ -52,6 +52,12 @@ class SamplerTest(unittest.TestCase):
         params = SamplingParams(temperature=0.0)
         self.assertEqual(params.temperature, 0.0)
 
+    def test_sampling_params_reject_non_integer_generation_limits(self):
+        for max_tokens in (0, -1, 1.5, True):
+            with self.subTest(max_tokens=max_tokens):
+                with self.assertRaisesRegex(ValueError, "positive integer"):
+                    SamplingParams(max_tokens=max_tokens)
+
     def test_top_k_masks_tokens_outside_largest_k(self):
         logits = torch.tensor([[1.0, 4.0, 3.0, 2.0]])
         top_ks = torch.tensor([2], dtype=torch.int32)
