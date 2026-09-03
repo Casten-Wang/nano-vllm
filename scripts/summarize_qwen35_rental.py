@@ -2251,8 +2251,10 @@ def summarize_long_prefill(result: dict, *, expected_tp_size: int) -> dict:
         compact_state_valid = True
         if name == "vectorized_prefill_convolution":
             compact_state_valid = (
-                item.get("next_state_owns_compact_storage") is True
+                item.get("next_state_reuses_input_storage") is True
                 and item.get("compact_state_storage_mib", 0) > 0
+                and item.get("reused_prefill_state_mib")
+                == item.get("compact_state_storage_mib")
                 and item.get("released_history_storage_mib", 0) > 0
             )
         valid = (
@@ -2273,6 +2275,9 @@ def summarize_long_prefill(result: dict, *, expected_tp_size: int) -> dict:
             "compact_state_valid": compact_state_valid,
             "compact_state_storage_mib": item.get(
                 "compact_state_storage_mib"
+            ),
+            "reused_prefill_state_mib": item.get(
+                "reused_prefill_state_mib"
             ),
             "released_history_storage_mib": item.get(
                 "released_history_storage_mib"

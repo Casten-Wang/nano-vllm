@@ -815,8 +815,9 @@ def write_long_prefill_case(root, *, max_abs_error=0.01):
     convolution = {
         **deepcopy(measurement),
         "compact_state_storage_mib": 0.015625,
+        "reused_prefill_state_mib": 0.015625,
         "released_history_storage_mib": 31.996,
-        "next_state_owns_compact_storage": True,
+        "next_state_reuses_input_storage": True,
     }
     write(
         root / "kernels_long/tp4.json",

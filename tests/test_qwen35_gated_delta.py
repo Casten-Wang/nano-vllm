@@ -235,6 +235,59 @@ def test_vectorized_causal_convolution_handles_empty_prefill():
     assert next_state is state
 
 
+@pytest.mark.parametrize("sequence_length", [1, 2, 7])
+@pytest.mark.parametrize("kernel_size", [1, 2, 4])
+def test_vectorized_causal_convolution_can_reuse_input_state(
+    sequence_length,
+    kernel_size,
+):
+    torch.manual_seed(53)
+    x = torch.randn(3, sequence_length, 9)
+    state = torch.randn(3, 9, kernel_size)
+    weight = torch.randn(9, kernel_size)
+    bias = torch.randn(9)
+    expected_output, expected_state = causal_conv1d_prefill(
+        x,
+        state,
+        weight,
+        bias,
+    )
+    reusable_state = state.clone()
+    storage = reusable_state.data_ptr()
+
+    with torch.inference_mode():
+        actual_output, actual_state = causal_conv1d_prefill(
+            x,
+            reusable_state,
+            weight,
+            bias,
+            inplace_state=True,
+        )
+
+    assert actual_state.data_ptr() == storage
+    torch.testing.assert_close(actual_output, expected_output)
+    torch.testing.assert_close(actual_state, expected_state)
+
+
+def test_vectorized_causal_convolution_preserves_state_for_autograd():
+    x = torch.randn(2, 3, 5, requires_grad=True)
+    state = torch.randn(2, 5, 4, requires_grad=True)
+    original = state.detach().clone()
+    weight = torch.randn(5, 4, requires_grad=True)
+
+    output, next_state = causal_conv1d_prefill(
+        x,
+        state,
+        weight,
+        inplace_state=True,
+    )
+    (output.sum() + next_state.sum()).backward()
+
+    assert next_state.data_ptr() != state.data_ptr()
+    torch.testing.assert_close(state.detach(), original)
+    assert state.grad is not None
+
+
 @pytest.mark.parametrize("kernel_size", [1, 2, 4])
 def test_decode_convolution_can_reuse_state_storage(kernel_size):
     torch.manual_seed(43)

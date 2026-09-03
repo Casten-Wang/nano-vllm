@@ -185,6 +185,8 @@ def causal_conv1d_prefill(
     state: torch.Tensor,
     weight: torch.Tensor,
     bias: torch.Tensor | None = None,
+    *,
+    inplace_state: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Vectorized depthwise causal convolution for a prefill batch.
 
@@ -211,8 +213,15 @@ def causal_conv1d_prefill(
     )
     # Detach the tiny recurrent tail from the full prefill history. Returning
     # a view would keep the entire [batch, channels, sequence] allocation live
-    # until the later DeltaNet state update finishes.
-    next_state = history[..., -weight.shape[1] :].clone()
+    # until the later DeltaNet state update finishes. In inference the gathered
+    # input state has no later consumer, so reuse it instead of allocating a
+    # second compact state tensor.
+    history_tail = history[..., -weight.shape[1] :]
+    if inplace_state and not torch.is_grad_enabled():
+        state.copy_(history_tail)
+        next_state = state
+    else:
+        next_state = history_tail.clone()
     return F.silu(output.transpose(1, 2)).to(x.dtype), next_state
 
 
@@ -1222,6 +1231,7 @@ class Qwen35GatedDeltaNet(nn.Module):
             mixed_qkv,
             conv_state,
             self.conv1d.weight.squeeze(1),
+            inplace_state=True,
         )
         query, key, value = convolved.split(
             (self.local_key_dim, self.local_key_dim, self.local_value_dim),

@@ -2693,15 +2693,27 @@ def benchmark_convolution(args, device, dtype, local_conv_channels) -> dict:
         device=device,
         dtype=dtype,
     )
-    result = compare(
-        lambda: GDN.causal_conv1d_scan(x, state, weight),
-        lambda: GDN.causal_conv1d_prefill(x, state, weight),
-        device=device,
-        warmup=args.warmup,
-        iterations=args.iterations,
-        repeats=args.repeats,
-        measure_reference=not args.prefill_only,
-    )
+    candidate_state = state.clone()
+
+    def candidate():
+        candidate_state.copy_(state)
+        return GDN.causal_conv1d_prefill(
+            x,
+            candidate_state,
+            weight,
+            inplace_state=True,
+        )
+
+    with torch.inference_mode():
+        result = compare(
+            lambda: GDN.causal_conv1d_scan(x, state, weight),
+            candidate,
+            device=device,
+            warmup=args.warmup,
+            iterations=args.iterations,
+            repeats=args.repeats,
+            measure_reference=not args.prefill_only,
+        )
     history_elements = (
         args.prefill_batch
         * local_conv_channels
@@ -2720,7 +2732,11 @@ def benchmark_convolution(args, device, dtype, local_conv_channels) -> dict:
                 * x.element_size()
                 / (1024**2)
             ),
-            "next_state_owns_compact_storage": True,
+            "reused_prefill_state_mib": (
+                state_elements * x.element_size() / (1024**2)
+            ),
+            "next_state_reuses_input_storage": True,
+            "candidate_timing_includes_state_refresh_copy": True,
         }
     )
     return result
@@ -2763,14 +2779,15 @@ def benchmark_decode_convolution(args, device, dtype, local_conv_channels) -> di
             weight,
         )
 
-    result = compare(
-        reference,
-        candidate,
-        device=device,
-        warmup=args.warmup,
-        iterations=args.iterations,
-        repeats=args.repeats,
-    )
+    with torch.inference_mode():
+        result = compare(
+            reference,
+            candidate,
+            device=device,
+            warmup=args.warmup,
+            iterations=args.iterations,
+            repeats=args.repeats,
+        )
     result["reused_convolution_state_mib"] = (
         state.numel() * state.element_size() / 1024 / 1024
     )
