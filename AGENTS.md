@@ -53,10 +53,18 @@
 
 - Before designing a runtime, kernel, quantization, parallelism, scheduling, or
   memory optimization, inspect current primary-source implementations and
-  relevant issues or pull requests in established projects. At minimum check
-  vLLM, SGLang, and llama.cpp when the topic applies; also check projects such
-  as TensorRT-LLM, FlashAttention, FlashInfer, or PyTorch when they own the
-  relevant design.
+  relevant issues or pull requests in established projects. Use this research
+  matrix when the topic applies:
+  - GPU serving engines: vLLM, SGLang, TensorRT-LLM, LMDeploy, Hugging Face
+    Text Generation Inference, and DeepSpeed-MII.
+  - Local and cross-platform runtimes: llama.cpp, MLC LLM, and MLX-LM.
+  - Kernels and primitives: FlashAttention, FlashInfer, Triton, and PyTorch.
+  - Distributed serving and PD/KV systems: NVIDIA Dynamo, Mooncake, DistServe,
+    NVIDIA Triton Inference Server, Ray Serve, and KServe.
+  Do not force every project into every investigation: select the primary
+  implementations that actually own the relevant mechanism, but always check
+  vLLM and SGLang for server-side GPU work and llama.cpp for quantization or
+  constrained-memory work.
 - Record the exact repository, commit or release, file or PR, hardware scope,
   algorithmic idea, benchmark methodology, and known limitations used as
   references. Do not rely on recollection, summaries, or marketing claims.
@@ -66,9 +74,26 @@
 - Prefer proven interfaces and invariants, but keep this repository small:
   adopt only the minimum mechanism needed for the measured problem rather than
   importing a large framework abstraction wholesale.
+- Maintain an ignored local external-contribution registry under
+  `docs/upstream_candidates/` covering every framework in the research matrix.
+  Record each useful issue as `observed`, `reproduced`,
+  `candidate`, `blocked`, `duplicate`, or `rejected`, together with repository,
+  exact revision, issue/PR links, reproduction, root cause, proposed minimal
+  diff, tests, hardware requirements, overlap audit, and current owner or
+  assignee. A design reference is not automatically a PR candidate.
 - Track useful contribution opportunities found in any external project as
-  local review candidates. The same external-PR approval rule applies to every
-  third-party repository, not only GeeeekExplorer/nano-vllm.
+  local review candidates, not only opportunities in nano-vllm. Recheck the
+  target project's current main, contribution guide, open issues, open PRs,
+  and maintainer feedback before implementation and again before requesting
+  submission approval.
+- Never publicly claim an issue, comment, push a contribution branch, or open,
+  update, close, or reopen a pull request in any third-party repository without
+  the user's explicit approval for that exact action. Local investigation,
+  reproduction, implementation, testing, and review-packet preparation should
+  continue autonomously and must not wait for routine design approval.
+- The same external-PR approval rule applies to every third-party repository,
+  not only GeeeekExplorer/nano-vllm. Keep at most one external PR open across
+  all third-party projects unless the user explicitly approves an exception.
 
 ## Optimization Tracks
 
@@ -162,6 +187,11 @@
   SHA and text; any material change requires renewed approval.
 - Keep review-ready upstream candidates local and record them for later user
   review. Waiting for that review must not block normal fork development.
+- Apply this lane to vLLM, SGLang, TensorRT-LLM, llama.cpp, LMDeploy, TGI,
+  DeepSpeed-MII, MLC LLM, MLX-LM, kernel libraries, and distributed-serving
+  projects as well as nano-vllm. Use a separate local branch/worktree based on
+  the exact target repository; never mix another project's patch into this
+  fork's product branch.
 - Start an upstream contribution from `upstream/main` on an
   `upstream-fix/<topic>` branch. Reproduce the problem on unmodified upstream
   first.

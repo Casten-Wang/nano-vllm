@@ -58,12 +58,21 @@ reviewable steps.
 
 ## Researching established runtimes
 
-Before implementing an inference optimization, inspect the current code and
-relevant issues or pull requests in vLLM, SGLang, and llama.cpp when applicable.
-For specialized work, also consult the primary implementation in projects such
-as TensorRT-LLM, FlashAttention, FlashInfer, or PyTorch. Record the repository,
-revision, exact source location, supported hardware, benchmark method, and
-limitations in the local evidence notes.
+Before implementing an inference optimization, select the relevant primary
+implementations from this research matrix:
+
+- GPU serving: vLLM, SGLang, TensorRT-LLM, LMDeploy, Hugging Face TGI, and
+  DeepSpeed-MII.
+- Local and cross-platform inference: llama.cpp, MLC LLM, and MLX-LM.
+- Kernels: FlashAttention, FlashInfer, Triton, and PyTorch.
+- Distributed serving and PD/KV transfer: NVIDIA Dynamo, Mooncake, DistServe,
+  NVIDIA Triton Inference Server, Ray Serve, and KServe.
+
+Always inspect vLLM and SGLang for server-side GPU work. Include llama.cpp for
+quantization and constrained-memory work. Consult only relevant projects rather
+than copying every abstraction. Record the repository, revision, exact source
+location, issue/PR links, supported hardware, benchmark method, and limitations
+in local evidence notes.
 
 Use those projects to understand algorithms and engineering trade-offs, then
 implement and verify the idea independently for nano-vllm. Respect licenses and
@@ -71,9 +80,22 @@ attribution, and never present another project's measurements as evidence for
 this repository. Keep borrowed architectural ideas minimal enough to preserve
 nano-vllm's educational scope.
 
-Potential fixes discovered in any third-party project may be prepared as local
-review candidates. Never create or update an external pull request without the
-user's explicit approval for that exact revision and PR text.
+Maintain an ignored local contribution registry under
+`docs/upstream_candidates/` for all projects above. Classify every possible fix
+as `observed`, `reproduced`, `candidate`, `blocked`, `duplicate`, or `rejected`;
+record its exact target revision, reproduction, root cause, minimal proposed
+diff, tests, hardware needs, overlapping issues/PRs, and any current owner. A
+useful design idea is not a PR candidate until it reproduces as an independent
+issue on that project's current main.
+
+Potential fixes discovered in any third-party project may be implemented and
+tested locally without waiting for routine approval. Before requesting
+submission, recheck the target main branch, contribution guide, open issues,
+open PRs, and maintainer feedback, then prepare a review packet. Never claim an
+issue publicly, comment, push a contribution branch, or create/update/close an
+external pull request without the user's explicit approval for that exact
+action, revision, and text. Keep at most one external PR open across all
+third-party projects unless the user explicitly approves an exception.
 
 The main runtime optimization tracks are memory/capacity management, scheduling,
 and prefill/decode disaggregation. Start with measured tensor lifetimes and
