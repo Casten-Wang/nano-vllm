@@ -390,7 +390,7 @@ def test_model_runner_async_send_waits_for_receiver_ack():
         payload.transfer_id,
         endpoints,
         timeout_s=2.0,
-    ) == {"rank": 0, "started": 1}
+    ) == {"rank": 0, "started": 1, "staged_bytes": payload.nbytes}
     deadline = monotonic() + 2.0
     receive_state, _ = receiver.poll()
     while receive_state == "receiving" and monotonic() < deadline:

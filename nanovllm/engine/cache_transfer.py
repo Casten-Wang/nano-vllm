@@ -30,6 +30,16 @@ class RankCacheTransfer:
     def num_blocks(self) -> int:
         return self.kv_blocks.shape[2]
 
+    @property
+    def nbytes(self) -> int:
+        tensors = (
+            self.kv_blocks,
+            *((self.kv_scales,) if self.kv_scales is not None else ()),
+            *self.recurrent_states,
+            *self.convolution_states,
+        )
+        return sum(tensor.numel() * tensor.element_size() for tensor in tensors)
+
 
 class CacheTransferPhase(Enum):
     RECEIVING = auto()
@@ -147,6 +157,36 @@ def _block_index(
     if min(block_ids) < 0 or max(block_ids) >= total_blocks:
         raise ValueError("cache transfer block id is out of bounds")
     return torch.tensor(block_ids, dtype=torch.int64, device=device)
+
+
+def estimate_rank_cache_transfer_bytes(
+    kv_cache: torch.Tensor,
+    kv_scale: torch.Tensor | None,
+    block_ids: list[int],
+    *,
+    recurrent_states: tuple[torch.Tensor, ...] = (),
+    convolution_states: tuple[torch.Tensor, ...] = (),
+) -> int:
+    """Return exact staged tensor bytes without allocating transfer storage."""
+
+    _validate_cache_layout(kv_cache, kv_scale)
+    _validate_state_pairs(recurrent_states, convolution_states)
+    if not block_ids:
+        raise ValueError("cache transfer requires at least one KV block")
+    if len(block_ids) != len(set(block_ids)):
+        raise ValueError("cache transfer block ids must be unique")
+    if min(block_ids) < 0 or max(block_ids) >= kv_cache.shape[2]:
+        raise ValueError("cache transfer block id is out of bounds")
+    kv_elements_per_block = kv_cache.numel() // kv_cache.shape[2]
+    total = len(block_ids) * kv_elements_per_block * kv_cache.element_size()
+    if kv_scale is not None:
+        scale_elements_per_block = kv_scale.numel() // kv_scale.shape[2]
+        total += len(block_ids) * scale_elements_per_block * kv_scale.element_size()
+    total += sum(
+        tensor.numel() * tensor.element_size()
+        for tensor in (*recurrent_states, *convolution_states)
+    )
+    return total
 
 
 def _validate_state_pairs(

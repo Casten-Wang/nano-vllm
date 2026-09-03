@@ -23,6 +23,7 @@ def make_engine(*, tensor_parallel_size=1):
         preemption_policy="fcfs",
         model_spec=SimpleNamespace(is_hybrid=True),
         max_remote_prefill_transfers=2,
+        max_remote_prefill_staging_bytes=None,
     )
     Sequence.block_size = config.kvcache_block_size
     engine = object.__new__(LLMEngine)
@@ -76,7 +77,16 @@ def make_engine(*, tensor_parallel_size=1):
             ]
         if method_name == "start_sequence_cache_send":
             return [
-                {"rank": rank, "started": 1}
+                {
+                    "rank": rank,
+                    "started": 1,
+                    "staged_bytes": 100 + rank,
+                }
+                for rank in range(tensor_parallel_size)
+            ]
+        if method_name == "estimate_sequence_cache_bytes":
+            return [
+                {"rank": rank, "staged_bytes": 100 + rank}
                 for rank in range(tensor_parallel_size)
             ]
         if method_name == "poll_sequence_cache_send":
@@ -144,6 +154,7 @@ def make_engine(*, tensor_parallel_size=1):
     engine._remote_prefill_receive_started_at = {}
     engine._remote_prefill_receive_errors = {}
     engine._remote_prefill_send_started_at = {}
+    engine._remote_prefill_send_staged_bytes = {}
     engine._remote_prefill_send_errors = {}
     engine._test_async_state = async_state
     engine._test_send_state = send_state
@@ -477,6 +488,10 @@ def test_async_send_pauses_decode_until_every_rank_acknowledges():
     assert metrics["remote_prefill_send_started"] == 1
     assert metrics["remote_prefill_send_committed"] == 1
     assert metrics["remote_prefill_send_poll_calls"] == 2
+    assert metrics["remote_prefill_send_staged_bytes"] == 201
+    assert metrics["peak_remote_prefill_send_staged_bytes"] == 201
+    assert metrics["active_remote_prefill_send_staged_bytes"] == 0
+    assert metrics["remote_prefill_sent_bytes"] == 2
 
 
 def test_async_send_failure_restores_source_at_original_running_position():
@@ -499,6 +514,33 @@ def test_async_send_failure_restores_source_at_original_running_position():
     assert first.block_table
     assert first.state_slot is not None
     assert engine.metrics.to_dict()["remote_prefill_send_failed"] == 1
+
+
+def test_async_send_start_aborts_when_staged_size_differs_from_estimate():
+    engine = make_engine(tensor_parallel_size=2)
+    seq = _prepare_remote_prefill_source(engine, 1)
+    original = engine.model_runner.call_rank_results.side_effect
+
+    def inconsistent_start(method_name, *args):
+        results = original(method_name, *args)
+        if method_name == "start_sequence_cache_send":
+            results[1]["staged_bytes"] += 1
+        return results
+
+    engine.model_runner.call_rank_results.side_effect = inconsistent_start
+
+    with pytest.raises(RuntimeError, match="differ from the preflight"):
+        engine.start_remote_prefill_send(
+            seq.seq_id,
+            "request/attempt-1",
+            [("127.0.0.1", 20001), ("127.0.0.1", 20002)],
+        )
+
+    assert seq.status is SequenceStatus.RUNNING
+    assert list(engine.scheduler.running) == [seq]
+    assert not engine._remote_prefill_send_started_at
+    assert not engine._remote_prefill_send_staged_bytes
+    assert engine.metrics.to_dict()["remote_prefill_send_started"] == 0
 
 
 def test_async_send_can_be_cancelled_without_releasing_source_state():
@@ -598,3 +640,29 @@ def test_transfer_capacity_is_shared_by_sends_and_receives():
     assert seq.status is SequenceStatus.TRANSFERRING
     engine.model_runner.call_rank_results.assert_not_called()
     assert engine.metrics.to_dict()["remote_prefill_receive_backpressure"] == 1
+
+
+def test_staging_byte_capacity_rejects_before_host_copy():
+    engine = make_engine()
+    first = _prepare_remote_prefill_source(engine, 1)
+    second = _prepare_remote_prefill_source(engine, 5)
+    engine.config.max_remote_prefill_staging_bytes = 150
+    engine.start_remote_prefill_send(
+        first.seq_id,
+        "request/attempt-1",
+        [("127.0.0.1", 20001)],
+    )
+    engine.model_runner.call_rank_results.reset_mock()
+
+    with pytest.raises(RuntimeError, match="200/150 bytes requested"):
+        engine.start_remote_prefill_send(
+            second.seq_id,
+            "request/attempt-2",
+            [("127.0.0.1", 20002)],
+        )
+
+    calls = engine.model_runner.call_rank_results.call_args_list
+    assert [call.args[0] for call in calls] == ["estimate_sequence_cache_bytes"]
+    assert second.status is SequenceStatus.RUNNING
+    assert second in engine.scheduler.running
+    assert engine.metrics.to_dict()["remote_prefill_send_backpressure"] == 1

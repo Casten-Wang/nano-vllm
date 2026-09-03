@@ -1007,6 +1007,23 @@ class ModelRunner:
             to_host=to_host,
         )
 
+    def estimate_sequence_cache_bytes(self, seq: Sequence) -> dict:
+        """Estimate rank-local host staging bytes without copying tensors."""
+
+        from nanovllm.engine.cache_transfer import (
+            estimate_rank_cache_transfer_bytes,
+        )
+
+        recurrent, convolution = self._sequence_state_views(seq)
+        staged_bytes = estimate_rank_cache_transfer_bytes(
+            self.kv_cache,
+            self.kv_scale,
+            seq.block_table,
+            recurrent_states=recurrent,
+            convolution_states=convolution,
+        )
+        return {"rank": self.rank, "staged_bytes": staged_bytes}
+
     def import_sequence_cache(
         self,
         seq: Sequence,
@@ -1121,7 +1138,11 @@ class ModelRunner:
             self._pending_cache_sends.pop(transfer_id, None)
             send.finish()
             raise
-        return {"rank": self.rank, "started": 1}
+        return {
+            "rank": self.rank,
+            "started": 1,
+            "staged_bytes": payload.nbytes,
+        }
 
     def poll_sequence_cache_send(self, transfer_id: str) -> dict:
         send = self._pending_cache_sends.get(transfer_id)

@@ -69,6 +69,7 @@ class Config:
     qwen35_moe_decode_chunk_size: int = 8
     weight_quant_backend: str = "auto"
     max_remote_prefill_transfers: int = 2
+    max_remote_prefill_staging_bytes: int | None = None
     distributed_port: int | None = None
     shared_memory_name: str | None = None
 
@@ -128,6 +129,15 @@ class Config:
             or self.max_remote_prefill_transfers <= 0
         ):
             raise ValueError("max_remote_prefill_transfers must be positive")
+        if (
+            self.max_remote_prefill_staging_bytes is not None
+            and (
+                not isinstance(self.max_remote_prefill_staging_bytes, int)
+                or isinstance(self.max_remote_prefill_staging_bytes, bool)
+                or self.max_remote_prefill_staging_bytes <= 0
+            )
+        ):
+            raise ValueError("max_remote_prefill_staging_bytes must be positive")
         if self.distributed_port is not None and not 1 <= self.distributed_port <= 65535:
             raise ValueError("distributed_port must be in [1, 65535]")
         if self.shared_memory_name is not None and not self.shared_memory_name:

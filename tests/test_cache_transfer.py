@@ -8,6 +8,7 @@ from nanovllm.engine.cache_transfer import (
     CacheTransferPhase,
     CacheTransferSession,
     RankCacheTransfer,
+    estimate_rank_cache_transfer_bytes,
     export_rank_cache,
     import_rank_cache,
 )
@@ -154,6 +155,57 @@ def test_host_export_preserves_order_tail_scales_and_states():
     torch.testing.assert_close(payload.convolution_states[0], convolution[0])
 
 
+def test_transfer_byte_estimate_matches_int8_payload_with_hybrid_state():
+    source = torch.arange(2 * 1 * 3 * 2 * 1 * 2, dtype=torch.int8).view(
+        2, 1, 3, 2, 1, 2
+    )
+    scales = torch.ones(2, 1, 3, 2, 1, dtype=torch.float16)
+    recurrent = (torch.ones(2, 3, dtype=torch.float32),)
+    convolution = (torch.ones(4, 2, dtype=torch.float16),)
+
+    estimated = estimate_rank_cache_transfer_bytes(
+        source,
+        scales,
+        [2, 0],
+        recurrent_states=recurrent,
+        convolution_states=convolution,
+    )
+    payload = export_rank_cache(
+        source,
+        scales,
+        [2, 0],
+        transfer_id="request-bytes/attempt-1",
+        tensor_parallel_rank=0,
+        tensor_parallel_size=1,
+        block_size=2,
+        cached_tokens=3,
+        recurrent_states=recurrent,
+        convolution_states=convolution,
+        to_host=True,
+    )
+
+    assert estimated == payload.nbytes
+    assert estimated == 72
+
+
+def test_transfer_byte_estimate_matches_bf16_payload():
+    source = torch.ones(2, 2, 4, 2, 1, 2, dtype=torch.bfloat16)
+
+    estimated = estimate_rank_cache_transfer_bytes(source, None, [3])
+    payload = export_rank_cache(
+        source,
+        None,
+        [3],
+        transfer_id="request-bytes/attempt-2",
+        tensor_parallel_rank=0,
+        tensor_parallel_size=1,
+        block_size=2,
+        cached_tokens=2,
+    )
+
+    assert estimated == payload.nbytes == 32
+
+
 def test_default_export_keeps_source_device_and_owns_storage():
     source = make_float_cache()
     payload = export_rank_cache(
@@ -294,6 +346,10 @@ def test_model_runner_exports_and_imports_complete_hybrid_state():
         source_seq,
         transfer_id="request-5/attempt-1",
     )
+    assert source.estimate_sequence_cache_bytes(source_seq) == {
+        "rank": 0,
+        "staged_bytes": payload.nbytes,
+    }
     destination.import_sequence_cache(
         destination_seq,
         payload,

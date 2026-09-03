@@ -179,6 +179,49 @@ class EngineMetricsTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "direction"):
             metrics.record_remote_prefill_backpressure(direction="unknown")
 
+    def test_remote_prefill_send_metrics_track_staging_and_wire_bytes(self):
+        metrics = EngineMetrics()
+        metrics.record_remote_prefill_send_started(100)
+        metrics.record_remote_prefill_send_started(60)
+
+        metrics.record_remote_prefill_send_finished(
+            0.2,
+            outcome="committed",
+            staged_bytes=100,
+            sent_bytes=120,
+        )
+        metrics.record_remote_prefill_send_finished(
+            0.1,
+            outcome="failed",
+            staged_bytes=60,
+        )
+
+        result = metrics.to_dict()
+        self.assertEqual(result["remote_prefill_send_staged_bytes"], 160)
+        self.assertEqual(result["peak_remote_prefill_send_staged_bytes"], 160)
+        self.assertEqual(result["active_remote_prefill_send_staged_bytes"], 0)
+        self.assertEqual(result["remote_prefill_sent_bytes"], 120)
+
+    def test_metrics_reset_preserves_active_send_staging_gauge(self):
+        metrics = EngineMetrics()
+        metrics.record_remote_prefill_send_started(100)
+
+        metrics.reset()
+
+        result = metrics.to_dict()
+        self.assertEqual(result["remote_prefill_send_staged_bytes"], 0)
+        self.assertEqual(result["active_remote_prefill_send_staged_bytes"], 100)
+        self.assertEqual(result["peak_remote_prefill_send_staged_bytes"], 100)
+        metrics.record_remote_prefill_send_finished(
+            0.1,
+            outcome="cancelled",
+            staged_bytes=100,
+        )
+        self.assertEqual(
+            metrics.to_dict()["active_remote_prefill_send_staged_bytes"],
+            0,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

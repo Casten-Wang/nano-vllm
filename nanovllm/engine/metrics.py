@@ -54,6 +54,10 @@ class EngineMetrics:
     remote_prefill_send_requests_polled: int = 0
     remote_prefill_receive_backpressure: int = 0
     remote_prefill_send_backpressure: int = 0
+    remote_prefill_send_staged_bytes: int = 0
+    active_remote_prefill_send_staged_bytes: int = 0
+    peak_remote_prefill_send_staged_bytes: int = 0
+    remote_prefill_sent_bytes: int = 0
     request_ttfts: list[float] | None = None
     request_tpots: list[float] | None = None
     request_latencies: list[float] | None = None
@@ -64,6 +68,7 @@ class EngineMetrics:
         self.request_latencies = []
 
     def reset(self):
+        active_send_staged_bytes = self.active_remote_prefill_send_staged_bytes
         self.total_prefill_tokens = 0
         self.total_decode_tokens = 0
         self.pure_prefill_tokens = 0
@@ -105,6 +110,10 @@ class EngineMetrics:
         self.remote_prefill_send_requests_polled = 0
         self.remote_prefill_receive_backpressure = 0
         self.remote_prefill_send_backpressure = 0
+        self.remote_prefill_send_staged_bytes = 0
+        self.active_remote_prefill_send_staged_bytes = active_send_staged_bytes
+        self.peak_remote_prefill_send_staged_bytes = active_send_staged_bytes
+        self.remote_prefill_sent_bytes = 0
         self.request_ttfts.clear()
         self.request_tpots.clear()
         self.request_latencies.clear()
@@ -241,8 +250,16 @@ class EngineMetrics:
             elapsed,
         )
 
-    def record_remote_prefill_send_started(self) -> None:
+    def record_remote_prefill_send_started(self, staged_bytes: int = 0) -> None:
+        if staged_bytes < 0:
+            raise ValueError("remote prefill staged bytes must be non-negative")
         self.remote_prefill_send_started += 1
+        self.remote_prefill_send_staged_bytes += staged_bytes
+        self.active_remote_prefill_send_staged_bytes += staged_bytes
+        self.peak_remote_prefill_send_staged_bytes = max(
+            self.peak_remote_prefill_send_staged_bytes,
+            self.active_remote_prefill_send_staged_bytes,
+        )
 
     def record_remote_prefill_backpressure(self, *, direction: str) -> None:
         counters = {
@@ -265,6 +282,8 @@ class EngineMetrics:
         elapsed: float,
         *,
         outcome: str,
+        staged_bytes: int = 0,
+        sent_bytes: int = 0,
     ) -> None:
         if elapsed < 0.0:
             raise ValueError("remote prefill send elapsed time must be non-negative")
@@ -276,7 +295,13 @@ class EngineMetrics:
         counter = counters.get(outcome)
         if counter is None:
             raise ValueError("remote prefill send outcome is invalid")
+        if staged_bytes < 0 or staged_bytes > self.active_remote_prefill_send_staged_bytes:
+            raise ValueError("remote prefill finished staged bytes are invalid")
+        if sent_bytes < 0 or (outcome != "committed" and sent_bytes):
+            raise ValueError("remote prefill sent bytes are invalid")
         setattr(self, counter, getattr(self, counter) + 1)
+        self.active_remote_prefill_send_staged_bytes -= staged_bytes
+        self.remote_prefill_sent_bytes += sent_bytes
         self.remote_prefill_send_time += elapsed
         self.max_remote_prefill_send_time = max(
             self.max_remote_prefill_send_time,
@@ -406,6 +431,10 @@ class EngineMetrics:
             "remote_prefill_send_requests_polled": self.remote_prefill_send_requests_polled,
             "remote_prefill_receive_backpressure": self.remote_prefill_receive_backpressure,
             "remote_prefill_send_backpressure": self.remote_prefill_send_backpressure,
+            "remote_prefill_send_staged_bytes": self.remote_prefill_send_staged_bytes,
+            "active_remote_prefill_send_staged_bytes": self.active_remote_prefill_send_staged_bytes,
+            "peak_remote_prefill_send_staged_bytes": self.peak_remote_prefill_send_staged_bytes,
+            "remote_prefill_sent_bytes": self.remote_prefill_sent_bytes,
             "num_finished_requests": len(self.request_latencies),
             "avg_ttft_s": self._avg(self.request_ttfts),
             "p50_ttft_s": self._percentile(self.request_ttfts, 0.50),
