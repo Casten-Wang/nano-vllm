@@ -755,7 +755,7 @@ def test_sync_send_respects_active_transfer_capacity_before_host_copy():
     )
     engine.model_runner.call_rank_results.reset_mock()
 
-    with pytest.raises(RuntimeError, match="1/1 active"):
+    with pytest.raises(RuntimeError, match="1/1 reserved"):
         engine.send_remote_prefill(
             second.seq_id,
             "request/attempt-2",
@@ -767,7 +767,7 @@ def test_sync_send_respects_active_transfer_capacity_before_host_copy():
     assert engine.metrics.to_dict()["remote_prefill_send_backpressure"] == 1
 
 
-def test_sync_receive_respects_active_transfer_capacity_before_estimate():
+def test_destination_reservation_respects_transfer_capacity_before_allocation():
     engine = make_engine()
     source = _prepare_remote_prefill_source(engine, 1)
     engine.config.max_remote_prefill_transfers = 1
@@ -776,23 +776,19 @@ def test_sync_receive_respects_active_transfer_capacity_before_estimate():
         "source/attempt-1",
         [("127.0.0.1", 20001)],
     )
-    destination_id = engine.add_remote_prefill_request(
-        [5, 6, 7, 8],
-        SamplingParams(max_tokens=4),
-        transfer_id="destination/attempt-1",
-    )
     engine.model_runner.call_rank_results.reset_mock()
+    capacity_before = engine.remote_prefill_capacity_snapshot()
 
-    with pytest.raises(RuntimeError, match="1/1 active"):
-        engine.receive_remote_prefill(
-            "destination/attempt-1",
-            9,
-            [("127.0.0.1", 20002)],
+    with pytest.raises(RuntimeError, match="1/1 reserved"):
+        engine.add_remote_prefill_request(
+            [5, 6, 7, 8],
+            SamplingParams(max_tokens=4),
+            transfer_id="destination/attempt-1",
         )
 
     engine.model_runner.call_rank_results.assert_not_called()
-    seq, _session = engine.scheduler.remote_prefills["destination/attempt-1"]
-    assert seq.seq_id == destination_id
+    assert "destination/attempt-1" not in engine.scheduler.remote_prefills
+    assert engine.remote_prefill_capacity_snapshot() == capacity_before
     assert engine.metrics.to_dict()["remote_prefill_receive_backpressure"] == 1
 
 
@@ -875,13 +871,38 @@ def test_cancel_remote_prefill_reservation_releases_all_capacity():
         transfer_id="request/attempt-1",
     )
 
-    assert engine.remote_prefill_capacity_snapshot() != capacity_before
+    reserved_capacity = engine.remote_prefill_capacity_snapshot()
+    assert reserved_capacity != capacity_before
+    assert reserved_capacity["transfer_slots_used"] == 1
+    assert reserved_capacity["transfer_slots_free"] == 1
     assert engine.cancel_remote_prefill_reservation(
         "request/attempt-1",
     ) == seq_id
 
     assert engine.remote_prefill_capacity_snapshot() == capacity_before
     assert engine.scheduler.is_finished()
+
+
+def test_unstarted_destination_reservation_prevents_slot_overcommit():
+    engine = make_engine()
+    engine.config.max_remote_prefill_transfers = 1
+    engine.add_remote_prefill_request(
+        [1, 2, 3, 4],
+        SamplingParams(max_tokens=4),
+        transfer_id="destination/attempt-1",
+    )
+    capacity_after_first = engine.remote_prefill_capacity_snapshot()
+
+    with pytest.raises(RuntimeError, match="1/1 reserved"):
+        engine.add_remote_prefill_request(
+            [5, 6, 7, 8],
+            SamplingParams(max_tokens=4),
+            transfer_id="destination/attempt-2",
+        )
+
+    assert tuple(engine.scheduler.remote_prefills) == ("destination/attempt-1",)
+    assert engine.remote_prefill_capacity_snapshot() == capacity_after_first
+    assert engine.metrics.to_dict()["remote_prefill_receive_backpressure"] == 1
 
 
 def test_cancel_remote_prefill_reservation_rejects_active_receive():
@@ -903,32 +924,43 @@ def test_cancel_remote_prefill_reservation_rejects_active_receive():
 
 def test_transfer_capacity_is_shared_by_sends_and_receives():
     engine = make_engine()
-    source = _prepare_remote_prefill_source(engine, 1)
     engine.config.max_remote_prefill_transfers = 1
-    engine.start_remote_prefill_send(
-        source.seq_id,
-        "source/attempt-1",
-        [("127.0.0.1", 20001)],
-    )
-    destination_id = engine.add_remote_prefill_request(
+    engine.add_remote_prefill_request(
         [5, 6, 7, 8],
         SamplingParams(max_tokens=4),
         transfer_id="destination/attempt-1",
     )
+    source = _prepare_remote_prefill_source(engine, 1)
     engine.model_runner.call_rank_results.reset_mock()
 
-    with pytest.raises(RuntimeError, match="1/1 active"):
-        engine.start_remote_prefill_receive(
-            "destination/attempt-1",
-            9,
-            [("127.0.0.1", 20002)],
+    with pytest.raises(RuntimeError, match="1/1 reserved"):
+        engine.start_remote_prefill_send(
+            source.seq_id,
+            "source/attempt-1",
+            [("127.0.0.1", 20001)],
         )
 
-    seq, _session = engine.scheduler.remote_prefills["destination/attempt-1"]
-    assert seq.seq_id == destination_id
-    assert seq.status is SequenceStatus.TRANSFERRING
+    assert source in engine.scheduler.running
+    assert "source/attempt-1" not in engine.scheduler.remote_prefill_sources
     engine.model_runner.call_rank_results.assert_not_called()
-    assert engine.metrics.to_dict()["remote_prefill_receive_backpressure"] == 1
+    assert engine.metrics.to_dict()["remote_prefill_send_backpressure"] == 1
+
+
+def test_reserved_destination_can_start_its_own_transfer_at_capacity_limit():
+    engine = make_engine()
+    engine.config.max_remote_prefill_transfers = 1
+    seq_id = engine.add_remote_prefill_request(
+        [1, 2, 3, 4],
+        SamplingParams(max_tokens=4),
+        transfer_id="destination/attempt-1",
+    )
+
+    assert engine.remote_prefill_capacity_snapshot()["transfer_slots_free"] == 0
+    assert engine.start_remote_prefill_receive(
+        "destination/attempt-1",
+        9,
+        [("127.0.0.1", 20001)],
+    ) == seq_id
 
 
 def test_staging_byte_capacity_rejects_before_host_copy():

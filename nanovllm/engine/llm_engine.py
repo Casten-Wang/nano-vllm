@@ -285,7 +285,13 @@ class LLMEngine:
     ) -> int:
         """Reserve decode-side cache/state for a remote prefill request."""
 
+        if (
+            transfer_id in self.scheduler.remote_prefills
+            or transfer_id in self.scheduler.remote_prefill_sources
+        ):
+            raise ValueError("cache transfer id is already reserved")
         seq = self._create_sequence(prompt, sampling_params)
+        self._ensure_remote_prefill_transfer_capacity(direction="receive")
         session = CacheTransferSession(
             transfer_id,
             self.config.tensor_parallel_size,
@@ -316,7 +322,6 @@ class LLMEngine:
             raise TypeError("first_token_id must be an integer")
         if transfer_id in getattr(self, "_remote_prefill_receive_tokens", {}):
             raise ValueError("cache receive id is already active")
-        self._ensure_remote_prefill_transfer_capacity(direction="receive")
         seq, session = self.scheduler.remote_prefills[transfer_id]
         estimates = self.model_runner.call_rank_results(
             "estimate_sequence_cache_bytes",
@@ -424,7 +429,6 @@ class LLMEngine:
             receive_tokens = self._remote_prefill_receive_tokens = {}
         if transfer_id in receive_tokens:
             raise ValueError("cache receive id is already active")
-        self._ensure_remote_prefill_transfer_capacity(direction="receive")
         seq, _session = self.scheduler.remote_prefills[transfer_id]
         estimates = self.model_runner.call_rank_results(
             "estimate_sequence_cache_bytes",
@@ -805,27 +809,28 @@ class LLMEngine:
         return first_token_id
 
     def _ensure_remote_prefill_transfer_capacity(self, *, direction: str) -> None:
-        active_receives = len(
-            getattr(self, "_remote_prefill_receive_tokens", {})
-        )
-        active_sends = len(
-            getattr(self, "_remote_prefill_send_started_at", {})
-        )
+        # Destination slots are promised when the router reserves them, not
+        # only after network receive starts. Counting scheduler reservations
+        # keeps published capacity monotonic across admission and prevents
+        # concurrent routers from overcommitting a stale "free" transfer slot.
+        reserved_receives = len(self.scheduler.remote_prefills)
+        reserved_sends = len(self.scheduler.remote_prefill_sources)
         limit = self.config.max_remote_prefill_transfers
-        if active_receives + active_sends < limit:
+        if reserved_receives + reserved_sends < limit:
             return
         self.metrics.record_remote_prefill_backpressure(direction=direction)
         raise RuntimeError(
             "remote prefill transfer capacity is exhausted: "
-            f"{active_receives + active_sends}/{limit} active"
+            f"{reserved_receives + reserved_sends}/{limit} reserved"
         )
 
     def remote_prefill_capacity_snapshot(self) -> dict[str, int | float | None]:
         """Return live capacity inputs for an external PD request router."""
 
-        active_receives = len(self._remote_prefill_receive_tokens)
-        active_sends = len(self._remote_prefill_send_started_at)
-        active_transfers = active_receives + active_sends
+        reserved_transfers = (
+            len(self.scheduler.remote_prefills)
+            + len(self.scheduler.remote_prefill_sources)
+        )
         active_staging_bytes = sum(
             self._remote_prefill_receive_staged_bytes.values()
         ) + sum(self._remote_prefill_send_staged_bytes.values())
@@ -855,9 +860,9 @@ class LLMEngine:
             "kv_blocks_free": block_manager.num_free_blocks,
             "kv_block_usage": block_manager.usage,
             "transfer_slots_total": self.config.max_remote_prefill_transfers,
-            "transfer_slots_used": active_transfers,
+            "transfer_slots_used": reserved_transfers,
             "transfer_slots_free": max(
-                self.config.max_remote_prefill_transfers - active_transfers,
+                self.config.max_remote_prefill_transfers - reserved_transfers,
                 0,
             ),
             "staging_bytes_limit": staging_limit,
