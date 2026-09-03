@@ -305,6 +305,7 @@ class LLMEngine:
             raise TypeError("first_token_id must be an integer")
         if transfer_id in getattr(self, "_remote_prefill_receive_tokens", {}):
             raise ValueError("cache receive id is already active")
+        self._ensure_remote_prefill_transfer_capacity(direction="receive")
         seq, session = self.scheduler.remote_prefills[transfer_id]
         estimates = self.model_runner.call_rank_results(
             "estimate_sequence_cache_bytes",
@@ -763,6 +764,19 @@ class LLMEngine:
             or seq.num_scheduled_tokens != 0
         ):
             raise ValueError("remote prefill source is not ready for handoff")
+        self._ensure_remote_prefill_transfer_capacity(direction="send")
+        estimates = self.model_runner.call_rank_results(
+            "estimate_sequence_cache_bytes",
+            seq,
+        )
+        estimated_by_rank = _validate_rank_results(
+            estimates,
+            self.config.tensor_parallel_size,
+            "staged_bytes",
+        )
+        self._ensure_remote_prefill_staging_capacity(
+            sum(estimated_by_rank.values())
+        )
         rank_results = self.model_runner.call_rank_results(
             "send_sequence_cache_to_endpoint",
             seq,
