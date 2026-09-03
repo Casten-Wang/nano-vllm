@@ -9,8 +9,11 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+import math
 
 import torch
+
+from nanovllm.engine.cache_transfer import CacheTransferPhase
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,6 +83,8 @@ class TPTransferProfile:
             or sum(self.destination_bytes) != self.wire_bytes
         ):
             raise ValueError("transfer profile rank bytes do not match wire bytes")
+        if any(byte_count <= 0 for byte_count in self.destination_bytes):
+            raise ValueError("every destination rank must receive transfer bytes")
 
         peer_map = {}
         source_peers = [set() for _ in self.source_bytes]
@@ -107,10 +112,187 @@ class TPTransferProfile:
             destination_peers[dst_rank].add(src_rank)
         if sum(peer_map.values()) != self.wire_bytes:
             raise ValueError("transfer profile peer bytes do not match wire bytes")
+        source_peer_bytes = [0] * len(self.source_bytes)
+        destination_peer_bytes = [0] * len(self.destination_bytes)
+        for (src_rank, dst_rank), byte_count in peer_map.items():
+            source_peer_bytes[src_rank] += byte_count
+            destination_peer_bytes[dst_rank] += byte_count
+        if tuple(source_peer_bytes) != self.source_bytes:
+            raise ValueError("transfer profile source bytes do not match peers")
+        if tuple(destination_peer_bytes) != self.destination_bytes:
+            raise ValueError("transfer profile destination bytes do not match peers")
         if tuple(map(len, source_peers)) != self.source_peer_counts:
             raise ValueError("transfer profile source peer counts do not match")
         if tuple(map(len, destination_peers)) != self.destination_peer_counts:
             raise ValueError("transfer profile destination peer counts do not match")
+
+
+class TPPeerTransferSession:
+    """Track destination-installed bytes for one heterogeneous-TP request."""
+
+    def __init__(
+        self,
+        transfer_id: str,
+        profile: TPTransferProfile,
+        *,
+        started_at: float,
+        timeout_s: float,
+    ) -> None:
+        if not isinstance(transfer_id, str) or not transfer_id:
+            raise ValueError("peer transfer id must not be empty")
+        if not isinstance(profile, TPTransferProfile):
+            raise ValueError("peer transfer profile is invalid")
+        validated_started_at = self._validated_time(started_at, "started_at")
+        validated_timeout_s = self._validated_time(
+            timeout_s,
+            "timeout_s",
+            positive=True,
+        )
+        self.transfer_id = transfer_id
+        self.profile = profile
+        self.deadline = validated_started_at + validated_timeout_s
+        if not math.isfinite(self.deadline):
+            raise ValueError("peer transfer deadline must be finite")
+        self.phase = CacheTransferPhase.RECEIVING
+        self.failure_reason: str | None = None
+        self._expected_peer_bytes = {
+            (src_rank, dst_rank): byte_count
+            for src_rank, dst_rank, byte_count in profile.peer_bytes
+        }
+        self._acknowledged_peers: set[tuple[int, int]] = set()
+
+    @staticmethod
+    def _validated_time(
+        value: float,
+        name: str,
+        *,
+        positive: bool = False,
+    ) -> float:
+        valid_type = isinstance(value, (int, float)) and not isinstance(value, bool)
+        try:
+            numeric = float(value) if valid_type else math.nan
+        except (OverflowError, ValueError):
+            numeric = math.nan
+        if (
+            not math.isfinite(numeric)
+            or (positive and numeric <= 0)
+        ):
+            qualifier = "a positive finite number" if positive else "finite"
+            raise ValueError(f"{name} must be {qualifier}")
+        return numeric
+
+    @property
+    def fallback_required(self) -> bool:
+        return self.phase in {
+            CacheTransferPhase.ABORTED,
+            CacheTransferPhase.TIMED_OUT,
+        }
+
+    @property
+    def acknowledged_bytes(self) -> int:
+        return sum(
+            self._expected_peer_bytes[peer]
+            for peer in self._acknowledged_peers
+        )
+
+    @property
+    def pending_peer_bytes(self) -> tuple[tuple[int, int, int], ...]:
+        return tuple(
+            (src_rank, dst_rank, byte_count)
+            for (src_rank, dst_rank), byte_count in sorted(
+                self._expected_peer_bytes.items()
+            )
+            if (src_rank, dst_rank) not in self._acknowledged_peers
+        )
+
+    @property
+    def ready_destination_ranks(self) -> tuple[int, ...]:
+        ready = []
+        for dst_rank in range(len(self.profile.destination_bytes)):
+            expected = {
+                peer for peer in self._expected_peer_bytes if peer[1] == dst_rank
+            }
+            if expected and expected <= self._acknowledged_peers:
+                ready.append(dst_rank)
+        return tuple(ready)
+
+    def _expire(self, now: float) -> None:
+        validated_now = self._validated_time(now, "now")
+        if (
+            self.phase in {CacheTransferPhase.RECEIVING, CacheTransferPhase.READY}
+            and validated_now >= self.deadline
+        ):
+            self.phase = CacheTransferPhase.TIMED_OUT
+            self.failure_reason = "peer cache transfer timed out"
+
+    @staticmethod
+    def _peer(src_rank: int, dst_rank: int) -> tuple[int, int]:
+        if any(
+            not isinstance(rank, int) or isinstance(rank, bool) or rank < 0
+            for rank in (src_rank, dst_rank)
+        ):
+            raise ValueError("peer cache transfer rank is invalid")
+        return src_rank, dst_rank
+
+    def acknowledge(
+        self,
+        src_rank: int,
+        dst_rank: int,
+        byte_count: int,
+        *,
+        now: float,
+    ) -> None:
+        self._expire(now)
+        if self.phase not in {
+            CacheTransferPhase.RECEIVING,
+            CacheTransferPhase.READY,
+        }:
+            raise RuntimeError("peer cache transfer session is already terminal")
+        peer = self._peer(src_rank, dst_rank)
+        expected = self._expected_peer_bytes.get(peer)
+        if expected is None:
+            raise ValueError("peer cache transfer acknowledgement is unexpected")
+        if (
+            not isinstance(byte_count, int)
+            or isinstance(byte_count, bool)
+            or byte_count != expected
+        ):
+            raise ValueError("peer cache transfer byte count does not match")
+        self._acknowledged_peers.add(peer)
+        if len(self._acknowledged_peers) == len(self._expected_peer_bytes):
+            self.phase = CacheTransferPhase.READY
+
+    def fail(
+        self,
+        src_rank: int,
+        dst_rank: int,
+        reason: str,
+        *,
+        now: float,
+    ) -> None:
+        self._expire(now)
+        if self.phase not in {
+            CacheTransferPhase.RECEIVING,
+            CacheTransferPhase.READY,
+        }:
+            raise RuntimeError("peer cache transfer session is already terminal")
+        peer = self._peer(src_rank, dst_rank)
+        if peer not in self._expected_peer_bytes:
+            raise ValueError("peer cache transfer failure is unexpected")
+        if not isinstance(reason, str) or not reason:
+            raise ValueError("peer cache transfer failure reason must not be empty")
+        self.phase = CacheTransferPhase.ABORTED
+        self.failure_reason = f"source {src_rank} -> destination {dst_rank}: {reason}"
+
+    def commit(self, *, now: float) -> None:
+        self._expire(now)
+        if self.phase is not CacheTransferPhase.READY:
+            raise RuntimeError("peer cache transfer is not ready to commit")
+        self.phase = CacheTransferPhase.COMMITTED
+
+    def poll(self, *, now: float) -> CacheTransferPhase:
+        self._expire(now)
+        return self.phase
 
 
 def _validate_tp_size(tp_size: int) -> None:

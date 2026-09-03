@@ -1,7 +1,9 @@
 import pytest
 import torch
 
+from nanovllm.engine.cache_transfer import CacheTransferPhase
 from nanovllm.engine.tp_cache_reshard import (
+    TPPeerTransferSession,
     TPTransferProfile,
     TPTransferSlice,
     aggregate_tp_transfer_profiles,
@@ -584,3 +586,137 @@ def test_transfer_profile_rejects_inconsistent_peer_ledger():
             peer_bytes=((0, 0, 3),),
             slice_count=1,
         )
+
+
+def test_transfer_profile_rejects_per_rank_byte_mismatch():
+    with pytest.raises(ValueError, match="source bytes do not match"):
+        TPTransferProfile(
+            wire_bytes=4,
+            source_bytes=(2, 2),
+            destination_bytes=(2, 2),
+            source_peer_counts=(2, 0),
+            destination_peer_counts=(1, 1),
+            peer_bytes=((0, 0, 2), (0, 1, 2)),
+            slice_count=2,
+        )
+
+
+def make_peer_session(*, started_at=10.0, timeout_s=5.0):
+    global_tensor = torch.arange(8, dtype=torch.float32)
+    source = make_uniform_shards(global_tensor, 4, dim=0)
+    profile = profile_tp_transfer_plan(
+        source,
+        plan_uniform_reshard(8, 4, 2),
+        2,
+        shard_dim=0,
+        dst_width=4,
+    )
+    return TPPeerTransferSession(
+        "request-1",
+        profile,
+        started_at=started_at,
+        timeout_s=timeout_s,
+    )
+
+
+def test_peer_session_commits_only_after_every_destination_install():
+    session = make_peer_session()
+    expected = {(src, dst): size for src, dst, size in session.profile.peer_bytes}
+
+    session.acknowledge(0, 0, expected[0, 0], now=11.0)
+    assert session.phase is CacheTransferPhase.RECEIVING
+    assert session.ready_destination_ranks == ()
+    session.acknowledge(1, 0, expected[1, 0], now=11.1)
+    assert session.ready_destination_ranks == (0,)
+    with pytest.raises(RuntimeError, match="not ready"):
+        session.commit(now=11.2)
+
+    session.acknowledge(2, 1, expected[2, 1], now=11.3)
+    session.acknowledge(3, 1, expected[3, 1], now=11.4)
+    assert session.phase is CacheTransferPhase.READY
+    assert session.ready_destination_ranks == (0, 1)
+    assert session.pending_peer_bytes == ()
+    assert session.acknowledged_bytes == session.profile.wire_bytes
+
+    session.commit(now=11.5)
+    assert session.phase is CacheTransferPhase.COMMITTED
+
+
+def test_peer_session_duplicate_acknowledgement_is_idempotent():
+    session = make_peer_session()
+    src_rank, dst_rank, byte_count = session.profile.peer_bytes[0]
+
+    session.acknowledge(src_rank, dst_rank, byte_count, now=11.0)
+    acknowledged = session.acknowledged_bytes
+    session.acknowledge(src_rank, dst_rank, byte_count, now=11.1)
+
+    assert session.acknowledged_bytes == acknowledged
+
+
+def test_peer_session_rejects_wrong_bytes_without_progress():
+    session = make_peer_session()
+    src_rank, dst_rank, byte_count = session.profile.peer_bytes[0]
+
+    with pytest.raises(ValueError, match="byte count"):
+        session.acknowledge(src_rank, dst_rank, byte_count - 1, now=11.0)
+
+    assert session.acknowledged_bytes == 0
+    assert len(session.pending_peer_bytes) == len(session.profile.peer_bytes)
+
+
+@pytest.mark.parametrize("src_rank,dst_rank", [(True, 0), (0, False), (9, 0)])
+def test_peer_session_rejects_invalid_or_unknown_peer(src_rank, dst_rank):
+    session = make_peer_session()
+    with pytest.raises(ValueError, match="rank|unexpected"):
+        session.acknowledge(src_rank, dst_rank, 8, now=11.0)
+
+
+def test_peer_session_failure_is_terminal_and_requires_fallback():
+    session = make_peer_session()
+    src_rank, dst_rank, _ = session.profile.peer_bytes[0]
+
+    session.fail(src_rank, dst_rank, "connection reset", now=11.0)
+
+    assert session.phase is CacheTransferPhase.ABORTED
+    assert session.fallback_required
+    assert "connection reset" in session.failure_reason
+    with pytest.raises(RuntimeError, match="terminal"):
+        session.acknowledge(src_rank, dst_rank, 8, now=11.1)
+
+
+def test_peer_session_timeout_prevents_late_commit():
+    session = make_peer_session(started_at=10.0, timeout_s=2.0)
+
+    assert session.poll(now=12.0) is CacheTransferPhase.TIMED_OUT
+    assert session.fallback_required
+    with pytest.raises(RuntimeError, match="not ready"):
+        session.commit(now=12.1)
+
+
+def test_peer_session_ready_state_still_expires_before_commit():
+    session = make_peer_session(started_at=10.0, timeout_s=2.0)
+    for src_rank, dst_rank, byte_count in session.profile.peer_bytes:
+        session.acknowledge(src_rank, dst_rank, byte_count, now=11.0)
+    assert session.phase is CacheTransferPhase.READY
+
+    assert session.poll(now=12.0) is CacheTransferPhase.TIMED_OUT
+    assert session.fallback_required
+
+
+@pytest.mark.parametrize(
+    "started_at,timeout_s",
+    [(True, 1.0), (0.0, False), (float("nan"), 1.0), (0.0, float("inf"))],
+)
+def test_peer_session_rejects_invalid_time_metadata(started_at, timeout_s):
+    with pytest.raises(ValueError, match="started_at|timeout_s"):
+        make_peer_session(started_at=started_at, timeout_s=timeout_s)
+
+
+def test_peer_session_rejects_overflowed_deadline():
+    with pytest.raises(ValueError, match="deadline"):
+        make_peer_session(started_at=1e308, timeout_s=1e308)
+
+
+def test_peer_session_rejects_unrepresentable_integer_time():
+    with pytest.raises(ValueError, match="started_at"):
+        make_peer_session(started_at=10**1_000, timeout_s=1.0)
