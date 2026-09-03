@@ -110,6 +110,20 @@ def test_non_positive_prefill_starvation_token_budget_is_rejected(
         )
 
 
+@pytest.mark.parametrize("value", [0, -1, True, 1.5])
+def test_invalid_remote_prefill_transfer_limit_is_rejected(
+    monkeypatch,
+    tmp_path,
+    value,
+):
+    with pytest.raises(ValueError, match="max_remote_prefill_transfers"):
+        make_config(
+            monkeypatch,
+            tmp_path,
+            max_remote_prefill_transfers=value,
+        )
+
+
 def test_gptq_auto_selects_triton_backend(monkeypatch, tmp_path):
     text_config = SimpleNamespace(max_position_embeddings=32768)
     monkeypatch.setattr(

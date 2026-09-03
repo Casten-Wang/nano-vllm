@@ -370,6 +370,7 @@ class LLMEngine:
             receive_tokens = self._remote_prefill_receive_tokens = {}
         if transfer_id in receive_tokens:
             raise ValueError("cache receive id is already active")
+        self._ensure_remote_prefill_transfer_capacity(direction="receive")
         receive_started_at = perf_counter()
         try:
             rank_results = self.model_runner.call_rank_results(
@@ -634,6 +635,22 @@ class LLMEngine:
         self.scheduler.complete_remote_prefill_source(seq)
         return first_token_id
 
+    def _ensure_remote_prefill_transfer_capacity(self, *, direction: str) -> None:
+        active_receives = len(
+            getattr(self, "_remote_prefill_receive_tokens", {})
+        )
+        active_sends = len(
+            getattr(self, "_remote_prefill_send_started_at", {})
+        )
+        limit = self.config.max_remote_prefill_transfers
+        if active_receives + active_sends < limit:
+            return
+        self.metrics.record_remote_prefill_backpressure(direction=direction)
+        raise RuntimeError(
+            "remote prefill transfer capacity is exhausted: "
+            f"{active_receives + active_sends}/{limit} active"
+        )
+
     def start_remote_prefill_send(
         self,
         seq_id: int,
@@ -655,6 +672,7 @@ class LLMEngine:
             started_at = self._remote_prefill_send_started_at = {}
         if transfer_id in started_at:
             raise ValueError("cache send id is already active")
+        self._ensure_remote_prefill_transfer_capacity(direction="send")
         self.scheduler.reserve_remote_prefill_source(seq, transfer_id)
         try:
             rank_results = self.model_runner.call_rank_results(

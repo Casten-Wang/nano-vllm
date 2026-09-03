@@ -167,6 +167,18 @@ class EngineMetricsTest(unittest.TestCase):
         self.assertEqual(metrics.to_dict()["remote_prefill_receive_started"], 0)
         self.assertEqual(metrics.to_dict()["remote_prefill_poll_calls"], 0)
 
+    def test_remote_prefill_backpressure_metrics_track_each_direction(self):
+        metrics = EngineMetrics()
+
+        metrics.record_remote_prefill_backpressure(direction="send")
+        metrics.record_remote_prefill_backpressure(direction="receive")
+
+        result = metrics.to_dict()
+        self.assertEqual(result["remote_prefill_send_backpressure"], 1)
+        self.assertEqual(result["remote_prefill_receive_backpressure"], 1)
+        with self.assertRaisesRegex(ValueError, "direction"):
+            metrics.record_remote_prefill_backpressure(direction="unknown")
+
 
 if __name__ == "__main__":
     unittest.main()

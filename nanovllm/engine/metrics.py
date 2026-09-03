@@ -52,6 +52,8 @@ class EngineMetrics:
     max_remote_prefill_send_time: float = 0.0
     remote_prefill_send_poll_calls: int = 0
     remote_prefill_send_requests_polled: int = 0
+    remote_prefill_receive_backpressure: int = 0
+    remote_prefill_send_backpressure: int = 0
     request_ttfts: list[float] | None = None
     request_tpots: list[float] | None = None
     request_latencies: list[float] | None = None
@@ -101,6 +103,8 @@ class EngineMetrics:
         self.max_remote_prefill_send_time = 0.0
         self.remote_prefill_send_poll_calls = 0
         self.remote_prefill_send_requests_polled = 0
+        self.remote_prefill_receive_backpressure = 0
+        self.remote_prefill_send_backpressure = 0
         self.request_ttfts.clear()
         self.request_tpots.clear()
         self.request_latencies.clear()
@@ -239,6 +243,16 @@ class EngineMetrics:
 
     def record_remote_prefill_send_started(self) -> None:
         self.remote_prefill_send_started += 1
+
+    def record_remote_prefill_backpressure(self, *, direction: str) -> None:
+        counters = {
+            "receive": "remote_prefill_receive_backpressure",
+            "send": "remote_prefill_send_backpressure",
+        }
+        counter = counters.get(direction)
+        if counter is None:
+            raise ValueError("remote prefill backpressure direction is invalid")
+        setattr(self, counter, getattr(self, counter) + 1)
 
     def record_remote_prefill_send_poll(self, request_count: int) -> None:
         if request_count <= 0:
@@ -390,6 +404,8 @@ class EngineMetrics:
             "max_remote_prefill_send_time_s": self.max_remote_prefill_send_time,
             "remote_prefill_send_poll_calls": self.remote_prefill_send_poll_calls,
             "remote_prefill_send_requests_polled": self.remote_prefill_send_requests_polled,
+            "remote_prefill_receive_backpressure": self.remote_prefill_receive_backpressure,
+            "remote_prefill_send_backpressure": self.remote_prefill_send_backpressure,
             "num_finished_requests": len(self.request_latencies),
             "avg_ttft_s": self._avg(self.request_ttfts),
             "p50_ttft_s": self._percentile(self.request_ttfts, 0.50),

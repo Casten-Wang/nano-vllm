@@ -22,6 +22,7 @@ def make_engine(*, tensor_parallel_size=1):
         enable_dynamic_chunked_prefill=True,
         preemption_policy="fcfs",
         model_spec=SimpleNamespace(is_hybrid=True),
+        max_remote_prefill_transfers=2,
     )
     Sequence.block_size = config.kvcache_block_size
     engine = object.__new__(LLMEngine)
@@ -541,3 +542,59 @@ def test_step_batches_multiple_async_send_polls_into_one_tp_command():
     metrics = engine.metrics.to_dict()
     assert metrics["remote_prefill_send_poll_calls"] == 1
     assert metrics["remote_prefill_send_requests_polled"] == 2
+
+
+def test_transfer_capacity_rejects_send_before_staging_or_source_mutation():
+    engine = make_engine()
+    first = _prepare_remote_prefill_source(engine, 1)
+    second = _prepare_remote_prefill_source(engine, 5)
+    engine.config.max_remote_prefill_transfers = 1
+    engine.start_remote_prefill_send(
+        first.seq_id,
+        "request/attempt-1",
+        [("127.0.0.1", 20001)],
+    )
+    engine.model_runner.call_rank_results.reset_mock()
+
+    with pytest.raises(RuntimeError, match="capacity is exhausted"):
+        engine.start_remote_prefill_send(
+            second.seq_id,
+            "request/attempt-2",
+            [("127.0.0.1", 20002)],
+        )
+
+    assert second.status is SequenceStatus.RUNNING
+    assert second in engine.scheduler.running
+    assert "request/attempt-2" not in engine.scheduler.remote_prefill_sources
+    engine.model_runner.call_rank_results.assert_not_called()
+    assert engine.metrics.to_dict()["remote_prefill_send_backpressure"] == 1
+
+
+def test_transfer_capacity_is_shared_by_sends_and_receives():
+    engine = make_engine()
+    source = _prepare_remote_prefill_source(engine, 1)
+    engine.config.max_remote_prefill_transfers = 1
+    engine.start_remote_prefill_send(
+        source.seq_id,
+        "source/attempt-1",
+        [("127.0.0.1", 20001)],
+    )
+    destination_id = engine.add_remote_prefill_request(
+        [5, 6, 7, 8],
+        SamplingParams(max_tokens=4),
+        transfer_id="destination/attempt-1",
+    )
+    engine.model_runner.call_rank_results.reset_mock()
+
+    with pytest.raises(RuntimeError, match="1/1 active"):
+        engine.start_remote_prefill_receive(
+            "destination/attempt-1",
+            9,
+            [("127.0.0.1", 20002)],
+        )
+
+    seq, _session = engine.scheduler.remote_prefills["destination/attempt-1"]
+    assert seq.seq_id == destination_id
+    assert seq.status is SequenceStatus.TRANSFERRING
+    engine.model_runner.call_rank_results.assert_not_called()
+    assert engine.metrics.to_dict()["remote_prefill_receive_backpressure"] == 1
