@@ -409,6 +409,7 @@ class ModelRunner:
         dequant_pools = {}
         moe_weight_pools = {}
         resident_fp8_weight_pools = {}
+        gptq_workspace_pools = {}
         resident_fp8_storage_stats = []
         qwen35_key_pools = {}
         tp_logits_stats = []
@@ -430,6 +431,13 @@ class ModelRunner:
             resident_fp8_pool = getattr(module, "resident_weight_buffer_pool", None)
             if resident_fp8_pool is not None:
                 resident_fp8_weight_pools[id(resident_fp8_pool)] = resident_fp8_pool
+            gptq_workspace_pool = getattr(
+                module, "gptq_workspace_pool", None
+            )
+            if gptq_workspace_pool is not None:
+                gptq_workspace_pools[id(gptq_workspace_pool)] = (
+                    gptq_workspace_pool
+                )
             resident_storage = getattr(module, "resident_fp8_storage_stats", None)
             if resident_storage is not None:
                 item = resident_storage()
@@ -454,6 +462,9 @@ class ModelRunner:
         resident_fp8_weight_stats = [
             pool.storage_stats() for pool in resident_fp8_weight_pools.values()
         ]
+        gptq_workspace_stats = [
+            pool.storage_stats() for pool in gptq_workspace_pools.values()
+        ]
         qwen35_key_stats = [
             pool.storage_stats() for pool in qwen35_key_pools.values()
         ]
@@ -467,6 +478,9 @@ class ModelRunner:
         )
         resident_fp8_workspace_total = sum(
             item["storage_bytes"] for item in resident_fp8_weight_stats
+        )
+        gptq_workspace_total = sum(
+            item["storage_bytes"] for item in gptq_workspace_stats
         )
         qwen35_key_total = sum(
             item["storage_bytes"] for item in qwen35_key_stats
@@ -523,6 +537,16 @@ class ModelRunner:
             ),
             "resident_fp8_dequant_workspace_reuse_count": sum(
                 item["reuse_count"] for item in resident_fp8_weight_stats
+            ),
+            "gptq_expert_workspace_pool_count": len(gptq_workspace_stats),
+            "gptq_expert_workspace_bytes": sum(
+                item["storage_bytes"] for item in gptq_workspace_stats
+            ),
+            "gptq_expert_workspace_allocation_count": sum(
+                item["allocation_count"] for item in gptq_workspace_stats
+            ),
+            "gptq_expert_workspace_reuse_count": sum(
+                item["reuse_count"] for item in gptq_workspace_stats
             ),
             "resident_fp8_expert_layer_count": len(resident_fp8_storage_stats),
             "resident_fp8_expert_weight_bytes": sum(
@@ -594,6 +618,7 @@ class ModelRunner:
                 + moe_weight_total
                 + moe_workspace_total
                 + resident_fp8_workspace_total
+                + gptq_workspace_total
                 + sum(item["scale_bytes"] for item in resident_fp8_storage_stats)
                 + qwen35_key_total
                 + sampler_total

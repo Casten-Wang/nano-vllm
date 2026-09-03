@@ -21,6 +21,73 @@ EXPERT_GPTQ_WEIGHT = re.compile(
 )
 
 
+class GPTQExpertWorkspacePool:
+    """Shared single-stream storage for sequential GPTQ expert execution."""
+
+    def __init__(self) -> None:
+        self.storage: torch.Tensor | None = None
+        self.max_rows = 0
+        self.intermediate_size = 0
+        self.hidden_size = 0
+        self.allocation_count = 0
+        self.reuse_count = 0
+
+    def reserve(
+        self,
+        max_rows: int,
+        intermediate_size: int,
+        hidden_size: int,
+        *,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> None:
+        if min(max_rows, intermediate_size, hidden_size) <= 0:
+            raise ValueError("GPTQ workspace dimensions must be positive")
+        required = max_rows * (2 * intermediate_size + hidden_size)
+        if (
+            self.storage is None
+            or self.storage.numel() < required
+            or self.storage.dtype != dtype
+            or self.storage.device != device
+        ):
+            self.storage = torch.empty(required, dtype=dtype, device=device)
+            self.allocation_count += 1
+        self.max_rows = max_rows
+        self.intermediate_size = intermediate_size
+        self.hidden_size = hidden_size
+
+    def acquire(self, rows: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if self.storage is None:
+            raise RuntimeError("GPTQ expert workspace has not been reserved")
+        if not 0 < rows <= self.max_rows:
+            raise ValueError("GPTQ expert workspace row count exceeds capacity")
+        intermediate_elements = rows * self.intermediate_size
+        output_elements = rows * self.hidden_size
+        gate = self.storage[:intermediate_elements].view(
+            rows, self.intermediate_size
+        )
+        up = self.storage[
+            intermediate_elements : 2 * intermediate_elements
+        ].view(rows, self.intermediate_size)
+        output = self.storage[
+            2 * intermediate_elements : 2 * intermediate_elements + output_elements
+        ].view(rows, self.hidden_size)
+        self.reuse_count += 1
+        return gate, up, output
+
+    def storage_stats(self) -> dict[str, int]:
+        return {
+            "storage_bytes": (
+                0
+                if self.storage is None
+                else self.storage.numel() * self.storage.element_size()
+            ),
+            "allocation_count": self.allocation_count,
+            "reuse_count": self.reuse_count,
+            "max_rows": self.max_rows,
+        }
+
+
 def resolve_gptq_expert_parameter(weight_name: str) -> tuple[str, int] | None:
     match = EXPERT_GPTQ_WEIGHT.fullmatch(weight_name)
     if match is None:
@@ -96,6 +163,7 @@ class Qwen35GPTQExperts(nn.Module):
         if backend not in ("reference", "triton"):
             raise ValueError("GPTQ expert backend must be 'reference' or 'triton'")
         self.backend = backend
+        self.gptq_workspace_pool: GPTQExpertWorkspacePool | None = None
         self.tp_size = dist.get_world_size()
         self.tp_rank = dist.get_rank()
         if intermediate_size % self.tp_size:
@@ -215,6 +283,8 @@ class Qwen35GPTQExperts(nn.Module):
         inputs: torch.Tensor,
         projection: str,
         expert_id: int,
+        *,
+        out: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if self.backend == "triton":
             if not inputs.is_cuda:
@@ -229,7 +299,10 @@ class Qwen35GPTQExperts(nn.Module):
                 getattr(self, f"{projection}_qzeros")[expert_id],
                 getattr(self, f"{projection}_scales")[expert_id],
                 getattr(self, f"{projection}_g_idx")[expert_id],
+                out=out,
             )
+        if out is not None:
+            raise ValueError("GPTQ reference backend does not support output reuse")
         return F.linear(
             inputs,
             self._weight(projection, expert_id, inputs.dtype),
@@ -252,13 +325,29 @@ class Qwen35GPTQExperts(nn.Module):
             token_ids = routes[:, 0]
             slots = routes[:, 1]
             expert_input = hidden_states[token_ids]
-            gate = self._linear(expert_input, "gate", expert_id)
-            up = self._linear(expert_input, "up", expert_id)
-            value = self._linear(
-                F.silu(gate) * up,
-                "down",
-                expert_id,
+            use_workspace = (
+                self.backend == "triton"
+                and not torch.is_grad_enabled()
+                and self.gptq_workspace_pool is not None
+                and token_ids.numel() <= self.gptq_workspace_pool.max_rows
             )
+            if use_workspace:
+                gate, up, value = self.gptq_workspace_pool.acquire(
+                    token_ids.numel()
+                )
+                self._linear(expert_input, "gate", expert_id, out=gate)
+                self._linear(expert_input, "up", expert_id, out=up)
+                F.silu(gate, inplace=True)
+                gate.mul_(up)
+                self._linear(gate, "down", expert_id, out=value)
+            else:
+                gate = self._linear(expert_input, "gate", expert_id)
+                up = self._linear(expert_input, "up", expert_id)
+                value = self._linear(
+                    F.silu(gate) * up,
+                    "down",
+                    expert_id,
+                )
             value = weight_expert_output(value, topk_weights[token_ids, slots])
             output.index_add_(0, token_ids, value.to(output.dtype))
         if reduce_output and self.tp_size > 1:

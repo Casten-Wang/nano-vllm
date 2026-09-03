@@ -5,10 +5,46 @@ import pytest
 
 from nanovllm.models.qwen35_gptq import (
     GPTQ_PACK_FACTOR,
+    GPTQExpertWorkspacePool,
     Qwen35GPTQExperts,
     dequantize_gptq_int4,
     resolve_gptq_expert_parameter,
 )
+
+
+def test_gptq_workspace_pool_returns_disjoint_reusable_views():
+    pool = GPTQExpertWorkspacePool()
+    pool.reserve(
+        4,
+        3,
+        5,
+        dtype=torch.float32,
+        device=torch.device("cpu"),
+    )
+
+    first = pool.acquire(2)
+    storage_pointer = pool.storage.data_ptr()
+    assert [tuple(tensor.shape) for tensor in first] == [(2, 3), (2, 3), (2, 5)]
+    assert len({tensor.data_ptr() for tensor in first}) == 3
+
+    second = pool.acquire(4)
+    assert pool.storage.data_ptr() == storage_pointer
+    assert [tuple(tensor.shape) for tensor in second] == [(4, 3), (4, 3), (4, 5)]
+    assert pool.storage_stats() == {
+        "storage_bytes": 4 * (2 * 3 + 5) * 4,
+        "allocation_count": 1,
+        "reuse_count": 2,
+        "max_rows": 4,
+    }
+
+
+def test_gptq_workspace_pool_rejects_unreserved_or_oversized_requests():
+    pool = GPTQExpertWorkspacePool()
+    with pytest.raises(RuntimeError, match="not been reserved"):
+        pool.acquire(1)
+    pool.reserve(2, 3, 4, dtype=torch.float32, device=torch.device("cpu"))
+    with pytest.raises(ValueError, match="exceeds capacity"):
+        pool.acquire(3)
 
 
 def pack_int4(values: torch.Tensor, axis: int) -> torch.Tensor:
@@ -122,6 +158,51 @@ def test_reference_experts_match_dequantized_mixture():
     torch.testing.assert_close(actual, expected)
 
 
+def test_triton_expert_path_reuses_reserved_workspace():
+    experts = make_experts()
+    for expert_id in range(2):
+        load_projection(experts, "gate", expert_id, torch.eye(8))
+        load_projection(experts, "up", expert_id, torch.eye(8) * 2)
+        load_projection(experts, "down", expert_id, torch.eye(8) * 3)
+    hidden = torch.arange(16, dtype=torch.float32).reshape(2, 8) / 8
+    topk_ids = torch.tensor([[0, 1], [1, 0]])
+    topk_weights = torch.tensor([[0.75, 0.25], [0.4, 0.6]])
+    with torch.inference_mode():
+        expected = experts(hidden, topk_ids, topk_weights)
+
+    pool = GPTQExpertWorkspacePool()
+    pool.reserve(2, 8, 8, dtype=torch.float32, device=torch.device("cpu"))
+    experts.gptq_workspace_pool = pool
+    experts.backend = "triton"
+    output_pointers = []
+
+    def linear_into(inputs, projection, expert_id, *, out=None):
+        result = torch.nn.functional.linear(
+            inputs,
+            experts._weight(projection, expert_id, inputs.dtype),
+        )
+        if out is None:
+            return result
+        output_pointers.append((projection, out.data_ptr()))
+        out.copy_(result)
+        return out
+
+    with torch.inference_mode(), patch.object(
+        experts, "_linear", side_effect=linear_into
+    ):
+        actual = experts(hidden, topk_ids, topk_weights)
+        storage_pointer = pool.storage.data_ptr()
+        repeated = experts(hidden, topk_ids, topk_weights)
+
+    torch.testing.assert_close(actual, expected)
+    torch.testing.assert_close(repeated, expected)
+    assert pool.storage.data_ptr() == storage_pointer
+    assert pool.allocation_count == 1
+    assert pool.reuse_count == 4
+    assert len(output_pointers) == 12
+    assert len({pointer for _, pointer in output_pointers}) == 3
+
+
 def test_tp8_down_loader_normalizes_partial_group_indices():
     with (
         patch("torch.distributed.get_world_size", return_value=8),
@@ -165,13 +246,16 @@ def test_triton_w4a16_matches_reference_dequantization():
     qweight, qzeros, scales, g_idx = quantize_reference(weight, 32)
     inputs = torch.randn(5, 128, dtype=torch.float16, device="cuda")
 
+    output = torch.empty(5, 64, dtype=torch.float16, device="cuda")
     actual = gptq_w4a16_linear(
         inputs,
         qweight.cuda(),
         qzeros.cuda(),
         scales.half().cuda(),
         g_idx.cuda(),
+        out=output,
     )
     expected = torch.nn.functional.linear(inputs, weight.half().cuda())
 
     torch.testing.assert_close(actual, expected, rtol=2e-2, atol=2e-2)
+    assert actual.data_ptr() == output.data_ptr()

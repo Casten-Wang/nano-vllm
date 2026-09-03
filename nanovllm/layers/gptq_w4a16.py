@@ -69,6 +69,8 @@ def gptq_w4a16_linear(
     qzeros: torch.Tensor,
     scales: torch.Tensor,
     g_idx: torch.Tensor,
+    *,
+    out: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Compute ``inputs @ dequantize(qweight)`` without materializing weights."""
 
@@ -95,11 +97,22 @@ def gptq_w4a16_linear(
     if tuple(g_idx.shape) != (input_size,):
         raise ValueError("GPTQ g_idx size does not match activations")
     inputs = inputs.contiguous()
-    output = torch.empty(
-        (rows, output_size),
-        device=inputs.device,
-        dtype=inputs.dtype,
-    )
+    expected_output_shape = (rows, output_size)
+    if out is None:
+        output = torch.empty(
+            expected_output_shape,
+            device=inputs.device,
+            dtype=inputs.dtype,
+        )
+    else:
+        if (
+            tuple(out.shape) != expected_output_shape
+            or out.device != inputs.device
+            or out.dtype != inputs.dtype
+            or not out.is_contiguous()
+        ):
+            raise ValueError("W4A16 output must be contiguous and match the result")
+        output = out
     _gptq_w4a16_kernel[(rows, triton.cdiv(output_size, 64))](
         inputs,
         qweight,

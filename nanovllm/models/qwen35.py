@@ -8,6 +8,10 @@ from torch import nn
 from nanovllm.layers.embed_head import ParallelLMHead, VocabParallelEmbedding
 from nanovllm.models.qwen35_attention import Qwen35Attention, Qwen35KeyBufferPool
 from nanovllm.models.qwen35_gated_delta import Qwen35GatedDeltaNet
+from nanovllm.models.qwen35_gptq import (
+    GPTQExpertWorkspacePool,
+    Qwen35GPTQExperts,
+)
 from nanovllm.models.moe_dispatch import BatchedExpertWeightBufferPool
 from nanovllm.models.qwen35_moe import (
     ResidentFP8WeightBufferPool,
@@ -74,6 +78,7 @@ class Qwen35Model(nn.Module):
         self.full_attention_key_buffer_pool = Qwen35KeyBufferPool()
         self.moe_decode_weight_buffer_pool = BatchedExpertWeightBufferPool()
         self.resident_fp8_weight_buffer_pool = ResidentFP8WeightBufferPool()
+        self.gptq_expert_workspace_pool = GPTQExpertWorkspacePool()
         for layer in self.layers:
             if isinstance(getattr(layer, "self_attn", None), Qwen35Attention):
                 layer.self_attn.key_buffer_pool = (
@@ -85,6 +90,10 @@ class Qwen35Model(nn.Module):
                 )
                 layer.mlp.experts.resident_weight_buffer_pool = (
                     self.resident_fp8_weight_buffer_pool
+                )
+            elif isinstance(layer.mlp.experts, Qwen35GPTQExperts):
+                layer.mlp.experts.gptq_workspace_pool = (
+                    self.gptq_expert_workspace_pool
                 )
         self.norm = Qwen35RMSNorm(
             int(config.hidden_size), eps=float(config.rms_norm_eps)
@@ -104,25 +113,43 @@ class Qwen35Model(nn.Module):
             ),
             None,
         )
-        if block is None:
-            return
-        experts = block.experts
-        chunk_tokens = min(max_decode_tokens, experts.decode_chunk_size)
-        route_count = chunk_tokens * block.gate.top_k
-        weight_elements = route_count * max(
-            experts.gate_up_proj[0].numel(),
-            experts.down_proj[0].numel(),
+        if block is not None:
+            experts = block.experts
+            chunk_tokens = min(max_decode_tokens, experts.decode_chunk_size)
+            route_count = chunk_tokens * block.gate.top_k
+            weight_elements = route_count * max(
+                experts.gate_up_proj[0].numel(),
+                experts.down_proj[0].numel(),
+            )
+            workspace_elements = route_count * (
+                experts.gate_up_proj.shape[1] + experts.down_proj.shape[1]
+            )
+            self.moe_decode_weight_buffer_pool.reserve(
+                weight_elements=weight_elements,
+                workspace_elements=workspace_elements,
+                weight_dtype=experts.gate_up_proj.dtype,
+                activation_dtype=experts.gate_up_proj.dtype,
+                device=experts.gate_up_proj.device,
+            )
+
+        gptq_block = next(
+            (
+                layer.mlp
+                for layer in self.layers
+                if isinstance(layer.mlp.experts, Qwen35GPTQExperts)
+                and layer.mlp.experts.backend == "triton"
+            ),
+            None,
         )
-        workspace_elements = route_count * (
-            experts.gate_up_proj.shape[1] + experts.down_proj.shape[1]
-        )
-        self.moe_decode_weight_buffer_pool.reserve(
-            weight_elements=weight_elements,
-            workspace_elements=workspace_elements,
-            weight_dtype=experts.gate_up_proj.dtype,
-            activation_dtype=experts.gate_up_proj.dtype,
-            device=experts.gate_up_proj.device,
-        )
+        if gptq_block is not None:
+            experts = gptq_block.experts
+            self.gptq_expert_workspace_pool.reserve(
+                max_decode_tokens,
+                experts.local_intermediate_size,
+                experts.hidden_size,
+                dtype=self.embed_tokens.weight.dtype,
+                device=self.embed_tokens.weight.device,
+            )
 
     def forward(
         self,

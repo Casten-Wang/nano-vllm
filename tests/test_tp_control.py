@@ -851,24 +851,35 @@ class HybridStateContextTest(unittest.TestCase):
                 "reuse_count": 9,
             }
         )
+        gptq_workspace_pool = SimpleNamespace(
+            storage_stats=lambda: {
+                "storage_bytes": 36,
+                "allocation_count": 1,
+                "reuse_count": 15,
+                "max_rows": 8,
+            }
+        )
         runner.model = SimpleNamespace(
             modules=lambda: [
                 SimpleNamespace(
                     int8_partitioned_decode_pool=pool,
                     int8_dequant_pool=dequant_pool,
                     decode_weight_buffer_pool=moe_weight_pool,
+                    gptq_workspace_pool=gptq_workspace_pool,
                     key_buffer_pool=key_buffer_pool,
                 ),
                 SimpleNamespace(
                     int8_partitioned_decode_pool=pool,
                     int8_dequant_pool=dequant_pool,
                     decode_weight_buffer_pool=moe_weight_pool,
+                    gptq_workspace_pool=gptq_workspace_pool,
                     key_buffer_pool=key_buffer_pool,
                 ),
                 SimpleNamespace(
                     int8_partitioned_decode_pool=None,
                     int8_dequant_pool=None,
                     decode_weight_buffer_pool=None,
+                    gptq_workspace_pool=None,
                     key_buffer_pool=None,
                     dispatch_stats=lambda: {
                         "sorted_dispatch_count": 11,
@@ -920,6 +931,10 @@ class HybridStateContextTest(unittest.TestCase):
         self.assertEqual(stats["moe_decode_weight_pool_count"], 1)
         self.assertEqual(stats["moe_decode_weight_buffer_bytes"], 16)
         self.assertEqual(stats["moe_decode_workspace_bytes"], 12)
+        self.assertEqual(stats["gptq_expert_workspace_pool_count"], 1)
+        self.assertEqual(stats["gptq_expert_workspace_bytes"], 36)
+        self.assertEqual(stats["gptq_expert_workspace_allocation_count"], 1)
+        self.assertEqual(stats["gptq_expert_workspace_reuse_count"], 15)
         self.assertEqual(stats["moe_sorted_dispatch_count"], 11)
         self.assertEqual(stats["moe_sorted_decode_dispatch_count"], 5)
         self.assertEqual(stats["moe_sorted_prefill_dispatch_count"], 6)
@@ -949,7 +964,7 @@ class HybridStateContextTest(unittest.TestCase):
         self.assertEqual(stats["tp_top_k_reduction_count"], 5)
         self.assertEqual(stats["tp_top_k_candidate_bytes"], 320)
         self.assertEqual(stats["tp_top_k_full_gather_avoided_bytes"], 8192)
-        self.assertEqual(stats["total_bytes_local_rank"], 156)
+        self.assertEqual(stats["total_bytes_local_rank"], 192)
 
     def test_runtime_buffers_are_reserved_before_capacity_planning(self):
         runner = object.__new__(ModelRunner)

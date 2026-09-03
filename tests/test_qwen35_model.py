@@ -47,7 +47,11 @@ class FakeNorm(nn.Module):
 class FakeMoe(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.experts = FakeExperts()
+        self.experts = (
+            FakeGPTQExperts()
+            if getattr(config, "use_fake_gptq", False)
+            else FakeExperts()
+        )
 
     def forward(self, x):
         return torch.zeros_like(x)
@@ -55,6 +59,20 @@ class FakeMoe(nn.Module):
 
 class FakeExperts(nn.Module):
     pass
+
+
+class FakeGPTQExperts(nn.Module):
+    backend = "triton"
+    local_intermediate_size = 3
+    hidden_size = 4
+
+
+class FakeGPTQWorkspacePool:
+    def __init__(self):
+        self.reservations = []
+
+    def reserve(self, *args, **kwargs):
+        self.reservations.append((args, kwargs))
 
 
 class FakeWeightBufferPool:
@@ -76,6 +94,7 @@ def load_qwen35_module():
         "nanovllm.layers.embed_head": types.ModuleType("nanovllm.layers.embed_head"),
         "nanovllm.models.qwen35_attention": types.ModuleType("nanovllm.models.qwen35_attention"),
         "nanovllm.models.qwen35_gated_delta": types.ModuleType("nanovllm.models.qwen35_gated_delta"),
+        "nanovllm.models.qwen35_gptq": types.ModuleType("nanovllm.models.qwen35_gptq"),
         "nanovllm.models.qwen35_moe": types.ModuleType("nanovllm.models.qwen35_moe"),
     }
     modules["nanovllm.layers.embed_head"].ParallelLMHead = FakeHead
@@ -85,6 +104,10 @@ def load_qwen35_module():
         "nanovllm.models.qwen35_attention"
     ].Qwen35KeyBufferPool = FakeWeightBufferPool
     modules["nanovllm.models.qwen35_gated_delta"].Qwen35GatedDeltaNet = FakeMixer
+    modules["nanovllm.models.qwen35_gptq"].GPTQExpertWorkspacePool = (
+        FakeGPTQWorkspacePool
+    )
+    modules["nanovllm.models.qwen35_gptq"].Qwen35GPTQExperts = FakeGPTQExperts
     modules["nanovllm.models.qwen35_moe"].Qwen35RMSNorm = FakeNorm
     modules["nanovllm.models.qwen35_moe"].Qwen35SparseMoeBlock = FakeMoe
     modules["nanovllm.models.qwen35_moe"].Qwen35Experts = FakeExperts
@@ -186,6 +209,30 @@ def test_text_model_reserves_batched_moe_buffers_for_max_decode_chunk():
             "activation_dtype": torch.bfloat16,
             "device": torch.device("cpu"),
         }
+    ]
+
+
+def test_text_model_shares_and_reserves_one_gptq_workspace():
+    config = tiny_outer_config()
+    config.text_config.use_fake_gptq = True
+    model = QWEN35.Qwen3_5MoeForConditionalGeneration(config)
+
+    pool = model.model.gptq_expert_workspace_pool
+    assert all(
+        layer.mlp.experts.gptq_workspace_pool is pool
+        for layer in model.model.layers
+    )
+
+    model.model.reserve_runtime_buffers(max_decode_tokens=8)
+
+    assert pool.reservations == [
+        (
+            (8, 3, 4),
+            {
+                "dtype": torch.float32,
+                "device": torch.device("cpu"),
+            },
+        )
     ]
 
 
