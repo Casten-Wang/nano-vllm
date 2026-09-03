@@ -412,10 +412,15 @@ class LLMEngine:
                 if session.phase is CacheTransferPhase.TIMED_OUT
                 else "failed"
             )
+            staged_bytes = receive_staged_bytes.pop(transfer_id)
+            self._remote_prefill_receive_expected_bytes.pop(
+                transfer_id,
+                None,
+            )
             self.metrics.record_remote_prefill_receive_finished(
                 perf_counter() - receive_started_at,
                 outcome=outcome,
-                staged_bytes=receive_staged_bytes.pop(transfer_id),
+                staged_bytes=staged_bytes,
             )
             raise
         self.metrics.record_remote_prefill_receive_finished(

@@ -428,6 +428,7 @@ def test_engine_receive_timeout_during_ack_releases_destination():
     assert seq.block_table == []
     assert seq.state_slot is None
     assert not engine.scheduler.remote_prefills
+    assert not engine._remote_prefill_receive_expected_bytes
     assert session.failure_reason == "cache transfer timed out"
 
 
@@ -462,6 +463,7 @@ def test_engine_rejects_inconsistent_rank_receive_results():
     assert seq.block_table == []
     assert seq.state_slot is None
     assert not engine.scheduler.remote_prefills
+    assert not engine._remote_prefill_receive_expected_bytes
 
 
 def test_engine_async_receive_commits_only_after_all_ranks_are_ready():
