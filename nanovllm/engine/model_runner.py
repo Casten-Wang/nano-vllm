@@ -314,6 +314,7 @@ class ModelRunner:
         self.worker_control_failed = False
         self._pending_cache_receives = {}
         self._pending_cache_sends = {}
+        self._pending_heterogeneous_cache_sends = {}
         self._cache_send_staging_pool = None
         self._cache_receive_staging_pool = None
         self._resources_released = False
@@ -411,6 +412,14 @@ class ModelRunner:
         for send in pending_sends.values():
             send.finish()
         pending_sends.clear()
+        heterogeneous_sends = getattr(
+            self,
+            "_pending_heterogeneous_cache_sends",
+            {},
+        )
+        for staged in heterogeneous_sends.values():
+            staged.release()
+        heterogeneous_sends.clear()
         if self.world_size > 1 and hasattr(self, "shm"):
             self.shm.close()
             if self.rank == 0:
@@ -1669,6 +1678,68 @@ class ModelRunner:
             "received_bytes": payload.nbytes,
             "peer_count": len(fragments),
         }
+
+    def prepare_heterogeneous_sequence_cache_send(
+        self,
+        seq: Sequence,
+        transfer_id: str,
+        destination_tp_size: int,
+    ) -> dict:
+        """Stage only routed live-cache slices and retain their arena lease."""
+
+        from nanovllm.engine.heterogeneous_cache_transfer import (
+            stage_qwen35_sequence_cache_for_peers,
+        )
+
+        pending = getattr(self, "_pending_heterogeneous_cache_sends", None)
+        if pending is None:
+            pending = self._pending_heterogeneous_cache_sends = {}
+        if transfer_id in pending or transfer_id in getattr(
+            self,
+            "_pending_cache_sends",
+            {},
+        ):
+            raise ValueError("cache send id is already active")
+        if seq.num_cached_tokens <= 0:
+            raise ValueError("heterogeneous cache send has no cached tokens")
+        num_blocks = len(seq.block_table)
+        plan = self.build_heterogeneous_cache_transfer_plan_for_blocks(
+            num_blocks,
+            destination_tp_size,
+        )
+        recurrent, convolution = self._sequence_state_views(seq)
+        staged = stage_qwen35_sequence_cache_for_peers(
+            self.kv_cache,
+            self.kv_scale,
+            seq.block_table,
+            recurrent_states=recurrent,
+            convolution_states=convolution,
+            transfer_id=transfer_id,
+            src_rank=self.rank,
+            block_size=self.block_size,
+            cached_tokens=seq.num_cached_tokens,
+            plan=plan,
+            host_staging_pool=self._host_staging_pool(),
+        )
+        pending[transfer_id] = staged
+        return {
+            "rank": self.rank,
+            "started": 1,
+            "staged_bytes": staged.staged_bytes,
+            "wire_bytes": sum(
+                fragment.nbytes for fragment in staged.fragments
+            ),
+            "peer_count": len(staged.fragments),
+        }
+
+    def abort_heterogeneous_sequence_cache_send(self, transfer_id: str) -> dict:
+        """Release a prepared peer arena after failure or cancellation."""
+
+        pending = getattr(self, "_pending_heterogeneous_cache_sends", {})
+        staged = pending.pop(transfer_id, None)
+        if staged is not None:
+            staged.release()
+        return {"rank": self.rank, "aborted": 1}
 
     def import_sequence_cache(
         self,

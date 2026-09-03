@@ -10,11 +10,13 @@ from nanovllm.engine.cache_transfer import (
     TRANSFER_FORMAT_VERSION,
     HostStagingBufferPool,
     RankCacheTransfer,
+    export_rank_cache,
 )
 from nanovllm.engine.heterogeneous_cache_transfer import (
     assemble_qwen35_peer_cache_fragments,
     build_qwen35_peer_cache_fragments,
     stage_qwen35_peer_cache_fragments,
+    stage_qwen35_sequence_cache_for_peers,
 )
 from nanovllm.engine.cache_transfer_wire import (
     receive_peer_cache_fragment,
@@ -484,3 +486,141 @@ def test_selective_source_staging_omits_unused_kv_replica():
     assert staged.staged_bytes == plan.profile.source_staging_bytes[1]
     assert staged.staged_bytes < payload.nbytes
     staged.release()
+
+
+@pytest.mark.parametrize("with_scales", [False, True])
+def test_live_cache_staging_matches_logical_export_without_full_payload(
+    with_scales,
+):
+    src_tp = 8
+    plan = build_qwen35_cache_transfer_plan(
+        src_tp_size=src_tp,
+        dst_tp_size=4,
+        total_kv_heads=2,
+        kv_bytes_per_head=(
+            2 * 2 * 2 * 4 * 2 * (1 if with_scales else 4)
+        ),
+        kv_scale_bytes_per_head=(2 * 2 * 2 * 4 * 2 if with_scales else 0),
+        recurrent_heads=32,
+        recurrent_bytes_per_head=2 * 2 * 4,
+        convolution_group_widths=(16, 16, 32),
+        convolution_bytes_per_channel=3 * 2,
+    )
+    rank = 0
+    logical = make_payload(rank, src_tp, with_scales=with_scales)
+    kv_cache = torch.full(
+        (2, 2, 4, 4, 1, 2),
+        99,
+        dtype=logical.kv_blocks.dtype,
+    )
+    kv_cache[:, :, 3].copy_(logical.kv_blocks[:, :, 0])
+    kv_cache[:, :, 1].copy_(logical.kv_blocks[:, :, 1])
+    kv_scale = None
+    if with_scales:
+        kv_scale = torch.full(
+            (2, 2, 4, 4, 1),
+            99,
+            dtype=torch.float16,
+        )
+        kv_scale[:, :, 3].copy_(logical.kv_scales[:, :, 0])
+        kv_scale[:, :, 1].copy_(logical.kv_scales[:, :, 1])
+    block_ids = [3, 1]
+    reference_payload = export_rank_cache(
+        kv_cache,
+        kv_scale,
+        block_ids,
+        transfer_id=logical.transfer_id,
+        tensor_parallel_rank=rank,
+        tensor_parallel_size=src_tp,
+        block_size=4,
+        cached_tokens=7,
+        recurrent_states=logical.recurrent_states,
+        convolution_states=logical.convolution_states,
+    )
+    reference = stage_qwen35_peer_cache_fragments(
+        build_qwen35_peer_cache_fragments(reference_payload, plan),
+        plan,
+    )
+
+    actual = stage_qwen35_sequence_cache_for_peers(
+        kv_cache,
+        kv_scale,
+        block_ids,
+        recurrent_states=logical.recurrent_states,
+        convolution_states=logical.convolution_states,
+        transfer_id=logical.transfer_id,
+        src_rank=rank,
+        block_size=4,
+        cached_tokens=7,
+        plan=plan,
+    )
+
+    assert actual.staged_bytes == plan.profile.source_staging_bytes[rank]
+    assert len(actual.fragments) == len(reference.fragments)
+    for actual_fragment, expected_fragment in zip(
+        actual.fragments,
+        reference.fragments,
+    ):
+        assert actual_fragment.dst_rank == expected_fragment.dst_rank
+        for actual_slice, expected_slice in zip(
+            actual_fragment.slices,
+            expected_fragment.slices,
+        ):
+            assert (
+                actual_slice.component,
+                actual_slice.layer,
+                actual_slice.dst_start,
+            ) == (
+                expected_slice.component,
+                expected_slice.layer,
+                expected_slice.dst_start,
+            )
+            torch.testing.assert_close(actual_slice.tensor, expected_slice.tensor)
+    actual.release()
+    reference.release()
+
+
+def test_model_runner_owns_selective_staging_until_abort():
+    plan = make_plan(with_scales=False)
+    logical = make_payload(0, 4, with_scales=False)
+    kv_cache = torch.zeros((2, 2, 4, 4, 1, 2), dtype=torch.float32)
+    kv_cache[:, :, 3].copy_(logical.kv_blocks[:, :, 0])
+    kv_cache[:, :, 1].copy_(logical.kv_blocks[:, :, 1])
+    runner = object.__new__(ModelRunner)
+    runner.rank = 0
+    runner.world_size = 4
+    runner.block_size = 4
+    runner.kv_cache = kv_cache
+    runner.kv_scale = None
+    runner._cache_send_staging_pool = None
+    runner._pending_cache_sends = {}
+    runner._pending_heterogeneous_cache_sends = {}
+    runner.build_heterogeneous_cache_transfer_plan_for_blocks = Mock(
+        return_value=plan
+    )
+    runner._sequence_state_views = Mock(
+        return_value=(logical.recurrent_states, logical.convolution_states)
+    )
+    seq = SimpleNamespace(num_cached_tokens=7, block_table=[3, 1])
+
+    result = runner.prepare_heterogeneous_sequence_cache_send(
+        seq,
+        "request/attempt-1",
+        8,
+    )
+
+    assert result == {
+        "rank": 0,
+        "started": 1,
+        "staged_bytes": plan.profile.source_staging_bytes[0],
+        "wire_bytes": plan.profile.source_bytes[0],
+        "peer_count": plan.profile.source_peer_counts[0],
+    }
+    assert runner._cache_send_staging_pool.storage_stats()["leased"] == 1
+    assert "request/attempt-1" in runner._pending_heterogeneous_cache_sends
+
+    assert runner.abort_heterogeneous_sequence_cache_send(
+        "request/attempt-1"
+    ) == {"rank": 0, "aborted": 1}
+    assert runner._cache_send_staging_pool.storage_stats()["leased"] == 0
+    assert not runner._pending_heterogeneous_cache_sends

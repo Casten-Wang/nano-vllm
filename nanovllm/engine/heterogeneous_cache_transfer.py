@@ -393,6 +393,233 @@ def stage_qwen35_peer_cache_fragments(
         raise
 
 
+def stage_qwen35_sequence_cache_for_peers(
+    kv_cache: torch.Tensor,
+    kv_scale: torch.Tensor | None,
+    block_ids: list[int],
+    *,
+    recurrent_states: tuple[torch.Tensor, ...],
+    convolution_states: tuple[torch.Tensor, ...],
+    transfer_id: str,
+    src_rank: int,
+    block_size: int,
+    cached_tokens: int,
+    plan: Qwen35CacheTransferPlan,
+    host_staging_pool: HostStagingBufferPool | None = None,
+) -> StagedPeerCacheFragments:
+    """Stage routed peer slices directly from live rank-local cache storage."""
+
+    src_tp_size = len(plan.profile.source_bytes)
+    dst_tp_size = len(plan.profile.destination_bytes)
+    if (
+        not isinstance(transfer_id, str)
+        or not transfer_id
+        or not isinstance(src_rank, int)
+        or isinstance(src_rank, bool)
+        or not 0 <= src_rank < src_tp_size
+        or not isinstance(block_size, int)
+        or isinstance(block_size, bool)
+        or block_size <= 0
+        or not isinstance(cached_tokens, int)
+        or isinstance(cached_tokens, bool)
+        or cached_tokens <= 0
+    ):
+        raise ValueError("live peer cache staging metadata is invalid")
+    num_blocks = (cached_tokens + block_size - 1) // block_size
+    if (
+        kv_cache.ndim != 6
+        or kv_cache.shape[0] != 2
+        or kv_cache.shape[3] != block_size
+        or len(block_ids) != num_blocks
+        or len(block_ids) != len(set(block_ids))
+        or not block_ids
+        or min(block_ids) < 0
+        or max(block_ids) >= kv_cache.shape[2]
+    ):
+        raise ValueError("live peer cache KV layout is invalid")
+    if bool(kv_scale is not None) != bool(plan.kv_scale_slices):
+        raise ValueError("live peer cache scale layout does not match plan")
+    if kv_scale is not None and (
+        kv_scale.shape != kv_cache.shape[:-1]
+        or kv_cache.dtype != torch.int8
+        or kv_scale.dtype != torch.float16
+    ):
+        raise ValueError("live peer cache INT8 scale layout is invalid")
+    if len(recurrent_states) != len(convolution_states) or not recurrent_states:
+        raise ValueError("live peer cache state layers are invalid")
+
+    routes_by_component = {
+        "kv": plan.kv_slices,
+        "kv_scale": plan.kv_scale_slices,
+        "recurrent": plan.recurrent_slices,
+        "convolution": plan.convolution_slices,
+    }
+    sources = {
+        ("kv", -1): kv_cache,
+        **(
+            {("kv_scale", -1): kv_scale}
+            if kv_scale is not None
+            else {}
+        ),
+        **{
+            ("recurrent", layer): tensor
+            for layer, tensor in enumerate(recurrent_states)
+        },
+        **{
+            ("convolution", layer): tensor
+            for layer, tensor in enumerate(convolution_states)
+        },
+    }
+    specs: dict[tuple[str, int, int, int], tuple[torch.Tensor, tuple[int, ...]]] = {}
+    route_keys: dict[tuple[str, int, int, int, int], tuple[str, int, int, int]] = {}
+    for (component, layer), source in sources.items():
+        shard_dim = _COMPONENT_DIMS[component]
+        routes = routes_by_component[component]
+        for route in routes:
+            if route.src_rank != src_rank:
+                continue
+            if route.src_start + route.length > source.shape[shard_dim]:
+                raise ValueError("live peer cache route exceeds source tensor")
+            key = (component, layer, route.src_start, route.length)
+            if component in {"kv", "kv_scale"}:
+                shape = list(source.shape)
+                shape[2] = num_blocks
+                shape[shard_dim] = route.length
+            else:
+                shape = list(source.shape)
+                shape[shard_dim] = route.length
+            specs.setdefault(key, (source, tuple(shape)))
+            route_keys[
+                (component, layer, route.dst_rank, route.dst_start, route.length)
+            ] = key
+
+    offsets = {}
+    end = 0
+    for key, (source, shape) in specs.items():
+        alignment = source.element_size()
+        end = (end + alignment - 1) // alignment * alignment
+        offsets[key] = end
+        elements = 1
+        for dimension in shape:
+            elements *= dimension
+        end += elements * source.element_size()
+    staged_bytes = sum(
+        source.element_size() * torch.Size(shape).numel()
+        for source, shape in specs.values()
+    )
+    if staged_bytes != plan.profile.source_staging_bytes[src_rank]:
+        raise RuntimeError("live source slices do not match staging preflight")
+    pin_memory = any(source.device.type == "cuda" for source, _ in specs.values())
+    lease = (
+        host_staging_pool.acquire(end, pin_memory=pin_memory)
+        if host_staging_pool is not None
+        else HostStagingLease(
+            torch.empty(
+                end,
+                dtype=torch.uint8,
+                device="cpu",
+                pin_memory=pin_memory,
+            ),
+            None,
+        )
+    )
+    storage = lease.storage
+    if storage is None:
+        raise RuntimeError("host staging lease was released before use")
+    staged = {}
+    try:
+        cuda_devices = set()
+        valid_last_block_tokens = cached_tokens % block_size
+        for key, (source, shape) in specs.items():
+            component, _layer, src_start, length = key
+            nbytes = source.element_size() * torch.Size(shape).numel()
+            target = storage[offsets[key] : offsets[key] + nbytes]
+            target = target.view(source.dtype).reshape(shape)
+            shard_dim = _COMPONENT_DIMS[component]
+            if component in {"kv", "kv_scale"}:
+                for logical_id, physical_id in enumerate(block_ids):
+                    source_block = source[:, :, physical_id]
+                    target_block = target[:, :, logical_id]
+                    source_head_dim = shard_dim - 1
+                    source_slice = source_block.narrow(
+                        source_head_dim,
+                        src_start,
+                        length,
+                    )
+                    if logical_id == num_blocks - 1 and valid_last_block_tokens:
+                        target_block.zero_()
+                        target_block[:, :, :valid_last_block_tokens].copy_(
+                            source_slice[:, :, :valid_last_block_tokens],
+                            non_blocking=source.device.type == "cuda",
+                        )
+                    else:
+                        target_block.copy_(
+                            source_slice,
+                            non_blocking=source.device.type == "cuda",
+                        )
+            else:
+                target.copy_(
+                    source.narrow(shard_dim, src_start, length),
+                    non_blocking=source.device.type == "cuda",
+                )
+            staged[key] = target
+            if source.device.type == "cuda":
+                cuda_devices.add(source.device)
+        for device in cuda_devices:
+            torch.cuda.current_stream(device).synchronize()
+
+        grouped: dict[int, list[PeerTensorSlice]] = {}
+        for (component, layer), _source in sources.items():
+            for route in routes_by_component[component]:
+                if route.src_rank != src_rank:
+                    continue
+                key = route_keys[
+                    (
+                        component,
+                        layer,
+                        route.dst_rank,
+                        route.dst_start,
+                        route.length,
+                    )
+                ]
+                grouped.setdefault(route.dst_rank, []).append(
+                    PeerTensorSlice(
+                        component=component,
+                        layer=layer,
+                        dst_start=route.dst_start,
+                        tensor=staged[key],
+                    )
+                )
+        fragments = tuple(
+            PeerCacheFragment(
+                transfer_id=transfer_id,
+                src_rank=src_rank,
+                dst_rank=dst_rank,
+                src_tp_size=src_tp_size,
+                dst_tp_size=dst_tp_size,
+                block_size=block_size,
+                cached_tokens=cached_tokens,
+                slices=tuple(slices),
+            )
+            for dst_rank, slices in sorted(grouped.items())
+        )
+        expected = {
+            dst_rank: byte_count
+            for source_rank, dst_rank, byte_count in plan.profile.peer_bytes
+            if source_rank == src_rank
+        }
+        if {item.dst_rank: item.nbytes for item in fragments} != expected:
+            raise RuntimeError("live peer fragments do not match capacity preflight")
+        return StagedPeerCacheFragments(
+            fragments=fragments,
+            lease=lease,
+            staged_bytes=staged_bytes,
+        )
+    except BaseException:
+        lease.release()
+        raise
+
+
 def assemble_qwen35_peer_cache_fragments(
     fragments: tuple[PeerCacheFragment, ...],
     plan: Qwen35CacheTransferPlan,
