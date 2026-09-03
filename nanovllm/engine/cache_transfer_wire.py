@@ -7,6 +7,7 @@ import hmac
 import json
 import socket
 import struct
+from threading import Lock, Thread
 from time import monotonic, sleep
 from collections.abc import Callable, Iterable
 
@@ -298,6 +299,104 @@ class RankCacheReceiver:
 
     def __exit__(self, exc_type, exc, traceback) -> None:
         self.close()
+
+
+class PendingRankCacheReceive:
+    """Receive one rank payload on CPU and defer its ACK until GPU install."""
+
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        *,
+        timeout_s: float = 30.0,
+        max_payload_bytes: int = DEFAULT_MAX_PAYLOAD_BYTES,
+    ) -> None:
+        self._receiver = RankCacheReceiver(
+            host,
+            port,
+            timeout_s=timeout_s,
+            max_payload_bytes=max_payload_bytes,
+        )
+        self._timeout_s = timeout_s
+        self._lock = Lock()
+        self._connection: socket.socket | None = None
+        self._payload: RankCacheTransfer | None = None
+        self._error: BaseException | None = None
+        self._terminal = False
+        self._thread = Thread(target=self._run, daemon=True)
+
+    @property
+    def address(self) -> tuple[str, int]:
+        return self._receiver.address
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def _run(self) -> None:
+        connection = None
+        try:
+            connection, _peer = self._receiver._listener.accept()
+            connection.settimeout(self._timeout_s)
+            with self._lock:
+                if self._terminal:
+                    connection.close()
+                    return
+                self._connection = connection
+            payload = receive_rank_cache_transfer(
+                connection,
+                max_payload_bytes=self._receiver.max_payload_bytes,
+            )
+            with self._lock:
+                if not self._terminal:
+                    self._payload = payload
+        except BaseException as exc:
+            with self._lock:
+                if not self._terminal:
+                    self._error = exc
+            if connection is not None:
+                try:
+                    connection.sendall(_TRANSFER_NACK)
+                except OSError:
+                    pass
+                connection.close()
+        finally:
+            self._receiver.close()
+
+    def poll(self) -> tuple[str, str | None]:
+        with self._lock:
+            if self._terminal:
+                return "closed", None
+            if self._error is not None:
+                return "failed", str(self._error)
+            if self._payload is not None:
+                return "ready", None
+            return "receiving", None
+
+    def payload(self) -> RankCacheTransfer:
+        with self._lock:
+            if self._terminal:
+                raise RuntimeError("cache receive is already closed")
+            if self._error is not None:
+                raise RuntimeError(f"cache receive failed: {self._error}")
+            if self._payload is None:
+                raise RuntimeError("cache receive payload is not ready")
+            return self._payload
+
+    def finish(self, *, accepted: bool) -> None:
+        with self._lock:
+            if self._terminal:
+                return
+            self._terminal = True
+            connection = self._connection
+            self._connection = None
+            self._payload = None
+        if connection is not None:
+            try:
+                connection.sendall(_TRANSFER_ACK if accepted else _TRANSFER_NACK)
+            finally:
+                connection.close()
+        self._receiver.close()
 
 
 def send_rank_cache_to_endpoint(

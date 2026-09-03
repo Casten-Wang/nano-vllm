@@ -128,6 +128,7 @@ class ModelRunner:
         self.rank = rank
         self.event = event
         self.worker_control_failed = False
+        self._pending_cache_receives = {}
         self._resources_released = False
         self.execution_stats = ExecutionStats()
         self.execution_stats_enabled = False
@@ -208,6 +209,10 @@ class ModelRunner:
         if self._resources_released:
             return
         self._resources_released = True
+        pending_receives = getattr(self, "_pending_cache_receives", {})
+        for receive in pending_receives.values():
+            receive.finish(accepted=False)
+        pending_receives.clear()
         if self.world_size > 1 and hasattr(self, "shm"):
             self.shm.close()
             if self.rank == 0:
@@ -1107,6 +1112,72 @@ class ModelRunner:
                 ),
             )
         return {"rank": self.rank, "cached_tokens": payload.cached_tokens}
+
+    def start_sequence_cache_receive(
+        self,
+        transfer_id: str,
+        bind_endpoints: list[tuple[str, int]],
+        timeout_s: float = 30.0,
+        max_payload_bytes: int = 16 * 1024**3,
+    ) -> dict:
+        """Start rank-local TCP receive without touching CUDA state."""
+
+        from nanovllm.engine.cache_transfer_wire import PendingRankCacheReceive
+
+        if transfer_id in self._pending_cache_receives:
+            raise ValueError("cache receive id is already active")
+        host, port = self._rank_cache_endpoint(bind_endpoints)
+        receive = PendingRankCacheReceive(
+            host,
+            port,
+            timeout_s=timeout_s,
+            max_payload_bytes=max_payload_bytes,
+        )
+        self._pending_cache_receives[transfer_id] = receive
+        try:
+            receive.start()
+        except BaseException:
+            self._pending_cache_receives.pop(transfer_id, None)
+            receive.finish(accepted=False)
+            raise
+        return {"rank": self.rank, "started": 1}
+
+    def poll_sequence_cache_receive(self, transfer_id: str) -> dict:
+        receive = self._pending_cache_receives.get(transfer_id)
+        if receive is None:
+            raise ValueError("cache receive id is not active")
+        state, error = receive.poll()
+        result = {"rank": self.rank, "state": state}
+        if error is not None:
+            result["error"] = error
+        return result
+
+    def install_sequence_cache_receive(
+        self,
+        seq: Sequence,
+        transfer_id: str,
+    ) -> dict:
+        """Install a ready CPU payload, then ACK the producer."""
+
+        receive = self._pending_cache_receives.get(transfer_id)
+        if receive is None:
+            raise ValueError("cache receive id is not active")
+        try:
+            payload = receive.payload()
+            self.import_sequence_cache(seq, payload, transfer_id=transfer_id)
+        except BaseException:
+            receive.finish(accepted=False)
+            self._pending_cache_receives.pop(transfer_id, None)
+            raise
+        receive.finish(accepted=True)
+        self._pending_cache_receives.pop(transfer_id, None)
+        return {"rank": self.rank, "cached_tokens": payload.cached_tokens}
+
+    def abort_sequence_cache_receive(self, transfer_id: str) -> dict:
+        receive = self._pending_cache_receives.pop(transfer_id, None)
+        if receive is not None:
+            receive.finish(accepted=False)
+        return {"rank": self.rank, "aborted": 1}
 
     def prepare_state_slots(
         self,

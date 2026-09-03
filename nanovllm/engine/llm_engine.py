@@ -12,7 +12,7 @@ from nanovllm.config import Config, resolve_eos_token_ids
 from nanovllm.sampling_params import SamplingParams
 from nanovllm.engine.sequence import Sequence
 from nanovllm.engine.scheduler import ScheduleResult, Scheduler
-from nanovllm.engine.cache_transfer import CacheTransferSession
+from nanovllm.engine.cache_transfer import CacheTransferPhase, CacheTransferSession
 from nanovllm.engine.model_runner import CONTROL_STATUS_SIZE, ModelRunner
 from nanovllm.engine.metrics import EngineMetrics
 
@@ -110,6 +110,8 @@ class LLMEngine:
         )
         self.scheduler = Scheduler(config)
         self.metrics = EngineMetrics()
+        self._remote_prefill_receive_tokens: dict[str, int] = {}
+        self._remote_prefill_receive_errors: dict[str, str] = {}
         atexit.register(self.exit)
 
     def exit(self):
@@ -216,6 +218,8 @@ class LLMEngine:
 
         if not isinstance(first_token_id, int) or isinstance(first_token_id, bool):
             raise TypeError("first_token_id must be an integer")
+        if transfer_id in getattr(self, "_remote_prefill_receive_tokens", {}):
+            raise ValueError("cache receive id is already active")
         seq, session = self.scheduler.remote_prefills[transfer_id]
         try:
             rank_results = self.model_runner.call_rank_results(
@@ -249,6 +253,176 @@ class LLMEngine:
                 )
             raise
         return seq.seq_id
+
+    def start_remote_prefill_receive(
+        self,
+        transfer_id: str,
+        first_token_id: int,
+        bind_endpoints: list[tuple[str, int]],
+        *,
+        timeout_s: float = 30.0,
+        max_payload_bytes: int = 16 * 1024**3,
+    ) -> int:
+        """Start CPU-side rank receives while decode scheduling continues."""
+
+        if not isinstance(first_token_id, int) or isinstance(first_token_id, bool):
+            raise TypeError("first_token_id must be an integer")
+        if transfer_id not in self.scheduler.remote_prefills:
+            raise ValueError("cache transfer id is not reserved")
+        receive_tokens = getattr(self, "_remote_prefill_receive_tokens", None)
+        if receive_tokens is None:
+            receive_tokens = self._remote_prefill_receive_tokens = {}
+        if transfer_id in receive_tokens:
+            raise ValueError("cache receive id is already active")
+        try:
+            rank_results = self.model_runner.call_rank_results(
+                "start_sequence_cache_receive",
+                transfer_id,
+                bind_endpoints,
+                timeout_s,
+                max_payload_bytes,
+            )
+            _validate_rank_results(
+                rank_results,
+                self.config.tensor_parallel_size,
+                "started",
+                expected_value=1,
+            )
+        except BaseException as exc:
+            try:
+                self.model_runner.call_rank_results(
+                    "abort_sequence_cache_receive",
+                    transfer_id,
+                )
+            except BaseException:
+                pass
+            if transfer_id in self.scheduler.remote_prefills:
+                self.scheduler.abort_remote_prefill(
+                    transfer_id,
+                    f"cache receive start failed: {exc}",
+                    now=perf_counter(),
+                )
+            raise
+        receive_tokens[transfer_id] = first_token_id
+        getattr(self, "_remote_prefill_receive_errors", {}).pop(transfer_id, None)
+        seq, _session = self.scheduler.remote_prefills[transfer_id]
+        return seq.seq_id
+
+    def _abort_remote_prefill_receive(self, transfer_id: str, reason: str) -> None:
+        try:
+            self.model_runner.call_rank_results(
+                "abort_sequence_cache_receive",
+                transfer_id,
+            )
+        except BaseException:
+            pass
+        self._remote_prefill_receive_tokens.pop(transfer_id, None)
+        if transfer_id in self.scheduler.remote_prefills:
+            self.scheduler.abort_remote_prefill(
+                transfer_id,
+                reason,
+                now=perf_counter(),
+            )
+
+    def abort_remote_prefill_receive(
+        self,
+        transfer_id: str,
+        *,
+        reason: str = "cache receive cancelled",
+    ) -> int:
+        """Cancel an active receive and return its request to local prefill."""
+
+        if transfer_id not in getattr(self, "_remote_prefill_receive_tokens", {}):
+            raise ValueError("cache receive id is not active")
+        if not reason:
+            raise ValueError("cache receive cancellation reason must not be empty")
+        seq, _session = self.scheduler.remote_prefills[transfer_id]
+        self._abort_remote_prefill_receive(transfer_id, reason)
+        return seq.seq_id
+
+    def poll_remote_prefill_receive(self, transfer_id: str) -> int | None:
+        """Progress one receive; return its sequence id only after all-rank commit."""
+
+        receive_tokens = getattr(self, "_remote_prefill_receive_tokens", {})
+        if transfer_id not in receive_tokens:
+            raise ValueError("cache receive id is not active")
+        seq, session = self.scheduler.remote_prefills[transfer_id]
+        now = perf_counter()
+        if session.poll(now=now) is CacheTransferPhase.TIMED_OUT:
+            self._abort_remote_prefill_receive(
+                transfer_id,
+                "cache transfer timed out",
+            )
+            raise TimeoutError("cache transfer timed out")
+        try:
+            rank_results = self.model_runner.call_rank_results(
+                "poll_sequence_cache_receive",
+                transfer_id,
+            )
+            states = {}
+            failures = []
+            for result in rank_results:
+                if not isinstance(result, dict):
+                    raise RuntimeError("cache receive poll result must be a dictionary")
+                rank = result.get("rank")
+                state = result.get("state")
+                if (
+                    not isinstance(rank, int)
+                    or isinstance(rank, bool)
+                    or not 0 <= rank < self.config.tensor_parallel_size
+                    or rank in states
+                ):
+                    raise RuntimeError("cache receive poll result has an invalid rank")
+                if state not in {"receiving", "ready", "failed"}:
+                    raise RuntimeError("cache receive poll result has an invalid state")
+                states[rank] = state
+                if state == "failed":
+                    failures.append(f"rank {rank}: {result.get('error', 'unknown error')}")
+            if set(states) != set(range(self.config.tensor_parallel_size)):
+                raise RuntimeError("cache receive poll results are incomplete")
+            if failures:
+                raise RuntimeError("; ".join(failures))
+            if any(state == "receiving" for state in states.values()):
+                return None
+            installed = self.model_runner.call_rank_results(
+                "install_sequence_cache_receive",
+                seq,
+                transfer_id,
+            )
+            received = _validate_rank_results(
+                installed,
+                self.config.tensor_parallel_size,
+                "cached_tokens",
+                expected_value=seq.num_prompt_tokens,
+            )
+            now = perf_counter()
+            for rank in received:
+                session.acknowledge(rank, now=now)
+            self.scheduler.commit_remote_prefill(
+                transfer_id,
+                receive_tokens[transfer_id],
+                now=now,
+            )
+        except BaseException as exc:
+            self._abort_remote_prefill_receive(
+                transfer_id,
+                f"rank-local async cache receive failed: {exc}",
+            )
+            raise
+        receive_tokens.pop(transfer_id, None)
+        return seq.seq_id
+
+    def _poll_remote_prefill_receives(self) -> None:
+        errors = getattr(self, "_remote_prefill_receive_errors", None)
+        if errors is None:
+            errors = self._remote_prefill_receive_errors = {}
+        for transfer_id in tuple(
+            getattr(self, "_remote_prefill_receive_tokens", {})
+        ):
+            try:
+                self.poll_remote_prefill_receive(transfer_id)
+            except Exception as exc:
+                errors[transfer_id] = str(exc)
 
     def send_remote_prefill(
         self,
@@ -289,6 +463,7 @@ class LLMEngine:
         return first_token_id
 
     def step(self):
+        self._poll_remote_prefill_receives()
         self.scheduler.poll_remote_prefills(now=perf_counter())
         schedule_result = self.scheduler.schedule()
         if isinstance(schedule_result, ScheduleResult):

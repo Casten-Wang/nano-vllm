@@ -1,5 +1,6 @@
 import socket
 from threading import Thread
+from time import monotonic, sleep
 
 import pytest
 import torch
@@ -7,6 +8,7 @@ import torch
 from nanovllm.engine.cache_transfer import RankCacheTransfer
 from nanovllm.engine.model_runner import ModelRunner
 from nanovllm.engine.cache_transfer_wire import (
+    PendingRankCacheReceive,
     RankCacheReceiver,
     WIRE_HEADER,
     WIRE_MAGIC,
@@ -168,6 +170,69 @@ def test_tcp_endpoint_rejects_when_install_callback_fails():
     assert "rejected" in str(sender_failure[0])
 
 
+def test_pending_receive_defers_sender_ack_until_install_commit():
+    payload = make_payload()
+    receiver = PendingRankCacheReceive("127.0.0.1", 0, timeout_s=2.0)
+    sender_result = []
+    sender_failure = []
+    receiver.start()
+
+    def send():
+        try:
+            sender_result.append(
+                send_rank_cache_to_endpoint(
+                    *receiver.address,
+                    payload,
+                    timeout_s=2.0,
+                )
+            )
+        except BaseException as exc:
+            sender_failure.append(exc)
+
+    thread = Thread(target=send)
+    thread.start()
+    deadline = monotonic() + 2.0
+    while receiver.poll()[0] == "receiving" and monotonic() < deadline:
+        sleep(0.001)
+
+    assert receiver.poll() == ("ready", None)
+    assert thread.is_alive()
+    torch.testing.assert_close(receiver.payload().kv_blocks, payload.kv_blocks)
+
+    receiver.finish(accepted=True)
+    thread.join()
+    assert not sender_failure
+    assert sender_result
+
+
+def test_pending_receive_nacks_sender_when_install_is_rejected():
+    payload = make_payload()
+    receiver = PendingRankCacheReceive("127.0.0.1", 0, timeout_s=2.0)
+    sender_failure = []
+    receiver.start()
+
+    def send():
+        try:
+            send_rank_cache_to_endpoint(
+                *receiver.address,
+                payload,
+                timeout_s=2.0,
+            )
+        except BaseException as exc:
+            sender_failure.append(exc)
+
+    thread = Thread(target=send)
+    thread.start()
+    deadline = monotonic() + 2.0
+    while receiver.poll()[0] == "receiving" and monotonic() < deadline:
+        sleep(0.001)
+    receiver.finish(accepted=False)
+    thread.join()
+
+    assert len(sender_failure) == 1
+    assert "rejected" in str(sender_failure[0])
+
+
 def test_model_runner_rank_endpoint_exports_receives_and_installs():
     probe = socket.socket()
     probe.bind(("127.0.0.1", 0))
@@ -223,3 +288,62 @@ def test_model_runner_rank_endpoint_exports_receives_and_installs():
     assert installed[0][1].transfer_id == payload.transfer_id
     assert installed[0][2] == payload.transfer_id
     torch.testing.assert_close(installed[0][1].kv_blocks, payload.kv_blocks)
+
+
+def test_model_runner_async_receive_polls_then_installs_before_ack():
+    probe = socket.socket()
+    probe.bind(("127.0.0.1", 0))
+    port = probe.getsockname()[1]
+    probe.close()
+    endpoints = [("127.0.0.1", port)]
+    payload = make_payload()
+
+    source = object.__new__(ModelRunner)
+    source.rank = 0
+    source.world_size = 1
+    source.export_sequence_cache = lambda *_args, **_kwargs: payload
+    destination = object.__new__(ModelRunner)
+    destination.rank = 0
+    destination.world_size = 1
+    destination._pending_cache_receives = {}
+    installed = []
+    destination.import_sequence_cache = (
+        lambda seq, received, transfer_id: installed.append(
+            (seq, received, transfer_id)
+        )
+    )
+
+    assert destination.start_sequence_cache_receive(
+        payload.transfer_id,
+        endpoints,
+        2.0,
+    ) == {"rank": 0, "started": 1}
+    sender_result = []
+    sender_thread = Thread(
+        target=lambda: sender_result.append(
+            source.send_sequence_cache_to_endpoint(
+                "source-seq",
+                payload.transfer_id,
+                endpoints,
+                timeout_s=2.0,
+            )
+        )
+    )
+    sender_thread.start()
+    deadline = monotonic() + 2.0
+    poll = destination.poll_sequence_cache_receive(payload.transfer_id)
+    while poll["state"] == "receiving" and monotonic() < deadline:
+        sleep(0.001)
+        poll = destination.poll_sequence_cache_receive(payload.transfer_id)
+
+    assert poll == {"rank": 0, "state": "ready"}
+    assert sender_thread.is_alive()
+    assert destination.install_sequence_cache_receive(
+        "destination-seq",
+        payload.transfer_id,
+    ) == {"rank": 0, "cached_tokens": 5}
+    sender_thread.join()
+
+    assert sender_result[0]["sent_bytes"] > 0
+    assert len(installed) == 1
+    assert payload.transfer_id not in destination._pending_cache_receives
