@@ -1,5 +1,6 @@
-import os
 from glob import glob
+import json
+import os
 import torch
 from torch import nn
 from safetensors import safe_open
@@ -41,7 +42,28 @@ def load_model(model: nn.Module, path: str):
         if getattr(quantization, "format", None) == "fp8_block"
         else None
     )
-    for file in glob(os.path.join(path, "*.safetensors")):
+    files = sorted(glob(os.path.join(path, "*.safetensors")))
+    if not files:
+        raise FileNotFoundError(f"no safetensors files found in model path: {path}")
+    available_files = {os.path.basename(file) for file in files}
+    for index_file in glob(os.path.join(path, "*.safetensors.index.json")):
+        with open(index_file, encoding="utf-8") as stream:
+            index = json.load(stream)
+        weight_map = index.get("weight_map")
+        if not isinstance(weight_map, dict) or any(
+            not isinstance(filename, str) or not filename
+            for filename in weight_map.values()
+        ):
+            raise ValueError(
+                f"invalid safetensors weight map in checkpoint index: {index_file}"
+            )
+        missing_files = sorted(set(weight_map.values()) - available_files)
+        if missing_files:
+            raise FileNotFoundError(
+                f"missing safetensors shards referenced by {index_file}: "
+                + ", ".join(missing_files)
+            )
+    for file in files:
         with safe_open(file, "pt", "cpu") as f:
             source_names = set(f.keys())
             for source_weight_name in sorted(source_names):
