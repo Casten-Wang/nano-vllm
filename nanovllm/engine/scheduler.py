@@ -388,6 +388,8 @@ class Scheduler:
     ) -> Sequence:
         seq, session = self.remote_prefills[transfer_id]
         session.commit(now=now)
+        if self.prefix_cache_enabled:
+            self.block_manager.hash_imported_prompt(seq)
         self.remote_prefills.pop(transfer_id)
         seq.num_cached_tokens = seq.num_prompt_tokens
         seq.num_scheduled_tokens = 0

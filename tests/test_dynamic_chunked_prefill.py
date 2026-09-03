@@ -189,6 +189,46 @@ def test_remote_prefill_reserves_resources_until_all_ranks_commit():
     assert scheduler.state_manager.num_used_slots == 1
 
 
+@pytest.mark.parametrize(
+    ("hybrid", "expected_cached_blocks"),
+    [(False, 2), (True, 0)],
+)
+def test_remote_prefill_commit_indexes_imported_prefix_blocks(
+    hybrid,
+    expected_cached_blocks,
+):
+    scheduler = make_scheduler(
+        max_tokens=8,
+        max_seqs=2,
+        block_size=4,
+        num_blocks=8,
+        hybrid=hybrid,
+    )
+    imported = Sequence([1, 2, 3, 4, 5, 6, 7, 8])
+    scheduler.add(imported)
+    session = make_transfer(tp_size=1)
+    scheduler.reserve_remote_prefill(imported, session)
+    session.acknowledge(0, now=11.0)
+
+    scheduler.commit_remote_prefill(
+        session.transfer_id,
+        first_token_id=9,
+        now=11.0,
+    )
+
+    same_prefix = Sequence([1, 2, 3, 4, 5, 6, 7, 8, 10])
+    cached_blocks = scheduler.block_manager.get_num_cached_blocks(same_prefix)
+    assert cached_blocks == expected_cached_blocks
+    if expected_cached_blocks:
+        imported_blocks = imported.block_table.copy()
+        assert scheduler.block_manager.can_allocate(
+            same_prefix,
+            num_cached_blocks=cached_blocks,
+        ) == expected_cached_blocks
+        scheduler.block_manager.allocate(same_prefix, cached_blocks)
+        assert same_prefix.block_table[:cached_blocks] == imported_blocks
+
+
 def test_legacy_scheduler_can_idle_while_remote_prefill_is_pending():
     scheduler = make_scheduler(
         max_tokens=8,

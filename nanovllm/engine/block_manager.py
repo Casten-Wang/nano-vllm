@@ -279,7 +279,18 @@ class BlockManager:
     def hash_blocks(self, seq: Sequence):
         start = seq.num_cached_tokens // self.block_size
         end = (seq.num_cached_tokens + seq.num_scheduled_tokens) // self.block_size
-        if start == end: return
+        self._hash_block_range(seq, start, end)
+
+    def hash_imported_prompt(self, seq: Sequence):
+        """Index complete prompt blocks whose KV was populated remotely."""
+
+        self._hash_block_range(seq, 0, seq.num_prompt_tokens // self.block_size)
+
+    def _hash_block_range(self, seq: Sequence, start: int, end: int):
+        if start == end:
+            return
+        if not 0 <= start < end <= len(seq.block_table):
+            raise ValueError("KV hash range exceeds the allocated block table")
         h = self.blocks[seq.block_table[start - 1]].hash if start > 0 else -1
         for i in range(start, end):
             block = self.blocks[seq.block_table[i]]
