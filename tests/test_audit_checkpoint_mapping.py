@@ -1,9 +1,10 @@
+import json
+import types
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
-import json
 from types import SimpleNamespace
-import types
 
+import pytest
 import torch
 from safetensors.torch import save_file
 
@@ -27,6 +28,61 @@ def test_parameter_storage_bytes_uses_parameter_dtype_and_shape():
     expected = (3 * 4 + 4) * 2 + (4 * 2) * 4
 
     assert MODULE.parameter_storage_bytes(model) == expected
+
+
+@pytest.mark.parametrize(
+    ("tp_size", "expected_workspace_bytes"),
+    ((4, 1_048_576), (8, 524_288)),
+)
+def test_resident_fp8_storage_predicts_qwen36_shared_workspace(
+    tp_size, expected_workspace_bytes
+):
+    shared_pool = object()
+
+    class ResidentExpert(torch.nn.Module):
+        def __init__(self, local_intermediate_size):
+            super().__init__()
+            self.gate_up_proj = torch.empty(
+                256,
+                2 * local_intermediate_size,
+                2048,
+                dtype=torch.float8_e4m3fn,
+                device="meta",
+            )
+            self.down_proj = torch.empty(
+                256,
+                2048,
+                local_intermediate_size,
+                dtype=torch.float8_e4m3fn,
+                device="meta",
+            )
+            self.resident_weight_buffer_pool = shared_pool
+
+        def resident_fp8_storage_stats(self):
+            return {
+                "weight_bytes": self.gate_up_proj.numel()
+                + self.down_proj.numel(),
+                "scale_bytes": 1024,
+                "total_bytes": self.gate_up_proj.numel()
+                + self.down_proj.numel()
+                + 1024,
+            }
+
+    model = torch.nn.Sequential(
+        ResidentExpert(512 // tp_size),
+        ResidentExpert(512 // tp_size),
+    )
+
+    result = MODULE.resident_fp8_runtime_storage(model, model_dtype_bytes=2)
+
+    assert result["layer_count"] == 2
+    assert result["dequant_workspace_pool_count"] == 1
+    assert result["dequant_workspace_bytes"] == expected_workspace_bytes
+    assert result["total_runtime_bytes"] == (
+        result["weight_bytes"]
+        + result["scale_bytes"]
+        + expected_workspace_bytes
+    )
 
 
 def test_cache_storage_metadata_uses_tp_and_model_dtype():

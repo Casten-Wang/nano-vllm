@@ -24,19 +24,25 @@ class ResidentFP8WeightBufferPool:
         self.allocation_count = 0
         self.reuse_count = 0
 
-    def acquire(self, shape, dtype, device) -> torch.Tensor:
-        required = 1
-        for size in shape:
-            required *= size
+    def reserve(self, elements: int, dtype, device) -> None:
+        if elements <= 0:
+            raise ValueError("resident FP8 workspace capacity must be positive")
         if (
             self.storage is None
             or self.storage.dtype != dtype
             or self.storage.device != device
-            or self.storage.numel() < required
+            or self.storage.numel() < elements
         ):
-            self.storage = torch.empty(required, dtype=dtype, device=device)
+            self.storage = torch.empty(elements, dtype=dtype, device=device)
             self.allocation_count += 1
-        else:
+
+    def acquire(self, shape, dtype, device) -> torch.Tensor:
+        required = 1
+        for size in shape:
+            required *= size
+        allocation_count = self.allocation_count
+        self.reserve(required, dtype, device)
+        if self.allocation_count == allocation_count:
             self.reuse_count += 1
         return self.storage[:required].view(shape)
 
@@ -350,7 +356,7 @@ class Qwen35Experts(nn.Module):
         ]
         if self.resident_fp8:
             target.copy_(loaded_weight[source_start : source_start + self.local_intermediate_size, :])
-            br, bc = block_size
+            br, _ = block_size
             scale_start = source_start // br
             scale_end = (source_start + self.local_intermediate_size + br - 1) // br
             scale_target = 0 if projection == "gate" else 1
@@ -442,7 +448,7 @@ class Qwen35Experts(nn.Module):
         source_start = self.tp_rank * self.local_intermediate_size
         if self.resident_fp8:
             param.data[expert_id].copy_(loaded_weight[:, source_start : source_start + self.local_intermediate_size])
-            br, bc = block_size
+            _, bc = block_size
             scale_start = source_start // bc
             scale_end = (source_start + self.local_intermediate_size + bc - 1) // bc
             self.down_scale[expert_id].copy_(loaded_scale[:, scale_start:scale_end])
@@ -653,11 +659,16 @@ class Qwen35Experts(nn.Module):
 
         br, bc = self.fp8_block_size
         offset = self.tp_rank * self.local_intermediate_size
+        pool = (
+            self.resident_weight_buffer_pool
+            if not torch.is_grad_enabled()
+            else None
+        )
         if projection == "gate_up":
             shape = (2 * self.local_intermediate_size, self.hidden_size)
             output = (
-                self.resident_weight_buffer_pool.acquire(shape, dtype, self.gate_up_proj.device)
-                if self.resident_weight_buffer_pool is not None
+                pool.acquire(shape, dtype, self.gate_up_proj.device)
+                if pool is not None
                 else torch.empty(shape, dtype=dtype, device=self.gate_up_proj.device)
             )
             for index, weight in enumerate(self.gate_up_proj[expert_id].chunk(2, dim=0)):
@@ -665,8 +676,8 @@ class Qwen35Experts(nn.Module):
             return output
         shape = tuple(self.down_proj[expert_id].shape)
         output = (
-            self.resident_weight_buffer_pool.acquire(shape, dtype, self.down_proj.device)
-            if self.resident_weight_buffer_pool is not None
+            pool.acquire(shape, dtype, self.down_proj.device)
+            if pool is not None
             else torch.empty(shape, dtype=dtype, device=self.down_proj.device)
         )
         return dequantize_fp8_block_weight(self.down_proj[expert_id], self.down_scale[expert_id], (br, bc), output_dtype=dtype, block_offset=(0, offset % bc), out=output)

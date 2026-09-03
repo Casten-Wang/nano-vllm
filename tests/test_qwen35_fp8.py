@@ -28,6 +28,30 @@ Qwen35Experts = MOE_MODULE.Qwen35Experts
 ResidentFP8WeightBufferPool = MOE_MODULE.ResidentFP8WeightBufferPool
 
 
+def test_resident_fp8_workspace_reservation_avoids_first_use_allocation():
+    pool = ResidentFP8WeightBufferPool()
+    pool.reserve(32, torch.bfloat16, torch.device("cpu"))
+    storage_pointer = pool.storage.data_ptr()
+
+    output = pool.acquire((4, 8), torch.bfloat16, torch.device("cpu"))
+
+    assert output.data_ptr() == storage_pointer
+    assert pool.storage_stats() == {
+        "storage_bytes": 32 * torch.tensor([], dtype=torch.bfloat16).element_size(),
+        "allocation_count": 1,
+        "reuse_count": 1,
+    }
+
+
+def test_resident_fp8_workspace_rejects_empty_reservation():
+    with pytest.raises(ValueError, match="capacity must be positive"):
+        ResidentFP8WeightBufferPool().reserve(
+            0,
+            torch.bfloat16,
+            torch.device("cpu"),
+        )
+
+
 def test_block_fp8_dequantization_handles_partial_edge_blocks():
     weight = torch.tensor(
         [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]],
@@ -270,11 +294,12 @@ def test_resident_fp8_experts_keep_quantized_storage_and_match_reference():
     pool = ResidentFP8WeightBufferPool()
     experts.resident_weight_buffer_pool = pool
     hidden = torch.tensor([[0.5, 1.0, -0.5, 2.0]])
-    actual = experts._forward_sorted(
-        hidden,
-        torch.zeros(1, 1, dtype=torch.long),
-        torch.ones(1, 1),
-    )
+    with torch.inference_mode():
+        actual = experts._forward_sorted(
+            hidden,
+            torch.zeros(1, 1, dtype=torch.long),
+            torch.ones(1, 1),
+        )
     expected = torch.nn.functional.silu(hidden) * (6.0 * hidden)
 
     assert experts.gate_up_proj.dtype == torch.float8_e4m3fn
@@ -289,6 +314,44 @@ def test_resident_fp8_experts_keep_quantized_storage_and_match_reference():
         "storage_bytes": 8 * 4 * hidden.element_size(),
         "allocation_count": 1,
         "reuse_count": 1,
+    }
+
+
+def test_resident_fp8_workspace_is_not_reused_by_autograd():
+    with (
+        patch("torch.distributed.get_world_size", return_value=1),
+        patch("torch.distributed.get_rank", return_value=0),
+    ):
+        experts = Qwen35Experts(
+            hidden_size=4,
+            intermediate_size=4,
+            num_experts=1,
+            checkpoint_format="fp8_block",
+            fp8_block_size=(2, 2),
+            resident_fp8=True,
+        )
+    experts.gate_up_proj.data.fill_(1)
+    experts.down_proj.data.fill_(1)
+    experts.gate_up_scale.fill_(1)
+    experts.down_scale.fill_(1)
+    pool = ResidentFP8WeightBufferPool()
+    pool.reserve(32, torch.float32, torch.device("cpu"))
+    experts.resident_weight_buffer_pool = pool
+    hidden = torch.ones(1, 4, requires_grad=True)
+
+    output = experts._forward_sorted(
+        hidden,
+        torch.zeros(1, 1, dtype=torch.long),
+        torch.ones(1, 1),
+    )
+    output.sum().backward()
+
+    assert hidden.grad is not None
+    assert torch.isfinite(hidden.grad).all()
+    assert pool.storage_stats() == {
+        "storage_bytes": 32 * hidden.element_size(),
+        "allocation_count": 1,
+        "reuse_count": 0,
     }
 
 

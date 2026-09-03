@@ -6,18 +6,18 @@ import torch
 from torch import nn
 
 from nanovllm.layers.embed_head import ParallelLMHead, VocabParallelEmbedding
+from nanovllm.models.moe_dispatch import BatchedExpertWeightBufferPool
 from nanovllm.models.qwen35_attention import Qwen35Attention, Qwen35KeyBufferPool
 from nanovllm.models.qwen35_gated_delta import Qwen35GatedDeltaNet
 from nanovllm.models.qwen35_gptq import (
     GPTQExpertWorkspacePool,
     Qwen35GPTQExperts,
 )
-from nanovllm.models.moe_dispatch import BatchedExpertWeightBufferPool
 from nanovllm.models.qwen35_moe import (
-    ResidentFP8WeightBufferPool,
     Qwen35Experts,
     Qwen35RMSNorm,
     Qwen35SparseMoeBlock,
+    ResidentFP8WeightBufferPool,
 )
 
 
@@ -156,6 +156,30 @@ class Qwen35Model(nn.Module):
                 weight_dtype=experts.gate_up_proj.dtype,
                 activation_dtype=experts.gate_up_proj.dtype,
                 device=experts.gate_up_proj.device,
+            )
+
+        resident_experts = [
+            layer.mlp.experts
+            for layer in self.layers
+            if isinstance(layer.mlp.experts, Qwen35Experts)
+            and bool(getattr(layer.mlp.experts, "resident_fp8", False))
+        ]
+        if resident_experts:
+            devices = {
+                experts.gate_up_proj.device for experts in resident_experts
+            } | {experts.down_proj.device for experts in resident_experts}
+            if len(devices) != 1:
+                raise ValueError(
+                    "resident FP8 experts sharing a workspace must use one device"
+                )
+            self.resident_fp8_weight_buffer_pool.reserve(
+                elements=max(
+                    projection[0].numel()
+                    for experts in resident_experts
+                    for projection in (experts.gate_up_proj, experts.down_proj)
+                ),
+                dtype=self.embed_tokens.weight.dtype,
+                device=next(iter(devices)),
             )
 
         gptq_block = next(

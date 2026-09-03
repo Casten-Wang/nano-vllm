@@ -1,9 +1,10 @@
-from importlib.util import module_from_spec, spec_from_file_location
-from pathlib import Path
 import sys
 import types
+from importlib.util import module_from_spec, spec_from_file_location
+from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 import torch
 from torch import nn
 
@@ -220,6 +221,55 @@ def test_text_model_reserves_batched_moe_buffers_for_max_decode_chunk():
             "device": torch.device("cpu"),
         }
     ]
+
+
+def test_text_model_reserves_resident_fp8_workspace_before_kv_sizing():
+    model = QWEN35.Qwen3_5MoeForConditionalGeneration(tiny_outer_config())
+    for layer in model.model.layers:
+        layer.mlp.experts.decode_backend = "sorted"
+        layer.mlp.experts.resident_fp8 = False
+    experts = model.model.layers[0].mlp.experts
+    experts.resident_fp8 = True
+    experts.gate_up_proj = torch.empty(4, 6, 4, dtype=torch.float8_e4m3fn)
+    experts.down_proj = torch.empty(4, 4, 3, dtype=torch.float8_e4m3fn)
+    larger_experts = model.model.layers[1].mlp.experts
+    larger_experts.resident_fp8 = True
+    larger_experts.gate_up_proj = torch.empty(
+        4, 8, 4, dtype=torch.float8_e4m3fn
+    )
+    larger_experts.down_proj = torch.empty(4, 4, 3, dtype=torch.float8_e4m3fn)
+
+    model.model.reserve_runtime_buffers(max_decode_tokens=8)
+
+    assert model.model.resident_fp8_weight_buffer_pool.reservations == [
+        {
+            "elements": 8 * 4,
+            "dtype": torch.float32,
+            "device": torch.device("cpu"),
+        }
+    ]
+
+
+def test_text_model_rejects_cross_device_resident_fp8_workspace():
+    model = QWEN35.Qwen3_5MoeForConditionalGeneration(tiny_outer_config())
+    for layer in model.model.layers:
+        layer.mlp.experts.decode_backend = "sorted"
+        layer.mlp.experts.resident_fp8 = False
+    first = model.model.layers[0].mlp.experts
+    first.resident_fp8 = True
+    first.gate_up_proj = torch.empty(4, 6, 4, dtype=torch.float8_e4m3fn)
+    first.down_proj = torch.empty(4, 4, 3, dtype=torch.float8_e4m3fn)
+    second = model.model.layers[1].mlp.experts
+    second.resident_fp8 = True
+    second.gate_up_proj = torch.empty(
+        4, 6, 4, dtype=torch.float8_e4m3fn, device="meta"
+    )
+    second.down_proj = torch.empty(
+        4, 4, 3, dtype=torch.float8_e4m3fn, device="meta"
+    )
+
+    with pytest.raises(ValueError, match="must use one device"):
+        model.model.reserve_runtime_buffers(max_decode_tokens=8)
 
 
 def test_text_model_shares_and_reserves_one_gptq_workspace():

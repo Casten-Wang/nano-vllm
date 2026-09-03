@@ -6,7 +6,6 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-
 ROOT = Path(__file__).resolve().parents[1]
 MODULE_PATH = ROOT / "nanovllm" / "engine" / "model_runner.py"
 CONTEXT_MODULE_PATH = ROOT / "nanovllm" / "utils" / "context.py"
@@ -949,12 +948,20 @@ class HybridStateContextTest(unittest.TestCase):
                 "max_rows": 8,
             }
         )
+        resident_fp8_weight_pool = SimpleNamespace(
+            storage_stats=lambda: {
+                "storage_bytes": 44,
+                "allocation_count": 1,
+                "reuse_count": 21,
+            }
+        )
         runner.model = SimpleNamespace(
             modules=lambda: [
                 SimpleNamespace(
                     int8_partitioned_decode_pool=pool,
                     int8_dequant_pool=dequant_pool,
                     decode_weight_buffer_pool=moe_weight_pool,
+                    resident_weight_buffer_pool=resident_fp8_weight_pool,
                     gptq_workspace_pool=gptq_workspace_pool,
                     key_buffer_pool=key_buffer_pool,
                 ),
@@ -962,6 +969,7 @@ class HybridStateContextTest(unittest.TestCase):
                     int8_partitioned_decode_pool=pool,
                     int8_dequant_pool=dequant_pool,
                     decode_weight_buffer_pool=moe_weight_pool,
+                    resident_weight_buffer_pool=resident_fp8_weight_pool,
                     gptq_workspace_pool=gptq_workspace_pool,
                     key_buffer_pool=key_buffer_pool,
                 ),
@@ -969,6 +977,7 @@ class HybridStateContextTest(unittest.TestCase):
                     int8_partitioned_decode_pool=None,
                     int8_dequant_pool=None,
                     decode_weight_buffer_pool=None,
+                    resident_weight_buffer_pool=None,
                     gptq_workspace_pool=None,
                     key_buffer_pool=None,
                     dispatch_stats=lambda: {
@@ -1039,6 +1048,12 @@ class HybridStateContextTest(unittest.TestCase):
         self.assertEqual(stats["moe_decode_weight_pool_count"], 1)
         self.assertEqual(stats["moe_decode_weight_buffer_bytes"], 16)
         self.assertEqual(stats["moe_decode_workspace_bytes"], 12)
+        self.assertEqual(stats["resident_fp8_weight_pool_count"], 1)
+        self.assertEqual(stats["resident_fp8_dequant_workspace_bytes"], 44)
+        self.assertEqual(
+            stats["resident_fp8_dequant_workspace_allocation_count"], 1
+        )
+        self.assertEqual(stats["resident_fp8_dequant_workspace_reuse_count"], 21)
         self.assertEqual(stats["gptq_expert_workspace_pool_count"], 1)
         self.assertEqual(stats["gptq_expert_workspace_bytes"], 36)
         self.assertEqual(stats["gptq_expert_workspace_allocation_count"], 1)
@@ -1086,7 +1101,7 @@ class HybridStateContextTest(unittest.TestCase):
         self.assertEqual(stats["tp_top_k_reduction_count"], 5)
         self.assertEqual(stats["tp_top_k_candidate_bytes"], 320)
         self.assertEqual(stats["tp_top_k_full_gather_avoided_bytes"], 8192)
-        self.assertEqual(stats["total_bytes_local_rank"], 192)
+        self.assertEqual(stats["total_bytes_local_rank"], 236)
 
     def test_runtime_buffers_are_reserved_before_capacity_planning(self):
         runner = object.__new__(ModelRunner)
