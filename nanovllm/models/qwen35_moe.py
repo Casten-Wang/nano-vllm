@@ -203,6 +203,23 @@ class Qwen35Experts(nn.Module):
         get_shape = getattr(loaded_weight, "get_shape", None)
         return tuple(get_shape() if get_shape is not None else loaded_weight.shape)
 
+    def resident_fp8_storage_stats(self) -> dict[str, int]:
+        if not self.resident_fp8:
+            return {"weight_bytes": 0, "scale_bytes": 0, "total_bytes": 0}
+        weight_bytes = sum(
+            parameter.numel() * parameter.element_size()
+            for parameter in (self.gate_up_proj, self.down_proj)
+        )
+        scale_bytes = sum(
+            scale.numel() * scale.element_size()
+            for scale in (self.gate_up_scale, self.down_scale)
+        )
+        return {
+            "weight_bytes": weight_bytes,
+            "scale_bytes": scale_bytes,
+            "total_bytes": weight_bytes + scale_bytes,
+        }
+
     def _load_gate_up(
         self,
         param: nn.Parameter,

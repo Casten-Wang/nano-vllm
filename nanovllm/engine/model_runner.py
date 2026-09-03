@@ -387,6 +387,7 @@ class ModelRunner:
         dequant_pools = {}
         moe_weight_pools = {}
         resident_fp8_weight_pools = {}
+        resident_fp8_storage_stats = []
         qwen35_key_pools = {}
         tp_logits_stats = []
         for module in self.model.modules():
@@ -406,6 +407,11 @@ class ModelRunner:
             resident_fp8_pool = getattr(module, "resident_weight_buffer_pool", None)
             if resident_fp8_pool is not None:
                 resident_fp8_weight_pools[id(resident_fp8_pool)] = resident_fp8_pool
+            resident_storage = getattr(module, "resident_fp8_storage_stats", None)
+            if resident_storage is not None:
+                item = resident_storage()
+                if item["total_bytes"]:
+                    resident_fp8_storage_stats.append(item)
             qwen35_key_pool = getattr(module, "key_buffer_pool", None)
             if qwen35_key_pool is not None:
                 qwen35_key_pools[id(qwen35_key_pool)] = qwen35_key_pool
@@ -463,6 +469,13 @@ class ModelRunner:
             "resident_fp8_dequant_workspace_reuse_count": sum(
                 item["reuse_count"] for item in resident_fp8_weight_stats
             ),
+            "resident_fp8_expert_layer_count": len(resident_fp8_storage_stats),
+            "resident_fp8_expert_weight_bytes": sum(
+                item["weight_bytes"] for item in resident_fp8_storage_stats
+            ),
+            "resident_fp8_expert_scale_bytes": sum(
+                item["scale_bytes"] for item in resident_fp8_storage_stats
+            ),
             "qwen35_key_buffer_pool_count": len(qwen35_key_stats),
             "qwen35_key_buffer_bytes": qwen35_key_total,
             "qwen35_key_buffer_allocation_count": sum(
@@ -511,6 +524,7 @@ class ModelRunner:
                 + moe_weight_total
                 + moe_workspace_total
                 + resident_fp8_workspace_total
+                + sum(item["scale_bytes"] for item in resident_fp8_storage_stats)
                 + qwen35_key_total
                 + sampler_total
                 + tp_logits_total

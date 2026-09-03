@@ -280,6 +280,11 @@ def test_resident_fp8_experts_keep_quantized_storage_and_match_reference():
     assert experts.gate_up_proj.dtype == torch.float8_e4m3fn
     assert experts.down_proj.dtype == torch.float8_e4m3fn
     torch.testing.assert_close(actual, expected)
+    assert experts.resident_fp8_storage_stats() == {
+        "weight_bytes": (8 * 4 + 4 * 4),
+        "scale_bytes": (1 * 2 * 2 * 2 + 1 * 2 * 2) * 4,
+        "total_bytes": (8 * 4 + 4 * 4) + (1 * 2 * 2 * 2 + 1 * 2 * 2) * 4,
+    }
     assert pool.storage_stats() == {
         "storage_bytes": 8 * 4 * hidden.element_size(),
         "allocation_count": 1,
