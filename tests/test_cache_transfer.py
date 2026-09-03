@@ -15,6 +15,7 @@ from nanovllm.engine.cache_transfer import (
 )
 from nanovllm.engine.model_runner import (
     ModelRunner,
+    build_qwen35_cache_transfer_plan_from_spec,
     plan_qwen35_cache_transfer_capacity,
 )
 from nanovllm.engine.sequence import SequenceStatus
@@ -126,7 +127,18 @@ def test_model_runner_exposes_serializable_heterogeneous_transfer_preflight():
     )
 
     report = runner.estimate_heterogeneous_cache_transfer_for_blocks(3, 8)
+    plan = build_qwen35_cache_transfer_plan_from_spec(
+        model_spec,
+        src_tp_size=4,
+        dst_tp_size=8,
+        num_blocks=3,
+        block_size=256,
+        kv_dtype=torch.int8,
+        recurrent_dtype=torch.bfloat16,
+        convolution_dtype=torch.bfloat16,
+    )
 
+    assert report == plan.profile.to_dict()
     assert report["source_tp_size"] == 4
     assert report["destination_tp_size"] == 8
     assert report["wire_bytes"] == sum(report["source_egress_bytes"])

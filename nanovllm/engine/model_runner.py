@@ -81,8 +81,33 @@ def plan_qwen35_cache_transfer_capacity(
 ):
     """Preflight a Qwen3.6 hybrid-cache handoff from runtime metadata."""
 
+    return build_qwen35_cache_transfer_plan_from_spec(
+        model_spec,
+        src_tp_size=src_tp_size,
+        dst_tp_size=dst_tp_size,
+        num_blocks=num_blocks,
+        block_size=block_size,
+        kv_dtype=kv_dtype,
+        recurrent_dtype=recurrent_dtype,
+        convolution_dtype=convolution_dtype,
+    ).profile
+
+
+def build_qwen35_cache_transfer_plan_from_spec(
+    model_spec,
+    *,
+    src_tp_size: int,
+    dst_tp_size: int,
+    num_blocks: int,
+    block_size: int,
+    kv_dtype: torch.dtype,
+    recurrent_dtype: torch.dtype,
+    convolution_dtype: torch.dtype,
+):
+    """Build executable Qwen3.6 tensor routes from runtime metadata."""
+
     from nanovllm.engine.tp_cache_reshard import (
-        profile_qwen35_cache_transfer_layout,
+        build_qwen35_cache_transfer_plan,
     )
 
     if model_spec is None or not model_spec.is_hybrid:
@@ -118,7 +143,7 @@ def plan_qwen35_cache_transfer_capacity(
     value_heads = int(config.linear_num_value_heads)
     value_channels = value_heads * value_head_dim
     tokens = num_blocks * block_size
-    return profile_qwen35_cache_transfer_layout(
+    return build_qwen35_cache_transfer_plan(
         src_tp_size=src_tp_size,
         dst_tp_size=dst_tp_size,
         total_kv_heads=int(config.num_key_value_heads),
@@ -1573,6 +1598,19 @@ class ModelRunner:
     ) -> dict:
         """Return the global TP handoff plan before allocating transfer buffers."""
 
+        plan = self.build_heterogeneous_cache_transfer_plan_for_blocks(
+            num_blocks,
+            destination_tp_size,
+        )
+        return plan.profile.to_dict()
+
+    def build_heterogeneous_cache_transfer_plan_for_blocks(
+        self,
+        num_blocks: int,
+        destination_tp_size: int,
+    ):
+        """Build tensor routes shared by preflight and peer data movement."""
+
         model_spec = self.config.model_spec
         model_config = self.config.model_config
         if model_config is None:
@@ -1587,7 +1625,7 @@ class ModelRunner:
             if self.config.recurrent_state_dtype == "float32"
             else model_config.dtype
         )
-        profile = plan_qwen35_cache_transfer_capacity(
+        return build_qwen35_cache_transfer_plan_from_spec(
             model_spec,
             src_tp_size=self.world_size,
             dst_tp_size=destination_tp_size,
@@ -1597,7 +1635,40 @@ class ModelRunner:
             recurrent_dtype=recurrent_dtype,
             convolution_dtype=model_config.dtype,
         )
-        return profile.to_dict()
+
+    def import_heterogeneous_sequence_cache(
+        self,
+        seq: Sequence,
+        fragments,
+        plan,
+        *,
+        transfer_id: str,
+    ) -> dict:
+        """Atomically assemble peer fragments before installing rank state."""
+
+        from nanovllm.engine.heterogeneous_cache_transfer import (
+            assemble_qwen35_peer_cache_fragments,
+        )
+
+        payload = assemble_qwen35_peer_cache_fragments(fragments, plan)
+        if payload.transfer_id != transfer_id:
+            raise ValueError("heterogeneous cache transfer id does not match")
+        if (
+            payload.tensor_parallel_rank != self.rank
+            or payload.tensor_parallel_size != self.world_size
+        ):
+            raise ValueError("heterogeneous cache destination rank does not match")
+        self.import_sequence_cache(
+            seq,
+            payload,
+            transfer_id=transfer_id,
+        )
+        return {
+            "rank": self.rank,
+            "cached_tokens": payload.cached_tokens,
+            "received_bytes": payload.nbytes,
+            "peer_count": len(fragments),
+        }
 
     def import_sequence_cache(
         self,

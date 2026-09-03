@@ -1,5 +1,7 @@
 import socket
 from threading import Thread
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 import torch
@@ -17,6 +19,7 @@ from nanovllm.engine.cache_transfer_wire import (
     receive_rank_cache_transfer,
     send_peer_cache_fragment,
 )
+from nanovllm.engine.model_runner import ModelRunner
 from nanovllm.engine.tp_cache_reshard import (
     apply_tp_transfer_plan,
     build_qwen35_cache_transfer_plan,
@@ -357,3 +360,55 @@ def test_destination_assembly_rejects_missing_source_peer():
 
     with pytest.raises(ValueError, match="peer bytes"):
         assemble_qwen35_peer_cache_fragments(fragments[:1], plan)
+
+
+def test_model_runner_installs_assembled_destination_atomically():
+    src_tp = 8
+    dst_tp = 4
+    plan = build_qwen35_cache_transfer_plan(
+        src_tp_size=src_tp,
+        dst_tp_size=dst_tp,
+        total_kv_heads=2,
+        kv_bytes_per_head=2 * 2 * 2 * 4 * 2 * 4,
+        kv_scale_bytes_per_head=0,
+        recurrent_heads=32,
+        recurrent_bytes_per_head=2 * 2 * 4,
+        convolution_group_widths=(16, 16, 32),
+        convolution_bytes_per_channel=3 * 2,
+    )
+    fragments = tuple(
+        fragment
+        for rank in range(src_tp)
+        for fragment in build_qwen35_peer_cache_fragments(
+            make_payload(rank, src_tp, with_scales=False),
+            plan,
+        )
+        if fragment.dst_rank == 0
+    )
+    runner = object.__new__(ModelRunner)
+    runner.rank = 0
+    runner.world_size = dst_tp
+    runner.import_sequence_cache = Mock()
+    seq = SimpleNamespace()
+
+    result = runner.import_heterogeneous_sequence_cache(
+        seq,
+        fragments,
+        plan,
+        transfer_id="request/attempt-1",
+    )
+
+    assert result == {
+        "rank": 0,
+        "cached_tokens": 7,
+        "received_bytes": plan.profile.destination_bytes[0],
+        "peer_count": 2,
+    }
+    installed = runner.import_sequence_cache.call_args.args[1]
+    assert installed.tensor_parallel_rank == 0
+    assert installed.tensor_parallel_size == dst_tp
+    runner.import_sequence_cache.assert_called_once_with(
+        seq,
+        installed,
+        transfer_id="request/attempt-1",
+    )
