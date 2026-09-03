@@ -1951,6 +1951,7 @@ def summarize_pd_export(
     profile = result.get("profile", {})
     reference = result.get("reference_gpu_gather_then_host_copy", {})
     candidate = result.get("candidate_direct_host_staging", {})
+    candidate_layout = candidate.get("host_layout", {})
     repeats = profile.get("repeats")
 
     def measurements_valid(item: dict) -> bool:
@@ -1990,6 +1991,11 @@ def summarize_pd_export(
         is True
         and measurements_valid(reference)
         and measurements_valid(candidate)
+        and isinstance(candidate_layout.get("tensor_count"), int)
+        and candidate_layout["tensor_count"] > 1
+        and candidate_layout.get("storage_count") == 1
+        and candidate_layout.get("all_cpu") is True
+        and candidate_layout.get("all_pinned") is True
         and candidate["peak_extra_device_bytes_max"]
         < reference["peak_extra_device_bytes_max"]
     )
@@ -1998,6 +2004,7 @@ def summarize_pd_export(
         "profile": profile,
         "reference": reference,
         "candidate": candidate,
+        "candidate_host_layout": candidate_layout,
         "avoided_peak_device_bytes": (
             reference.get("peak_extra_device_bytes_max", 0)
             - candidate.get("peak_extra_device_bytes_max", 0)

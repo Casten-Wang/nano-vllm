@@ -4,7 +4,12 @@ from pathlib import Path
 import pytest
 import torch
 
-from scripts.benchmark_cache_export import _profile, make_source
+from scripts.benchmark_cache_export import (
+    _export,
+    _payload_host_layout,
+    _profile,
+    make_source,
+)
 
 
 def write_preflight(path: Path, *, total_delta: int = 0) -> None:
@@ -57,6 +62,18 @@ def test_profile_builds_exact_qwen35_cpu_source(tmp_path):
     assert len(recurrent) == len(convolution) == 30
     assert sum(t.numel() * t.element_size() for t in recurrent) == profile["components"]["recurrent"]
     assert sum(t.numel() * t.element_size() for t in convolution) == profile["components"]["convolution"]
+
+    payload = _export(
+        (kv, scale, recurrent, convolution),
+        profile,
+        direct_host=True,
+    )
+    assert _payload_host_layout(payload) == {
+        "tensor_count": 61,
+        "storage_count": 1,
+        "all_cpu": True,
+        "all_pinned": False,
+    }
 
 
 def test_profile_builds_exact_int8_scale_and_model_state_source(tmp_path):

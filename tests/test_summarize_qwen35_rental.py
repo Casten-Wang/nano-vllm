@@ -1700,6 +1700,12 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
                     "latency_ms_p50": 2.5,
                     "peak_extra_device_bytes_samples": [1024] * 10,
                     "peak_extra_device_bytes_max": 1024,
+                    "host_layout": {
+                        "tensor_count": 62 if kv_dtype == "int8" else 61,
+                        "storage_count": 1,
+                        "all_cpu": True,
+                        "all_pinned": True,
+                    },
                 },
                 "limitations": ["synthetic export benchmark"],
             },
@@ -1738,6 +1744,9 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     assert report["evidence"]["pd_transfer_baseline_valid"]
     assert report["evidence"]["pd_export_memory_evidence"]
     assert report["pd_export"]["by_tp"]["tp4"]["int8-model"]["valid"]
+    assert report["pd_export"]["by_tp"]["tp4"]["int8-model"][
+        "candidate_host_layout"
+    ]["storage_count"] == 1
     assert report["pd_transfer"]["by_tp"]["tp4"]["int8-model"]["valid"]
     install = report["pd_transfer"]["by_tp"]["tp4"]["int8-model"][
         "cuda_install"

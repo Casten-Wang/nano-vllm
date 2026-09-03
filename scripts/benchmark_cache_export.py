@@ -153,6 +153,23 @@ def _host_payload(payload: RankCacheTransfer) -> RankCacheTransfer:
     )
 
 
+def _payload_host_layout(payload: RankCacheTransfer) -> dict[str, int | bool]:
+    tensors = (
+        payload.kv_blocks,
+        *((payload.kv_scales,) if payload.kv_scales is not None else ()),
+        *payload.recurrent_states,
+        *payload.convolution_states,
+    )
+    return {
+        "tensor_count": len(tensors),
+        "storage_count": len(
+            {tensor.untyped_storage().data_ptr() for tensor in tensors}
+        ),
+        "all_cpu": all(tensor.device.type == "cpu" for tensor in tensors),
+        "all_pinned": all(tensor.is_pinned() for tensor in tensors),
+    }
+
+
 def _export(
     source,
     profile: dict,
@@ -254,6 +271,8 @@ def main() -> None:
     reference_payload = _export(source, profile, direct_host=False)
     candidate_payload = _export(source, profile, direct_host=True)
     _assert_payload_equal(reference_payload, candidate_payload)
+    reference_layout = _payload_host_layout(reference_payload)
+    candidate_layout = _payload_host_layout(candidate_payload)
     del reference_payload, candidate_payload
     reference = _measure(
         source, profile, direct_host=False, warmup=args.warmup, repeats=args.repeats
@@ -261,6 +280,8 @@ def main() -> None:
     candidate = _measure(
         source, profile, direct_host=True, warmup=args.warmup, repeats=args.repeats
     )
+    reference["host_layout"] = reference_layout
+    candidate["host_layout"] = candidate_layout
     result = {
         "schema_version": 1,
         "scope": "single-rank Qwen3.5 GPU-to-host cache export",
