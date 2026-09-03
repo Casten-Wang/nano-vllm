@@ -778,6 +778,39 @@ class LLMEngine:
             except Exception as exc:
                 errors[transfer_id] = str(exc)
 
+    def _poll_remote_prefill_reservations(self) -> list[Sequence]:
+        """Expire unstarted destinations and release engine-owned capacity."""
+
+        active_transfer_ids = frozenset(
+            getattr(self, "_remote_prefill_receive_tokens", {})
+        )
+        reserved = {
+            id(seq): transfer_id
+            for transfer_id, (seq, _session) in getattr(
+                self.scheduler,
+                "remote_prefills",
+                {},
+            ).items()
+            if transfer_id not in active_transfer_ids
+        }
+        fallback = self.scheduler.poll_remote_prefills(
+            now=perf_counter(),
+            exclude_transfer_ids=active_transfer_ids,
+        )
+        for seq in fallback:
+            transfer_id = reserved.get(id(seq))
+            if transfer_id is None:
+                continue
+            self._remote_prefill_receive_reserved_staged_bytes.pop(
+                transfer_id,
+                None,
+            )
+            self._remote_prefill_receive_expected_bytes.pop(
+                transfer_id,
+                None,
+            )
+        return fallback
+
     def send_remote_prefill(
         self,
         seq_id: int,
@@ -1196,7 +1229,7 @@ class LLMEngine:
     def step(self):
         self._poll_remote_prefill_receives()
         self._poll_remote_prefill_sends()
-        self.scheduler.poll_remote_prefills(now=perf_counter())
+        self._poll_remote_prefill_reservations()
         schedule_result = self.scheduler.schedule()
         if isinstance(schedule_result, ScheduleResult):
             seqs = schedule_result.seqs

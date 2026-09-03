@@ -234,8 +234,67 @@ def test_idle_remote_prefill_step_polls_without_running_model():
 
     assert outputs == []
     assert (tokens, prefill_tokens, decode_tokens) == (0, 0, 0)
-    engine.scheduler.poll_remote_prefills.assert_called_once()
+    engine.scheduler.poll_remote_prefills.assert_called_once_with(
+        now=pytest.approx(engine.scheduler.poll_remote_prefills.call_args.kwargs["now"]),
+        exclude_transfer_ids=frozenset(),
+    )
     engine.model_runner.call.assert_not_called()
+
+
+def test_unstarted_receive_timeout_releases_engine_staging_reservation():
+    engine = make_engine()
+    engine.config.max_remote_prefill_staging_bytes = 150
+    capacity_before = engine.remote_prefill_capacity_snapshot()
+    seq_id = engine.add_remote_prefill_request(
+        [1, 2, 3, 4],
+        SamplingParams(max_tokens=4),
+        transfer_id="request/attempt-1",
+        timeout_s=10.0,
+    )
+    _, session = engine.scheduler.remote_prefills["request/attempt-1"]
+    session.deadline = 0.0
+
+    fallback = engine._poll_remote_prefill_reservations()
+
+    assert [seq.seq_id for seq in fallback] == [seq_id]
+    assert session.failure_reason == "cache transfer timed out"
+    assert not engine.scheduler.remote_prefills
+    assert not engine._remote_prefill_receive_reserved_staged_bytes
+    assert not engine._remote_prefill_receive_expected_bytes
+    capacity_after = engine.remote_prefill_capacity_snapshot()
+    assert capacity_after["transfer_slots_used"] == 0
+    assert capacity_after["transfer_slots_free"] == capacity_before[
+        "transfer_slots_free"
+    ]
+    assert capacity_after["staging_bytes_reserved"] == 0
+    assert capacity_after["staging_bytes_used"] == 0
+    assert capacity_after["staging_bytes_free"] == capacity_before[
+        "staging_bytes_free"
+    ]
+    assert capacity_after["waiting_requests"] == 1
+
+
+def test_reservation_poll_leaves_active_receive_owned_by_engine():
+    engine = make_engine()
+    engine.add_remote_prefill_request(
+        [1, 2, 3, 4],
+        SamplingParams(max_tokens=4),
+        transfer_id="request/attempt-1",
+        timeout_s=10.0,
+    )
+    engine.start_remote_prefill_receive(
+        "request/attempt-1",
+        9,
+        [("127.0.0.1", 20001)],
+    )
+    _, session = engine.scheduler.remote_prefills["request/attempt-1"]
+    session.deadline = 0.0
+
+    assert engine._poll_remote_prefill_reservations() == []
+
+    assert "request/attempt-1" in engine.scheduler.remote_prefills
+    assert "request/attempt-1" in engine._remote_prefill_receive_tokens
+    assert engine._remote_prefill_receive_staged_bytes["request/attempt-1"] == 100
 
 
 def test_step_polls_active_async_receive_then_continues_scheduling():

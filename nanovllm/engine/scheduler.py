@@ -359,9 +359,18 @@ class Scheduler:
             session.fail(0, reason, now=now)
         return self._release_remote_prefill(transfer_id, fallback=False)
 
-    def poll_remote_prefills(self, *, now: float) -> list[Sequence]:
+    def poll_remote_prefills(
+        self,
+        *,
+        now: float,
+        exclude_transfer_ids: frozenset[str] = frozenset(),
+    ) -> list[Sequence]:
+        """Expire reservations not owned by an active engine transfer."""
+
         fallback = []
         for transfer_id, (_, session) in tuple(self.remote_prefills.items()):
+            if transfer_id in exclude_transfer_ids:
+                continue
             session.poll(now=now)
             if session.fallback_required:
                 fallback.append(self._rollback_remote_prefill(transfer_id))
