@@ -13,8 +13,12 @@ from nanovllm.engine.cache_transfer import (
     export_rank_cache,
     import_rank_cache,
 )
-from nanovllm.engine.model_runner import ModelRunner
+from nanovllm.engine.model_runner import (
+    ModelRunner,
+    plan_qwen35_cache_transfer_capacity,
+)
 from nanovllm.engine.sequence import SequenceStatus
+from nanovllm.models.cache_plan import plan_cache_memory
 
 
 def make_float_cache(fill: bool = True):
@@ -36,6 +40,100 @@ def make_states(fill: bool = True):
         tuple(torch.zeros_like(tensor) for tensor in recurrent),
         tuple(torch.zeros_like(tensor) for tensor in convolution),
     )
+
+
+def make_qwen36_model_spec():
+    config = SimpleNamespace(
+        num_attention_heads=16,
+        num_key_value_heads=2,
+        head_dim=256,
+        hidden_size=2048,
+        linear_num_key_heads=16,
+        linear_num_value_heads=32,
+        linear_key_head_dim=128,
+        linear_value_head_dim=128,
+        linear_conv_kernel_dim=4,
+        dtype=torch.bfloat16,
+    )
+    return SimpleNamespace(
+        is_hybrid=True,
+        text_config=config,
+        num_kv_cache_layers=10,
+        linear_attention_layers=tuple(range(30)),
+    )
+
+
+@pytest.mark.parametrize(
+    "tp_size,kv_dtype,recurrent_dtype",
+    [
+        (4, torch.bfloat16, torch.float32),
+        (8, torch.bfloat16, torch.float32),
+        (4, torch.int8, torch.bfloat16),
+    ],
+)
+def test_runtime_transfer_preflight_matches_same_tp_cache_plan(
+    tp_size,
+    kv_dtype,
+    recurrent_dtype,
+):
+    model_spec = make_qwen36_model_spec()
+    num_blocks = 3
+    block_size = 256
+    profile = plan_qwen35_cache_transfer_capacity(
+        model_spec,
+        src_tp_size=tp_size,
+        dst_tp_size=tp_size,
+        num_blocks=num_blocks,
+        block_size=block_size,
+        kv_dtype=kv_dtype,
+        recurrent_dtype=recurrent_dtype,
+        convolution_dtype=torch.bfloat16,
+    )
+    existing = plan_cache_memory(
+        model_spec,
+        tp_size,
+        kv_dtype_bytes=kv_dtype.itemsize,
+        recurrent_dtype_bytes=recurrent_dtype.itemsize,
+        convolution_dtype_bytes=2,
+    )
+    expected_rank_bytes = (
+        existing.kv_bytes_per_token * num_blocks * block_size
+        + (
+            existing.int8_scale_bytes_per_token * num_blocks * block_size
+            if kv_dtype == torch.int8
+            else 0
+        )
+        + existing.recurrent_bytes_per_sequence
+        + existing.convolution_bytes_per_sequence
+    )
+
+    assert profile.source_staging_bytes == (expected_rank_bytes,) * tp_size
+    assert profile.source_bytes == profile.source_staging_bytes
+    assert profile.destination_bytes == profile.source_staging_bytes
+    assert profile.wire_bytes == expected_rank_bytes * tp_size
+
+
+def test_model_runner_exposes_serializable_heterogeneous_transfer_preflight():
+    model_spec = make_qwen36_model_spec()
+    runner = object.__new__(ModelRunner)
+    runner.world_size = 4
+    runner.block_size = 256
+    runner.config = SimpleNamespace(
+        model_spec=model_spec,
+        model_config=model_spec.text_config,
+        kv_cache_dtype="int8",
+        recurrent_state_dtype="model",
+    )
+
+    report = runner.estimate_heterogeneous_cache_transfer_for_blocks(3, 8)
+
+    assert report["source_tp_size"] == 4
+    assert report["destination_tp_size"] == 8
+    assert report["wire_bytes"] == sum(report["source_egress_bytes"])
+    assert report["wire_bytes"] == sum(report["destination_bytes"])
+    assert sum(report["source_staging_bytes"]) < report["wire_bytes"]
+    assert report["source_peer_counts"] == (2,) * 4
+    assert report["destination_peer_counts"] == (1,) * 8
 
 
 def test_float_rank_cache_round_trip_uses_logical_block_order():

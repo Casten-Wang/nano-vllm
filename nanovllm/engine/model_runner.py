@@ -68,6 +68,92 @@ def dtype_nbytes(dtype: torch.dtype) -> int:
     return torch.empty((), dtype=dtype, device="cpu").element_size()
 
 
+def plan_qwen35_cache_transfer_capacity(
+    model_spec,
+    *,
+    src_tp_size: int,
+    dst_tp_size: int,
+    num_blocks: int,
+    block_size: int,
+    kv_dtype: torch.dtype,
+    recurrent_dtype: torch.dtype,
+    convolution_dtype: torch.dtype,
+):
+    """Preflight a Qwen3.6 hybrid-cache handoff from runtime metadata."""
+
+    from nanovllm.engine.tp_cache_reshard import (
+        profile_qwen35_cache_transfer_layout,
+    )
+
+    if model_spec is None or not model_spec.is_hybrid:
+        raise ValueError("heterogeneous TP cache transfer requires a hybrid model")
+    for name, value in (
+        ("src_tp_size", src_tp_size),
+        ("dst_tp_size", dst_tp_size),
+        ("num_blocks", num_blocks),
+        ("block_size", block_size),
+    ):
+        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+            raise ValueError(f"{name} must be a positive integer")
+
+    config = model_spec.text_config
+    num_attention_heads = int(config.num_attention_heads)
+    if (
+        num_attention_heads % src_tp_size
+        or num_attention_heads % dst_tp_size
+    ):
+        raise ValueError("attention heads must divide both TP sizes")
+    num_kv_layers = model_spec.num_kv_cache_layers
+    num_linear_layers = len(model_spec.linear_attention_layers)
+    head_dim = int(
+        getattr(
+            config,
+            "head_dim",
+            int(config.hidden_size) // num_attention_heads,
+        )
+    )
+    key_head_dim = int(config.linear_key_head_dim)
+    value_head_dim = int(config.linear_value_head_dim)
+    key_channels = int(config.linear_num_key_heads) * key_head_dim
+    value_heads = int(config.linear_num_value_heads)
+    value_channels = value_heads * value_head_dim
+    tokens = num_blocks * block_size
+    return profile_qwen35_cache_transfer_layout(
+        src_tp_size=src_tp_size,
+        dst_tp_size=dst_tp_size,
+        total_kv_heads=int(config.num_key_value_heads),
+        kv_bytes_per_head=(
+            2
+            * num_kv_layers
+            * tokens
+            * head_dim
+            * dtype_nbytes(kv_dtype)
+        ),
+        kv_scale_bytes_per_head=(
+            2 * num_kv_layers * tokens * dtype_nbytes(torch.float16)
+            if kv_dtype == torch.int8
+            else 0
+        ),
+        recurrent_heads=value_heads,
+        recurrent_bytes_per_head=(
+            num_linear_layers
+            * key_head_dim
+            * value_head_dim
+            * dtype_nbytes(recurrent_dtype)
+        ),
+        convolution_group_widths=(
+            key_channels,
+            key_channels,
+            value_channels,
+        ),
+        convolution_bytes_per_channel=(
+            num_linear_layers
+            * int(config.linear_conv_kernel_dim)
+            * dtype_nbytes(convolution_dtype)
+        ),
+    )
+
+
 def validate_initial_cache_capacity(
     *,
     free_bytes: int,
@@ -1479,6 +1565,39 @@ class ModelRunner:
             convolution_states=convolution,
         )
         return {"rank": self.rank, "staged_bytes": staged_bytes}
+
+    def estimate_heterogeneous_cache_transfer_for_blocks(
+        self,
+        num_blocks: int,
+        destination_tp_size: int,
+    ) -> dict:
+        """Return the global TP handoff plan before allocating transfer buffers."""
+
+        model_spec = self.config.model_spec
+        model_config = self.config.model_config
+        if model_config is None:
+            raise RuntimeError("model configuration was not initialized")
+        kv_dtype = (
+            torch.int8
+            if self.config.kv_cache_dtype == "int8"
+            else model_config.dtype
+        )
+        recurrent_dtype = (
+            torch.float32
+            if self.config.recurrent_state_dtype == "float32"
+            else model_config.dtype
+        )
+        profile = plan_qwen35_cache_transfer_capacity(
+            model_spec,
+            src_tp_size=self.world_size,
+            dst_tp_size=destination_tp_size,
+            num_blocks=num_blocks,
+            block_size=self.block_size,
+            kv_dtype=kv_dtype,
+            recurrent_dtype=recurrent_dtype,
+            convolution_dtype=model_config.dtype,
+        )
+        return profile.to_dict()
 
     def import_sequence_cache(
         self,

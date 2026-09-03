@@ -137,6 +137,22 @@ class TPTransferProfile:
         if tuple(map(len, destination_peers)) != self.destination_peer_counts:
             raise ValueError("transfer profile destination peer counts do not match")
 
+    def to_dict(self) -> dict[str, object]:
+        """Return a serialization-safe capacity and topology report."""
+
+        return {
+            "source_tp_size": len(self.source_bytes),
+            "destination_tp_size": len(self.destination_bytes),
+            "wire_bytes": self.wire_bytes,
+            "source_egress_bytes": self.source_bytes,
+            "source_staging_bytes": self.source_staging_bytes,
+            "destination_bytes": self.destination_bytes,
+            "source_peer_counts": self.source_peer_counts,
+            "destination_peer_counts": self.destination_peer_counts,
+            "peer_bytes": self.peer_bytes,
+            "slice_count": self.slice_count,
+        }
+
 
 class TPPeerTransferSession:
     """Track destination-installed bytes for one heterogeneous-TP request."""
