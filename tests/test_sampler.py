@@ -128,6 +128,21 @@ class SamplerTest(unittest.TestCase):
         self.assertTrue(torch.isfinite(filtered[0, 2]))
         self.assertTrue(torch.isneginf(filtered[0, 3]))
 
+    def test_top_p_does_not_clone_shifted_mask(self):
+        logits = torch.log(torch.tensor([[0.50, 0.25, 0.15, 0.10]]))
+        top_ks = torch.tensor([-1], dtype=torch.int32)
+        top_ps = torch.tensor([0.80], dtype=torch.float32)
+
+        with patch.object(
+            torch.Tensor,
+            "clone",
+            side_effect=AssertionError("top-p mask shift must not clone"),
+        ):
+            filtered = apply_top_k_top_p(logits, top_ks, top_ps)
+
+        self.assertTrue(torch.isfinite(filtered[0, :3]).all())
+        self.assertTrue(torch.isneginf(filtered[0, 3]))
+
     def test_top_p_only_skips_top_k_workspace(self):
         logits = torch.log(torch.tensor([[0.50, 0.25, 0.15, 0.10]]))
         top_ks = torch.tensor([-1], dtype=torch.int32)

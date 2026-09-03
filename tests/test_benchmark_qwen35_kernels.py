@@ -155,6 +155,14 @@ def test_sampling_filter_benchmark_covers_unfiltered_and_top_k_paths():
     assert result["top_p"]["avoided_top_k_mask_workspace_mib"] == (
         4 * 16 * 3 + 16 * 8
     ) / 1024 / 1024
+    assert result["top_p"]["avoided_top_p_shift_clone_mib"] == (
+        4 * 16 / 1024 / 1024
+    )
+    assert result["top_k_top_p"]["avoided_top_p_shift_clone_mib"] == (
+        4 * 3 / 1024 / 1024
+    )
+    assert result["top_p"]["eliminated_top_p_mask_clones_per_step"] == 1
+    assert result["top_k_top_p"]["eliminated_top_p_mask_clones_per_step"] == 1
     assert all(item["errors"][0]["max_abs_error"] == 0 for item in result.values())
     assert all(item["uses_host_sampling_metadata"] for item in result.values())
 

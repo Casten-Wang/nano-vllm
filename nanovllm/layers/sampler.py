@@ -73,6 +73,23 @@ def _sampling_ranks(
     return rank_buffer[:width].unsqueeze(0)
 
 
+def _exclusive_top_p_mask(
+    cumulative_probs: torch.Tensor,
+    top_ps: torch.Tensor,
+) -> torch.Tensor:
+    """Mask tokens whose preceding probability mass already exceeds top-p."""
+
+    remove = torch.empty_like(cumulative_probs, dtype=torch.bool)
+    remove[:, 0] = False
+    if cumulative_probs.size(1) > 1:
+        torch.gt(
+            cumulative_probs[:, :-1],
+            top_ps.unsqueeze(1),
+            out=remove[:, 1:],
+        )
+    return remove
+
+
 def apply_top_k_top_p(
     logits: torch.Tensor,
     top_ks: torch.Tensor,
@@ -143,9 +160,7 @@ def apply_top_k_top_p(
         if any_top_p_enabled:
             selected_probs = torch.softmax(selected_logits, dim=-1)
             cumulative_probs = torch.cumsum(selected_probs, dim=-1)
-            selected_remove = cumulative_probs > top_ps.unsqueeze(1)
-            selected_remove[:, 1:] = selected_remove[:, :-1].clone()
-            selected_remove[:, 0] = False
+            selected_remove = _exclusive_top_p_mask(cumulative_probs, top_ps)
             selected_logits.masked_fill_(selected_remove, float("-inf"))
         filtered_logits = logits if inplace else torch.full_like(
             logits,
@@ -221,13 +236,9 @@ def apply_top_k_top_p(
         probability_logits = sorted_logits
     sorted_probs = torch.softmax(probability_logits, dim=-1)
     cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
-    sorted_remove = cumulative_probs > top_ps.unsqueeze(1)
-
-    # Shift the removal mask right by one position so the first token that
-    # crosses the top-p threshold is still kept. This is the common nucleus
-    # sampling behavior and also guarantees at least one token survives.
-    sorted_remove[:, 1:] = sorted_remove[:, :-1].clone()
-    sorted_remove[:, 0] = False
+    # Compare each token against the mass before it. This keeps the first token
+    # that crosses the threshold without cloning a full shifted boolean mask.
+    sorted_remove = _exclusive_top_p_mask(cumulative_probs, top_ps)
     sorted_keep = (
         ~sorted_remove
         if top_k_keep is None

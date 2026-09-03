@@ -572,6 +572,16 @@ def benchmark_sampling_filter(args, device, dtype) -> dict:
             ) / 1024 / 1024
         else:
             result["avoided_full_sort_workspace_mib"] = full_sort_workspace_mib
+        if metadata.any_top_p_enabled:
+            mask_width = (
+                metadata.max_top_k
+                if metadata.all_top_k_enabled
+                else args.vocab_size
+            )
+            result["avoided_top_p_shift_clone_mib"] = (
+                args.sampling_batch * mask_width / 1024 / 1024
+            )
+            result["eliminated_top_p_mask_clones_per_step"] = 1
         result["uses_host_sampling_metadata"] = True
         results[name] = result
     return results
