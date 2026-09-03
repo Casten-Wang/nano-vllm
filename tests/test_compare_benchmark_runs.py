@@ -344,7 +344,50 @@ def test_comparison_rejects_missing_tail_latency_metrics():
     candidate = result()
     del candidate["metrics"]["p99_ttft_s"]
 
-    with pytest.raises(ValueError, match="candidate.metrics.*p99_ttft_s"):
+    with pytest.raises(ValueError, match="candidate.metrics.p99_ttft_s"):
+        MODULE.compare_results(
+            [result(), candidate],
+            ["baseline", "candidate"],
+        )
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), True, -1.0])
+def test_comparison_rejects_invalid_latency_measurements(value):
+    candidate = result()
+    candidate["metrics"]["p99_ttft_s"] = value
+
+    with pytest.raises(
+        ValueError,
+        match=r"candidate\.metrics\.p99_ttft_s must be a finite non-negative number",
+    ):
+        MODULE.compare_results(
+            [result(), candidate],
+            ["baseline", "candidate"],
+        )
+
+
+@pytest.mark.parametrize("value", [0.0, float("nan"), float("inf"), True, -1.0])
+def test_comparison_rejects_invalid_throughput_measurements(value):
+    candidate = result(throughput=value)
+
+    with pytest.raises(
+        ValueError,
+        match=r"candidate\.output_throughput_tok_s must be a finite positive number",
+    ):
+        MODULE.compare_results(
+            [result(), candidate],
+            ["baseline", "candidate"],
+        )
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), True, -1.0])
+def test_comparison_rejects_invalid_memory_measurements(value):
+    candidate = result(memory=value)
+
+    with pytest.raises(
+        ValueError,
+        match=r"candidate\.peak_torch_allocated_mib must be a finite non-negative number",
+    ):
         MODULE.compare_results(
             [result(), candidate],
             ["baseline", "candidate"],

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 from pathlib import Path
 import statistics
 
@@ -92,6 +93,27 @@ def ratio(value: float, baseline: float) -> float | None:
     return value / baseline if baseline else None
 
 
+def validate_measurement(
+    value: object,
+    *,
+    label: str,
+    positive: bool = False,
+) -> None:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        or value < 0
+        or (positive and value == 0)
+    ):
+        requirement = (
+            "a finite positive number"
+            if positive
+            else "a finite non-negative number"
+        )
+        raise ValueError(f"{label} must be {requirement}")
+
+
 def distribution(values: list[float]) -> dict:
     mean = statistics.fmean(values)
     stdev = statistics.pstdev(values)
@@ -158,14 +180,19 @@ def compare_results(results: list[dict], labels: list[str]) -> dict:
         )
     baseline = results[0]
     for label, result in zip(labels, results):
-        missing_metrics = [
-            name for name in LATENCY_METRIC_NAMES
-            if not isinstance(result.get("metrics", {}).get(name), (int, float))
-        ]
-        if missing_metrics:
-            raise ValueError(
-                f"{label}.metrics is missing numeric fields: "
-                + ", ".join(missing_metrics)
+        validate_measurement(
+            result.get("output_throughput_tok_s"),
+            label=f"{label}.output_throughput_tok_s",
+            positive=True,
+        )
+        validate_measurement(
+            result.get("peak_torch_allocated_mib"),
+            label=f"{label}.peak_torch_allocated_mib",
+        )
+        for name in LATENCY_METRIC_NAMES:
+            validate_measurement(
+                result.get("metrics", {}).get(name),
+                label=f"{label}.metrics.{name}",
             )
     baseline_checkpoint = baseline["checkpoint_manifest"]["digest"]
     mismatches = []
