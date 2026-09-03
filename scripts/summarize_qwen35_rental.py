@@ -2663,13 +2663,25 @@ def summarize(run_dir: Path, run_id: str) -> dict:
             ),
             "sampling_top_p": summarize_buffer_reuse_candidate(
                 result["results"]["sampling_filter_fast_paths"]["top_p"],
-                ("avoided_top_k_mask_workspace_mib",),
-                {"uses_host_sampling_metadata": True},
+                (
+                    "avoided_top_k_mask_workspace_mib",
+                    "avoided_top_p_shift_clone_mib",
+                ),
+                {
+                    "uses_host_sampling_metadata": True,
+                    "eliminated_top_p_mask_clones_per_step": 1,
+                },
             ),
             "sampling_top_k_top_p": summarize_buffer_reuse_candidate(
                 result["results"]["sampling_filter_fast_paths"]["top_k_top_p"],
-                ("avoided_full_sort_workspace_mib",),
-                {"uses_host_sampling_metadata": True},
+                (
+                    "avoided_full_sort_workspace_mib",
+                    "avoided_top_p_shift_clone_mib",
+                ),
+                {
+                    "uses_host_sampling_metadata": True,
+                    "eliminated_top_p_mask_clones_per_step": 1,
+                },
             ),
             "sampling_compact_top_k": summarize_buffer_reuse_candidate(
                 result["results"]["compact_top_k_sampling"],

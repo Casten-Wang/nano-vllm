@@ -1320,6 +1320,14 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
                         "errors": [{"max_abs_error": 0.0}],
                         "avoided_full_sort_workspace_mib": 128.0,
                         "uses_host_sampling_metadata": True,
+                        **(
+                            {
+                                "avoided_top_p_shift_clone_mib": 1.0,
+                                "eliminated_top_p_mask_clones_per_step": 1,
+                            }
+                            if name == "top_k_top_p"
+                            else {}
+                        ),
                     }
                     for name in ("unfiltered", "top_k", "top_k_top_p")
                 }
@@ -1330,6 +1338,8 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
                         "speedup": 1.1,
                         "errors": [{"max_abs_error": 0.0}],
                         "avoided_top_k_mask_workspace_mib": 64.0,
+                        "avoided_top_p_shift_clone_mib": 32.0,
+                        "eliminated_top_p_mask_clones_per_step": 1,
                         "uses_host_sampling_metadata": True,
                     }
                 },
@@ -1976,9 +1986,20 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     assert report["buffer_reuse"]["by_tp"]["tp4"][
         "sorted_route_weighting"
     ]["workspace"]["avoided_weighted_expert_output_mib"] == 4.0
-    assert report["buffer_reuse"]["by_tp"]["tp4"]["sampling_top_p"][
-        "workspace"
-    ]["avoided_top_k_mask_workspace_mib"] == 64.0
+    sampling_top_p = report["buffer_reuse"]["by_tp"]["tp4"][
+        "sampling_top_p"
+    ]
+    assert sampling_top_p["workspace"]["avoided_top_k_mask_workspace_mib"] == 64.0
+    assert sampling_top_p["workspace"]["avoided_top_p_shift_clone_mib"] == 32.0
+    assert sampling_top_p["metadata"][
+        "eliminated_top_p_mask_clones_per_step"
+    ] == 1
+    sampling_top_k_top_p = report["buffer_reuse"]["by_tp"]["tp4"][
+        "sampling_top_k_top_p"
+    ]
+    assert sampling_top_k_top_p["workspace"][
+        "avoided_top_p_shift_clone_mib"
+    ] == 1.0
     sampling_inputs = report["buffer_reuse"]["by_tp"]["tp4"][
         "sampling_inputs"
     ]
