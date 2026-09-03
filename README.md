@@ -10,6 +10,11 @@
 
 A lightweight vLLM implementation built from scratch.
 
+This fork's current development target is text-only inference for
+`Qwen/Qwen3.6-35B-A3B`, with TP4/TP8 BF16 and FP8 validation. Qwen3.6 retains
+the upstream `Qwen3_5Moe*` architecture identifiers, so internal `qwen35*`
+names are intentional compatibility names.
+
 ## Key Features
 
 * 🚀 **Fast offline inference** - Comparable inference speeds to vLLM

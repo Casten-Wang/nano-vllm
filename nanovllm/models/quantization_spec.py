@@ -74,10 +74,12 @@ BF16_QUANTIZATION_SPEC = QuantizationSpec(format="bf16")
 def _parse_fp8(config: Mapping[str, object]) -> QuantizationSpec:
     if config.get("activation_scheme") != "dynamic":
         raise ValueError("FP8 activation_scheme must be 'dynamic'")
-    if config.get("weight_per_tensor") is not False:
+    if config.get("weight_per_tensor", False) is not False:
         raise ValueError("FP8 weight_per_tensor must be false for block quantization")
-    if config.get("act_per_tensor") is not False:
+    if config.get("act_per_tensor", False) is not False:
         raise ValueError("FP8 act_per_tensor must be false for dynamic activations")
+    if config.get("fmt", "e4m3") != "e4m3":
+        raise ValueError("FP8 fmt must be 'e4m3' when specified")
     raw_block = config.get("weight_block_size")
     if not isinstance(raw_block, (list, tuple)) or len(raw_block) != 2:
         raise ValueError("FP8 weight_block_size must contain two dimensions")

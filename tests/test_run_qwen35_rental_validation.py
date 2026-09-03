@@ -497,11 +497,11 @@ def test_manifest_resumes_only_identical_run(tmp_path):
 
 def test_manifest_preserves_hugging_face_model_id():
     arguments = args()
-    arguments.model = "Qwen/Qwen3.5-35B-A3B"
+    arguments.model = "Qwen/Qwen3.6-35B-A3B"
 
     plan = MODULE.manifest_plan(arguments, MODULE.commands(arguments))
 
-    assert plan["model"] == "Qwen/Qwen3.5-35B-A3B"
+    assert plan["model"] == "Qwen/Qwen3.6-35B-A3B"
 
 
 def test_main_rejects_insufficient_gpus_before_building_stages(monkeypatch):
@@ -511,7 +511,7 @@ def test_main_rejects_insufficient_gpus_before_building_stages(monkeypatch):
         [
             "run_qwen35_rental_validation.py",
             "--model",
-            "Qwen/Qwen3.5-35B-A3B",
+            "Qwen/Qwen3.6-35B-A3B",
             "--tp-sizes",
             "4,8",
         ],

@@ -265,7 +265,7 @@ def test_fp8_reference_loader_is_scoped_to_qwen35(monkeypatch, tmp_path):
         ),
     )
 
-    with pytest.raises(NotImplementedError, match="only for Qwen3.5 MoE"):
+    with pytest.raises(NotImplementedError, match="only for Qwen3.5-compatible MoE"):
         config_module.Config(str(tmp_path))
 
 

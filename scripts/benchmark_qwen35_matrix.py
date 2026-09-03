@@ -565,7 +565,7 @@ def validate_memory_capacity(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run the reproducible Qwen3.5 TP4/TP8 benchmark matrix."
+        description="Run the reproducible Qwen3.6 TP4/TP8 benchmark matrix."
     )
     parser.add_argument("--model", required=True)
     parser.add_argument("--verify-checkpoint-shards", action="store_true")

@@ -26,7 +26,7 @@ def result(
     torch_version="2.8.0",
 ):
     return {
-        "model": "Qwen/Qwen3.5-35B-A3B",
+        "model": "Qwen/Qwen3.6-35B-A3B",
         "commit": "0123456789abcdef",
         "git_dirty": False,
         "checkpoint_manifest": {

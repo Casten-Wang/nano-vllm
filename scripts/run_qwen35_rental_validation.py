@@ -1,4 +1,4 @@
-"""Run the fail-fast Qwen3.5-35B-A3B rental-GPU validation suite."""
+"""Run the fail-fast Qwen3.6-35B-A3B rental-GPU validation suite."""
 
 from __future__ import annotations
 
@@ -28,12 +28,14 @@ CUDAGRAPH_PARITY_SCRIPT = ROOT / "scripts" / "verify_cudagraph_parity.py"
 REMOTE_CHECKPOINT_AUDIT_SCRIPT = (
     ROOT / "scripts" / "audit_remote_checkpoint_headers.py"
 )
-OFFICIAL_CHECKPOINT_REPO = "Qwen/Qwen3.5-35B-A3B"
-OFFICIAL_CHECKPOINT_REVISION = "59d61f3ce65a6d9863b86d2e96597125219dc754"
+OFFICIAL_CHECKPOINT_REPO = "Qwen/Qwen3.6-35B-A3B"
+OFFICIAL_CHECKPOINT_REVISION = "995ad96eacd98c81ed38be0c5b274b04031597b0"
+# No official Qwen3.6 GPTQ-Int4 checkpoint is currently available. This optional
+# lane remains only for explicitly requested Qwen3.5 compatibility experiments.
 OFFICIAL_GPTQ_CHECKPOINT_REPO = "Qwen/Qwen3.5-35B-A3B-GPTQ-Int4"
 OFFICIAL_GPTQ_CHECKPOINT_REVISION = "3af5ca2972faf6de1fd6f4efc4d8d319ca751e8b"
-OFFICIAL_FP8_CHECKPOINT_REPO = "Qwen/Qwen3.5-35B-A3B-FP8"
-OFFICIAL_FP8_CHECKPOINT_REVISION = "9d1823d2dee688a6b25e77009dc727688c44936e"
+OFFICIAL_FP8_CHECKPOINT_REPO = "Qwen/Qwen3.6-35B-A3B-FP8"
+OFFICIAL_FP8_CHECKPOINT_REVISION = "95a723d08a9490559dae23d0cff1d9466213d989"
 QUALITY_MAX_PROMPT_LENGTH = 8_192
 QUALITY_CONTINUATION_LENGTH = 16
 MIXED_CONCURRENT_SEQUENCES = 16
@@ -1205,11 +1207,14 @@ def mark_stage_completed(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--model", required=True)
+    parser.add_argument("--model", default=OFFICIAL_CHECKPOINT_REPO)
     parser.add_argument(
         "--gptq-model",
         default=None,
-        help="Optional official GPTQ-Int4 checkpoint to validate after BF16.",
+        help=(
+            "Optional legacy Qwen3.5 GPTQ-Int4 compatibility checkpoint; "
+            "this is not an official Qwen3.6 validation track."
+        ),
     )
     parser.add_argument(
         "--gptq-revision",

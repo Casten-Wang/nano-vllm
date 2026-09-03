@@ -254,7 +254,7 @@ def test_main_rejects_insufficient_gpus_before_checkpoint_audit(monkeypatch):
         [
             "benchmark_qwen35_quality_matrix.py",
             "--model",
-            "Qwen/Qwen3.5-35B-A3B",
+            "Qwen/Qwen3.6-35B-A3B",
             "--tp-sizes",
             "4,8",
         ],

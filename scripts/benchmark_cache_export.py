@@ -1,4 +1,4 @@
-"""Measure GPU-to-host cache export cost for one Qwen3.5 TP rank."""
+"""Measure GPU-to-host cache export cost for one Qwen3.6 TP rank."""
 
 from __future__ import annotations
 
@@ -99,7 +99,7 @@ def make_source(
     element_size = torch.empty((), dtype=dtype).element_size()
     divisor = 2 * FULL_ATTENTION_LAYERS * allocated_tokens * element_size
     if components["kv"] % divisor:
-        raise ValueError("KV bytes do not map to the Qwen3.5 cache layout")
+        raise ValueError("KV bytes do not map to the Qwen3.6 cache layout")
     head_dim = components["kv"] // divisor
     kv_cache = torch.zeros(
         2,
@@ -125,7 +125,7 @@ def make_source(
             device=device,
         )
         if kv_scale.numel() * kv_scale.element_size() != components["kv_scales"]:
-            raise ValueError("KV scale bytes do not map to the Qwen3.5 cache layout")
+            raise ValueError("KV scale bytes do not map to the Qwen3.6 cache layout")
         for block_id in range(blocks):
             kv_scale[:, :, block_id].fill_(block_id + 1)
     elif components["kv_scales"]:
@@ -332,7 +332,7 @@ def main() -> None:
     candidate["host_layout"] = candidate_layout
     result = {
         "schema_version": 1,
-        "scope": "single-rank Qwen3.5 GPU-to-host cache export",
+        "scope": "single-rank Qwen3.6 GPU-to-host cache export",
         "environment": {
             "platform": platform.platform(),
             "python": platform.python_version(),

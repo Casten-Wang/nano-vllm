@@ -1,4 +1,4 @@
-"""Summarize one complete Qwen3.5 rental validation run."""
+"""Summarize one complete Qwen3.6 rental validation run."""
 
 from __future__ import annotations
 
@@ -48,27 +48,27 @@ MIXED_MOE_MAX_ABS_ERROR = 0.05
 PD_INSTALL_MAX_LATENCY_RATIO = 1.25
 RESIDENT_FP8_MIN_THROUGHPUT_RATIO = 0.80
 KVCACHE_BLOCK_SIZE = 256
-OFFICIAL_CHECKPOINT_REPO = "Qwen/Qwen3.5-35B-A3B"
-OFFICIAL_SKIPPED_WEIGHT_GROUPS = {"model.visual": 333, "mtp": 785}
-OFFICIAL_SKIPPED_WEIGHT_PREFIXES = {"model.visual.": 333, "mtp.": 785}
-OFFICIAL_CHECKPOINT_REVISION = "59d61f3ce65a6d9863b86d2e96597125219dc754"
+OFFICIAL_CHECKPOINT_REPO = "Qwen/Qwen3.6-35B-A3B"
+OFFICIAL_SKIPPED_WEIGHT_GROUPS = {"model.visual": 333, "mtp": 19}
+OFFICIAL_SKIPPED_WEIGHT_PREFIXES = {"model.visual.": 333, "mtp.": 19}
+OFFICIAL_CHECKPOINT_REVISION = "995ad96eacd98c81ed38be0c5b274b04031597b0"
 OFFICIAL_GPTQ_CHECKPOINT_REPO = "Qwen/Qwen3.5-35B-A3B-GPTQ-Int4"
 OFFICIAL_GPTQ_CHECKPOINT_REVISION = "3af5ca2972faf6de1fd6f4efc4d8d319ca751e8b"
-OFFICIAL_FP8_CHECKPOINT_REPO = "Qwen/Qwen3.5-35B-A3B-FP8"
-OFFICIAL_FP8_CHECKPOINT_REVISION = "9d1823d2dee688a6b25e77009dc727688c44936e"
+OFFICIAL_FP8_CHECKPOINT_REPO = "Qwen/Qwen3.6-35B-A3B-FP8"
+OFFICIAL_FP8_CHECKPOINT_REVISION = "95a723d08a9490559dae23d0cff1d9466213d989"
 OFFICIAL_CONFIG_SHA256 = (
-    "5e4d7f74fec2f360eb9cfbfcd6ec0c4c76e684d3a11caaed259d9fd9bfbc7944"
+    "93a4693fa9d8392fbfccd4b3c9873f4bfdcb14fdede978b123d07d19675efe99"
 )
 OFFICIAL_INDEX_SHA256 = (
-    "d8d0b7ca4e61ae107e3e87a3ff21136b3ac7c789e64bb24267227ca804e04205"
+    "41b9356101ebf8e7519e150dc811f80c4226e727301fbb032b890f006ed0be83"
 )
 OFFICIAL_HEADERS_SHA256 = (
-    "39753f429d8ce99ba181f00e068b36df4ecd2603c34df5352492b21d5a32878b"
+    "49fdf93cdd3e482e01e4891a65a3d714b557b227643543dbbcc3ba96b2db27c1"
 )
 OFFICIAL_INDEX_CONTRACTS = {
-    "bf16": (1811, 71_903_655_008),
+    "bf16": (1045, 71_903_645_408),
     "gptq_int4": (124_611, 24_403_162_208),
-    "fp8_block": (64_196, 37_454_799_072),
+    "fp8_block": (64_196, 37_454_789_472),
 }
 
 
@@ -103,7 +103,7 @@ def expected_checkpoint_semantic_contract(quantization_format: str) -> dict:
             weight_bits=8,
             activation_scheme="dynamic",
             weight_block_size=[128, 128],
-            ignored_module_count=287,
+            ignored_module_count=648,
         )
     return {
         "architecture": "Qwen3_5MoeForConditionalGeneration",
@@ -2165,7 +2165,7 @@ def summarize_pd_export(
     valid = (
         result.get("schema_version") == 1
         and result.get("scope")
-        == "single-rank Qwen3.5 GPU-to-host cache export"
+        == "single-rank Qwen3.6 GPU-to-host cache export"
         and profile.get("tp_size") == expected_tp_size
         and profile.get("kv_dtype") == expected_kv_dtype
         and profile.get("state_dtype") == expected_state_dtype

@@ -7,8 +7,18 @@
   local and must never be committed.
 - `origin` is `Casten-Wang/nano-vllm`; `upstream` is
   `GeeeekExplorer/nano-vllm`. Never push to `upstream`.
-- The next model target is text-only inference for `Qwen3.5-35B-A3B`. Do not
+- The primary model target is text-only inference for `Qwen3.6-35B-A3B`. Do not
   add multimodal support unless it is explicitly scoped and designed first.
+- Qwen3.6 deliberately retains the upstream architecture identifiers
+  `Qwen3_5Moe*`, `qwen3_5_moe_text`, and this repository's internal `qwen35*`
+  module/config names. They are checkpoint compatibility identifiers, not a
+  statement that Qwen3.5 remains the product target; do not mechanically rename
+  them without a backward-compatible migration design.
+- Treat `Qwen/Qwen3.6-35B-A3B` and `Qwen/Qwen3.6-35B-A3B-FP8` as the official
+  BF16 and FP8 validation tracks. No official Qwen3.6 GPTQ-Int4 checkpoint is
+  currently part of the validation matrix. Any Qwen3.5 GPTQ work is an optional,
+  explicitly labeled compatibility experiment and must not be reported as
+  Qwen3.6 validation.
 
 ## Development Workflow
 
@@ -125,7 +135,7 @@
   safe tensor/workspace reuse, (2) deterministic memory-aware scheduling, and
   (3) multi-GPU prefill/decode disaggregation. Independent low-risk work may
   continue in parallel when it does not obscure the baseline for a later stage.
-- For `Qwen3.5-35B-A3B`, evaluate all three tracks under TP4 and TP8 deployment
+- For `Qwen3.6-35B-A3B`, evaluate all three tracks under TP4 and TP8 deployment
   assumptions. A design is not complete until its communication, replicated
   state, per-rank peak VRAM, and behavior under uneven request load are known.
 

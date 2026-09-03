@@ -1002,7 +1002,7 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
             "semantic_contract": MODULE.expected_checkpoint_semantic_contract(
                 "bf16"
             ),
-            "source_tensor_count": 1811,
+                "source_tensor_count": 1045,
             "shard_count": 14,
             "checkpoint_shards": [
                 {
@@ -1017,7 +1017,7 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
                     "valid": True,
                     "skipped_by_prefix": {
                         "model.visual.": 333,
-                        "mtp.": 785,
+                            "mtp.": 19,
                     },
                     "unclassified_skipped_weights": [],
                 }
@@ -1033,7 +1033,7 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
                 "tp4": {
                     "skipped_tensor_groups": {
                         "model.visual": 333,
-                        "mtp": 785,
+                            "mtp": 19,
                     }
                 }
             },
@@ -1045,7 +1045,7 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
                 "shard_count": 14,
                 "present_shard_count": 14,
                 "missing_shards": [],
-                "total_size_bytes": 71_903_655_008,
+                    "total_size_bytes": 71_903_645_408,
                 "files": [
                     {
                         "name": f"model-{index:05d}-of-00014.safetensors",
@@ -1759,7 +1759,7 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
             tmp_path / f"pd_export/tp4/{profile_name}.json",
             {
                 "schema_version": 1,
-                "scope": "single-rank Qwen3.5 GPU-to-host cache export",
+                "scope": "single-rank Qwen3.6 GPU-to-host cache export",
                 "environment": {"device": "NVIDIA H20"},
                 "correctness": {"candidate_matches_reference": True},
                 "profile": {

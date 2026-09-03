@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-from math import ceil
+from math import ceil, isfinite
 from pathlib import Path
 import re
 import struct
@@ -785,6 +785,7 @@ def checkpoint_semantic_contract(
     generation_config: dict,
     index: dict,
     model_spec,
+    headers: dict[str, dict] | None = None,
 ) -> dict:
     """Expose the checkpoint assumptions that local execution depends on."""
 
@@ -792,12 +793,25 @@ def checkpoint_semantic_contract(
     rope_parameters = getattr(text_config, "rope_parameters", None) or {}
     metadata = index.get("metadata") or {}
     total_size = metadata.get("total_size")
+    if total_size is None and headers is not None:
+        offsets = [item.get("data_offsets") for item in headers.values()]
+        if offsets and all(
+            isinstance(pair, list)
+            and len(pair) == 2
+            and all(isinstance(value, int) and not isinstance(value, bool) for value in pair)
+            and 0 <= pair[0] <= pair[1]
+            for pair in offsets
+        ):
+            total_size = sum(pair[1] - pair[0] for pair in offsets)
     if (
         isinstance(total_size, bool)
-        or not isinstance(total_size, int)
+        or not isinstance(total_size, (int, float))
+        or not isfinite(total_size)
         or total_size <= 0
+        or not float(total_size).is_integer()
     ):
         raise ValueError("checkpoint index metadata.total_size must be positive")
+    total_size = int(total_size)
     eos_token_ids = generation_config.get("eos_token_id")
     if isinstance(eos_token_ids, int) and not isinstance(eos_token_ids, bool):
         eos_token_ids = [eos_token_ids]
@@ -1047,6 +1061,7 @@ def main() -> None:
             generation_config_document,
             index,
             model_spec,
+            headers,
         ),
         "logical_tensor_count": len(logical_headers),
         "downloaded_header_bytes": downloaded_header_bytes,

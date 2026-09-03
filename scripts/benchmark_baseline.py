@@ -133,7 +133,7 @@ def parse_args() -> argparse.Namespace:
         "--qwen35-moe-decode-backend",
         choices=("sorted", "batched"),
         default="sorted",
-        help="Qwen3.5 single-token MoE dispatch implementation.",
+        help="Qwen3.6-compatible single-token MoE dispatch implementation.",
     )
     parser.add_argument("--qwen35-moe-decode-chunk-size", type=int, default=8)
     parser.add_argument("--sampling-chunk-size", type=int, default=32)

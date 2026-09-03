@@ -40,7 +40,7 @@ media, weights, archives, generated results, and interview tooling.
 Use focused Conventional Commits, for example:
 
 ```text
-feat: add Qwen3.5 MoE model configuration
+feat: add Qwen3.6 MoE checkpoint support
 fix: preserve KV block ownership during preemption
 perf: fuse expert routing and token permutation
 test: cover mixed linear and full attention layers
@@ -96,7 +96,7 @@ routing. For scheduling, begin with deterministic token/memory budgets,
 starvation bounds, and preemption-cost accounting before considering adaptive
 policies.
 
-For Qwen3.5-35B-A3B, use TP4 and TP8 as the primary multi-GPU design targets.
+For Qwen3.6-35B-A3B, use TP4 and TP8 as the primary multi-GPU design targets.
 Prioritize measured capacity accounting and safe tensor/workspace reuse first,
 then deterministic memory-aware scheduling, then PD disaggregation. Every
 multi-GPU result must include per-rank peak VRAM, communication cost, replicated
@@ -145,9 +145,16 @@ Reproduce the behavior on `upstream/main`, then keep the patch narrowly scoped.
 Do not include this fork's `.gitignore`, governance, CI, broad instrumentation,
 or unrelated optimization work in an upstream pull request.
 
+Qwen3.6 uses the upstream `Qwen3_5Moe*` architecture and `qwen3_5_moe_text`
+identifiers, so the existing internal `qwen35*` compatibility names are kept
+intentionally. Do not mechanically rename them. The official validation matrix
+uses Qwen3.6 BF16 and FP8 checkpoints; Qwen3.5 GPTQ is only an explicitly
+labeled optional compatibility experiment because there is no official
+Qwen3.6 GPTQ-Int4 checkpoint in the matrix.
+
 The preferred upstream submission is one independently useful correctness or
 performance fix with a minimal reproduction and before/after evidence. Large
-features such as Qwen3.5 support are developed and validated in this fork, then
+features such as Qwen3.6 support are developed and validated in this fork, then
 split only when a small component has clear value against current upstream.
 Keep only one upstream pull request open at a time. Later candidate branches
 remain local and are pushed to `origin` only when the current pull request has

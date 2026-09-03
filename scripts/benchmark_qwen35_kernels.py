@@ -1,4 +1,4 @@
-"""Reproducible microbenchmarks for Qwen3.5 routing and DeltaNet paths."""
+"""Reproducible microbenchmarks for Qwen3.6 routing and DeltaNet paths."""
 
 from __future__ import annotations
 
@@ -3578,9 +3578,9 @@ def main() -> None:
     if not 0.0 < args.sampling_top_p < 1.0:
         raise ValueError("sampling_top_p must be in (0, 1)")
     if args.moe_intermediate_size % args.tp_size:
-        raise ValueError("Qwen3.5 MoE intermediate size must divide TP size")
+        raise ValueError("Qwen3.6 MoE intermediate size must divide TP size")
     if args.attention_heads % args.tp_size:
-        raise ValueError("Qwen3.5 query heads must divide TP size")
+        raise ValueError("Qwen3.6 query heads must divide TP size")
     if (
         args.attention_kv_heads >= args.tp_size
         and args.attention_kv_heads % args.tp_size
@@ -3588,7 +3588,7 @@ def main() -> None:
         args.attention_kv_heads < args.tp_size
         and args.tp_size % args.attention_kv_heads
     ):
-        raise ValueError("Qwen3.5 KV heads must shard or replicate across TP")
+        raise ValueError("Qwen3.6 KV heads must shard or replicate across TP")
     if args.device == "auto":
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     else:
@@ -3597,7 +3597,7 @@ def main() -> None:
         raise ValueError("float16 benchmark requires CUDA")
     dtype = getattr(torch, args.dtype)
     if args.total_key_heads % args.tp_size or args.total_value_heads % args.tp_size:
-        raise ValueError("Qwen3.5 linear-attention heads must divide TP size")
+        raise ValueError("Qwen3.6 linear-attention heads must divide TP size")
     local_key_heads = args.total_key_heads // args.tp_size
     local_value_heads = args.total_value_heads // args.tp_size
     local_query_heads = args.attention_heads // args.tp_size

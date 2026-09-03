@@ -57,14 +57,14 @@ def _validate_qwen35_semantics(text_config: Any) -> None:
     """Reject variants whose configured math is not implemented locally."""
 
     if not bool(getattr(text_config, "attn_output_gate", True)):
-        raise ValueError("Qwen3.5 requires attn_output_gate=True")
+        raise ValueError("Qwen3.5-compatible MoE requires attn_output_gate=True")
     if getattr(text_config, "hidden_act", "silu") != "silu":
-        raise ValueError("Qwen3.5 supports only hidden_act='silu'")
+        raise ValueError("Qwen3.5-compatible MoE supports only hidden_act='silu'")
     if tuple(getattr(text_config, "mlp_only_layers", ())) != ():
-        raise ValueError("Qwen3.5 mlp_only_layers are not supported")
+        raise ValueError("Qwen3.5-compatible MoE mlp_only_layers are not supported")
     rope_parameters = getattr(text_config, "rope_parameters", None) or {}
     if rope_parameters.get("rope_type", "default") != "default":
-        raise ValueError("Qwen3.5 supports only default RoPE")
+        raise ValueError("Qwen3.5-compatible MoE supports only default RoPE")
 
 
 def resolve_model_spec(hf_config: Any) -> ModelSpec:
@@ -89,18 +89,18 @@ def resolve_model_spec(hf_config: Any) -> ModelSpec:
                 text_config = hf_config
             else:
                 raise ValueError(
-                    "Qwen3.5 conditional-generation config is missing text_config"
+                    "Qwen3.5-compatible conditional-generation config is missing text_config"
                 )
         num_layers = int(text_config.num_hidden_layers)
         layer_types = tuple(getattr(text_config, "layer_types", ()))
         if len(layer_types) != num_layers:
             raise ValueError(
-                "Qwen3.5 layer_types length must equal num_hidden_layers: "
+                "Qwen3.5-compatible layer_types length must equal num_hidden_layers: "
                 f"{len(layer_types)} != {num_layers}"
             )
         unknown = sorted(set(layer_types) - {"full_attention", "linear_attention"})
         if unknown:
-            raise ValueError(f"unsupported Qwen3.5 layer types: {unknown}")
+            raise ValueError(f"unsupported Qwen3.5-compatible layer types: {unknown}")
         full_attention_layers = tuple(
             index for index, kind in enumerate(layer_types) if kind == "full_attention"
         )
@@ -108,7 +108,9 @@ def resolve_model_spec(hf_config: Any) -> ModelSpec:
             index for index, kind in enumerate(layer_types) if kind == "linear_attention"
         )
         if not full_attention_layers or not linear_attention_layers:
-            raise ValueError("Qwen3.5 must contain both full and linear attention layers")
+            raise ValueError(
+                "Qwen3.5-compatible MoE must contain both full and linear attention layers"
+            )
         _validate_qwen35_semantics(text_config)
         return ModelSpec(
             architecture=architecture,

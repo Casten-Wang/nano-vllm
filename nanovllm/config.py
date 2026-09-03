@@ -177,7 +177,7 @@ class Config:
         elif quantization.format == "fp8_block":
             if self.model_spec.architecture not in QWEN35_MOE_ARCHITECTURES:
                 raise NotImplementedError(
-                    "block-FP8 reference loading is implemented only for Qwen3.5 MoE"
+                    "block-FP8 loading is implemented only for Qwen3.5-compatible MoE"
                 )
             if self.weight_quant_backend == "auto":
                 self.weight_quant_backend = "reference"

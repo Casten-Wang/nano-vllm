@@ -80,9 +80,87 @@ def test_checkpoint_semantic_contract_exposes_execution_assumptions():
     }
 
 
+def test_checkpoint_semantic_contract_accepts_integral_float_size():
+    text_config = SimpleNamespace(
+        model_type="qwen3_5_moe_text",
+        hidden_size=2048,
+        num_attention_heads=16,
+        num_key_value_heads=2,
+        head_dim=256,
+        num_experts=256,
+        num_experts_per_tok=8,
+        moe_intermediate_size=512,
+        max_position_embeddings=262144,
+        rope_parameters={"partial_rotary_factor": 0.25},
+    )
+    model_spec = SimpleNamespace(
+        architecture="Qwen3_5MoeForConditionalGeneration",
+        text_config=text_config,
+        num_hidden_layers=40,
+        full_attention_layers=tuple(range(3, 40, 4)),
+        linear_attention_layers=tuple(
+            layer for layer in range(40) if layer % 4 != 3
+        ),
+        quantization=MODULE.QuantizationSpec(format="bf16"),
+    )
+
+    result = MODULE.checkpoint_semantic_contract(
+        {"model_type": "qwen3_5_moe"},
+        {"eos_token_id": [248046, 248044]},
+        {"metadata": {"total_size": 71_903_645_408.0}, "weight_map": {}},
+        model_spec,
+    )
+
+    assert result["index_total_size_bytes"] == 71_903_645_408
+    assert isinstance(result["index_total_size_bytes"], int)
+
+
+def test_checkpoint_semantic_contract_derives_missing_size_from_headers():
+    text_config = SimpleNamespace(
+        model_type="qwen3_5_moe_text",
+        hidden_size=2048,
+        num_attention_heads=16,
+        num_key_value_heads=2,
+        head_dim=256,
+        num_experts=256,
+        num_experts_per_tok=8,
+        moe_intermediate_size=512,
+        max_position_embeddings=262144,
+        rope_parameters={"partial_rotary_factor": 0.25},
+    )
+    model_spec = SimpleNamespace(
+        architecture="Qwen3_5MoeForConditionalGeneration",
+        text_config=text_config,
+        num_hidden_layers=40,
+        full_attention_layers=tuple(range(3, 40, 4)),
+        linear_attention_layers=tuple(
+            layer for layer in range(40) if layer % 4 != 3
+        ),
+        quantization=MODULE.QuantizationSpec(format="fp8_block"),
+    )
+
+    result = MODULE.checkpoint_semantic_contract(
+        {"model_type": "qwen3_5_moe"},
+        {"eos_token_id": [248046, 248044]},
+        {"metadata": {}, "weight_map": {"a": "one", "b": "two"}},
+        model_spec,
+        {
+            "a": {"data_offsets": [0, 64]},
+            "b": {"data_offsets": [128, 160]},
+        },
+    )
+
+    assert result["index_total_size_bytes"] == 96
+
+
 @pytest.mark.parametrize(
     ("generation_config", "total_size"),
-    (({}, 1), ({"eos_token_id": [1]}, 0)),
+    (
+        ({}, 1),
+        ({"eos_token_id": [1]}, 0),
+        ({"eos_token_id": [1]}, 1.5),
+        ({"eos_token_id": [1]}, float("inf")),
+    ),
 )
 def test_checkpoint_semantic_contract_rejects_incomplete_identity(
     generation_config, total_size

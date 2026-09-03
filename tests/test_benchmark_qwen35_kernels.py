@@ -6,7 +6,7 @@ import pytest
 import torch
 
 
-pytest.importorskip("triton", reason="Qwen3.5 kernel benchmark requires Triton")
+pytest.importorskip("triton", reason="Qwen3.6 kernel benchmark requires Triton")
 
 
 ROOT = Path(__file__).parents[1]

@@ -1,4 +1,4 @@
-"""Run the Qwen3.5 TP/state/KV teacher-forcing quality matrix."""
+"""Run the Qwen3.6 TP/state/KV teacher-forcing quality matrix."""
 
 from __future__ import annotations
 

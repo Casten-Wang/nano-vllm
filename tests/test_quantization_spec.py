@@ -39,6 +39,44 @@ def test_official_block_fp8_config_is_normalized():
     assert not spec.ignores_module("model.layers.10.mlp.gate")
 
 
+def test_qwen36_block_fp8_defaults_are_normalized():
+    spec = resolve(
+        {
+            "quant_method": "fp8",
+            "activation_scheme": "dynamic",
+            "fmt": "e4m3",
+            "weight_block_size": [128, 128],
+        }
+    )
+
+    assert spec.format == "fp8_block"
+    assert spec.weight_block_size == (128, 128)
+
+
+@pytest.mark.parametrize("field", ("weight_per_tensor", "act_per_tensor"))
+def test_fp8_explicit_per_tensor_mode_is_rejected(field):
+    config = {
+        "quant_method": "fp8",
+        "activation_scheme": "dynamic",
+        "weight_block_size": [128, 128],
+        field: True,
+    }
+    with pytest.raises(ValueError, match=field):
+        resolve(config)
+
+
+def test_unverified_fp8_format_is_rejected():
+    with pytest.raises(ValueError, match="fmt"):
+        resolve(
+            {
+                "quant_method": "fp8",
+                "activation_scheme": "dynamic",
+                "fmt": "e5m2",
+                "weight_block_size": [128, 128],
+            }
+        )
+
+
 def test_official_gptq_int4_config_is_normalized():
     spec = resolve(
         {
