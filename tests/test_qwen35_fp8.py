@@ -8,6 +8,7 @@ import torch
 from safetensors.torch import save_file
 from torch import nn
 
+from nanovllm.layers.linear import ColumnParallelLinear, RowParallelLinear
 from nanovllm.models.qwen35_fp8 import (
     dequantize_fp8_block_weight,
     dequantize_fp8_block_weight_slice,
@@ -343,3 +344,57 @@ def test_fp8_expert_loader_dequantizes_only_non_aligned_tp_shards(tmp_path):
             experts.down_proj[expert_id],
             expected[(expert_id, "down")][:, 2:4],
         )
+
+
+class TinyFP8TensorParallelModel(nn.Module):
+    strict_weight_loading = True
+
+    def __init__(self):
+        super().__init__()
+        with (
+            patch("torch.distributed.get_world_size", return_value=2),
+            patch("torch.distributed.get_rank", return_value=1),
+        ):
+            self.column = ColumnParallelLinear(5, 6)
+            self.row = RowParallelLinear(6, 5)
+        self.checkpoint_quantization_spec = SimpleNamespace(
+            format="fp8_block",
+            weight_block_size=(4, 4),
+        )
+
+
+def test_model_loader_uses_tp_local_fp8_dense_slices(tmp_path):
+    model = TinyFP8TensorParallelModel()
+    column = torch.arange(1, 31).reshape(6, 5).to(torch.float8_e4m3fn)
+    row = torch.arange(1, 31).reshape(5, 6).to(torch.float8_e4m3fn)
+    scale = torch.tensor([[1.0, 2.0], [3.0, 4.0]])
+    save_file(
+        {
+            "column.weight": column,
+            "column.weight_scale_inv": scale,
+            "row.weight": row,
+            "row.weight_scale_inv": scale.clone(),
+        },
+        tmp_path / "model.safetensors",
+    )
+    expected_column = dequantize_fp8_block_weight(
+        column,
+        scale,
+        (4, 4),
+        output_dtype=model.column.weight.dtype,
+    )[3:6]
+    expected_row = dequantize_fp8_block_weight(
+        row,
+        scale,
+        (4, 4),
+        output_dtype=model.row.weight.dtype,
+    )[:, 3:6]
+
+    with patch(
+        "nanovllm.utils.loader.dequantize_fp8_block_weight",
+        side_effect=AssertionError("TP weights must not be fully dequantized"),
+    ):
+        load_model(model, str(tmp_path))
+
+    torch.testing.assert_close(model.column.weight, expected_column)
+    torch.testing.assert_close(model.row.weight, expected_row)

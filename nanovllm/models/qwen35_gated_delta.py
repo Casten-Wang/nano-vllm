@@ -831,6 +831,7 @@ class Qwen35GatedDeltaNet(nn.Module):
         )
         self.in_proj_qkv.weight.weight_loader = self._load_qkv
         self.in_proj_qkv.weight.safetensors_loader = self._load_qkv_slice
+        self.in_proj_qkv.weight.fp8_safetensors_loader = self._load_qkv_fp8_slice
         # These official checkpoint projections share the same input. Pack
         # them so decode launches one GEMM instead of three small GEMMs.
         self.in_proj_zba = MergedColumnParallelLinear(
@@ -868,6 +869,7 @@ class Qwen35GatedDeltaNet(nn.Module):
         )
         self.out_proj.weight.weight_loader = self._load_row
         self.out_proj.weight.safetensors_loader = self._load_row_slice
+        self.out_proj.weight.fp8_safetensors_loader = self._load_row_fp8_slice
         self.state_pool: Qwen35RecurrentStatePool | None = None
 
     def _column_shard(self, weight: torch.Tensor) -> torch.Tensor:
@@ -927,6 +929,34 @@ class Qwen35GatedDeltaNet(nn.Module):
             raise ValueError("invalid tensor-parallel row weight shape")
         param.data.copy_(weight[:, start:end])
 
+    def _load_row_fp8_slice(
+        self,
+        param: nn.Parameter,
+        weight,
+        scale,
+        block_size: tuple[int, int],
+    ) -> None:
+        from nanovllm.models.qwen35_fp8 import (
+            dequantize_fp8_block_weight_slice,
+        )
+
+        shape = self._slice_shape(weight)
+        if len(shape) != 2 or shape[0] != param.shape[0]:
+            raise ValueError("invalid tensor-parallel row weight shape")
+        start, end = self._column_bounds(shape[1])
+        if end - start != param.shape[1]:
+            raise ValueError("invalid tensor-parallel row weight shape")
+        param.data.copy_(
+            dequantize_fp8_block_weight_slice(
+                weight,
+                scale,
+                block_size,
+                (0, shape[0]),
+                (start, end),
+                output_dtype=param.dtype,
+            )
+        )
+
     @staticmethod
     def _copy_packed_rows(
         param: nn.Parameter,
@@ -970,6 +1000,44 @@ class Qwen35GatedDeltaNet(nn.Module):
                 offset += width
 
         self._copy_packed_rows(param, local_parts())
+
+    def _load_qkv_fp8_slice(
+        self,
+        param: nn.Parameter,
+        weight,
+        scale,
+        block_size: tuple[int, int],
+    ) -> None:
+        from nanovllm.models.qwen35_fp8 import (
+            dequantize_fp8_block_weight_slice,
+        )
+
+        expected = 2 * self.global_key_dim + self.global_value_dim
+        shape = self._slice_shape(weight)
+        if shape != (expected, self.hidden_size):
+            raise ValueError("invalid Qwen3.5 in_proj_qkv weight shape")
+
+        destination_offset = 0
+        source_offset = 0
+        for width in (
+            self.global_key_dim,
+            self.global_key_dim,
+            self.global_value_dim,
+        ):
+            start, end = self._column_bounds(width)
+            local = dequantize_fp8_block_weight_slice(
+                weight,
+                scale,
+                block_size,
+                (source_offset + start, source_offset + end),
+                (0, self.hidden_size),
+                output_dtype=param.dtype,
+            )
+            param.data.narrow(0, destination_offset, end - start).copy_(local)
+            destination_offset += end - start
+            source_offset += width
+        if destination_offset != param.shape[0]:
+            raise ValueError("packed Qwen3.5 weight rows do not match parameter")
 
     def _load_conv(self, param: nn.Parameter, weight: torch.Tensor) -> None:
         if weight.ndim != 3 or weight.shape[1] != 1:

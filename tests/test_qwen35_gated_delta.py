@@ -10,6 +10,8 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+from nanovllm.models.qwen35_fp8 import dequantize_fp8_block_weight
+
 
 MODULE_PATH = (
     Path(__file__).parents[1]
@@ -977,6 +979,52 @@ def test_gated_delta_safetensors_loaders_only_read_local_tp_slices():
     assert len(conv.requests) == 3
     assert len(column.requests) == 1
     assert len(row.requests) == 1
+
+
+def test_gated_delta_fp8_loaders_preserve_packed_offsets_and_local_rows():
+    layer = make_layer(rank=1, world_size=2)
+    rows = 2 * layer.global_key_dim + layer.global_value_dim
+    qkv = torch.arange(1, rows * 4 + 1).reshape(rows, 4).to(
+        torch.float8_e4m3fn
+    )
+    qkv_scale = torch.arange(
+        1,
+        ((rows + 2) // 3) * 2 + 1,
+        dtype=torch.float32,
+    ).reshape((rows + 2) // 3, 2)
+    out = torch.arange(1, 33).reshape(4, 8).to(torch.float8_e4m3fn)
+    out_scale = torch.arange(1, 7, dtype=torch.float32).reshape(2, 3)
+
+    layer._load_qkv_fp8_slice(
+        layer.in_proj_qkv.weight,
+        TrackingSlice(qkv),
+        TrackingSlice(qkv_scale),
+        (3, 3),
+    )
+    layer._load_row_fp8_slice(
+        layer.out_proj.weight,
+        TrackingSlice(out),
+        TrackingSlice(out_scale),
+        (3, 3),
+    )
+
+    full_qkv = dequantize_fp8_block_weight(
+        qkv,
+        qkv_scale,
+        (3, 3),
+        output_dtype=layer.in_proj_qkv.weight.dtype,
+    )
+    expected_qkv = torch.cat(
+        (full_qkv[2:4], full_qkv[6:8], full_qkv[12:16]),
+    )
+    full_out = dequantize_fp8_block_weight(
+        out,
+        out_scale,
+        (3, 3),
+        output_dtype=layer.out_proj.weight.dtype,
+    )
+    torch.testing.assert_close(layer.in_proj_qkv.weight, expected_qkv)
+    torch.testing.assert_close(layer.out_proj.weight, full_out[:, 4:8])
 
 
 def test_gated_delta_packed_loaders_do_not_materialize_local_copy():

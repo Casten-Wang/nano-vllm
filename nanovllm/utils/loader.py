@@ -112,6 +112,22 @@ def load_model(model: nn.Module, path: str):
                                 )
                                 loaded_parameters.add(param_name)
                                 continue
+                        else:
+                            param = model.get_parameter(weight_name)
+                            fp8_loader = getattr(
+                                param,
+                                "fp8_safetensors_loader",
+                                None,
+                            )
+                            if fp8_loader is not None:
+                                fp8_loader(
+                                    param,
+                                    source_slice,
+                                    f.get_slice(scale_name),
+                                    fp8_block_size,
+                                )
+                                loaded_parameters.add(weight_name)
+                                continue
                         loaded_tensor = dequantize_fp8_block_weight(
                             f.get_tensor(source_weight_name),
                             f.get_tensor(scale_name),

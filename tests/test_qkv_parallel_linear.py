@@ -6,6 +6,8 @@ from unittest.mock import patch
 import pytest
 import torch
 
+from nanovllm.models.qwen35_fp8 import dequantize_fp8_block_weight
+
 
 LINEAR_PATH = Path(__file__).parents[1] / "nanovllm" / "layers" / "linear.py"
 SPEC = spec_from_file_location("linear_under_test", LINEAR_PATH)
@@ -214,3 +216,106 @@ def test_lazy_qkv_loader_preserves_replicated_kv_source_selection():
     assert query.requests == [(slice(8, 16), slice(None))]
     assert key.requests == [(slice(0, 2), slice(None))]
     assert value.requests == [(slice(0, 2), slice(None))]
+
+
+def test_fp8_column_and_row_loaders_dequantize_only_local_non_aligned_shards():
+    with (
+        patch.object(LINEAR.dist, "get_world_size", return_value=2),
+        patch.object(LINEAR.dist, "get_rank", return_value=1),
+    ):
+        column = LINEAR.ColumnParallelLinear(5, 6)
+        row = LINEAR.RowParallelLinear(6, 5)
+    column_weight = torch.arange(1, 31).reshape(6, 5).to(torch.float8_e4m3fn)
+    row_weight = torch.arange(1, 31).reshape(5, 6).to(torch.float8_e4m3fn)
+    column_scale = torch.tensor([[1.0, 2.0], [3.0, 4.0]])
+    row_scale = torch.tensor([[1.0, 2.0], [3.0, 4.0]])
+
+    column.fp8_safetensors_loader(
+        column.weight,
+        TrackingSlice(column_weight),
+        TrackingSlice(column_scale),
+        (4, 4),
+    )
+    row.fp8_safetensors_loader(
+        row.weight,
+        TrackingSlice(row_weight),
+        TrackingSlice(row_scale),
+        (4, 4),
+    )
+
+    expected_column = dequantize_fp8_block_weight(
+        column_weight,
+        column_scale,
+        (4, 4),
+        output_dtype=column.weight.dtype,
+    )[3:6]
+    expected_row = dequantize_fp8_block_weight(
+        row_weight,
+        row_scale,
+        (4, 4),
+        output_dtype=row.weight.dtype,
+    )[:, 3:6]
+    torch.testing.assert_close(column.weight, expected_column)
+    torch.testing.assert_close(row.weight, expected_row)
+
+
+def test_fp8_qkv_loader_preserves_replicated_kv_and_block_offsets():
+    with (
+        patch.object(LINEAR.dist, "get_world_size", return_value=2),
+        patch.object(LINEAR.dist, "get_rank", return_value=1),
+    ):
+        layer = LINEAR.QKVParallelLinear(
+            hidden_size=5,
+            head_size=2,
+            total_num_heads=4,
+            total_num_kv_heads=2,
+        )
+    query = torch.arange(1, 41).reshape(8, 5).to(torch.float8_e4m3fn)
+    key = torch.arange(1, 21).reshape(4, 5).to(torch.float8_e4m3fn)
+    value = (torch.arange(1, 21).reshape(4, 5) + 40).to(torch.float8_e4m3fn)
+    query_scale = torch.arange(1, 7, dtype=torch.float32).reshape(3, 2)
+    kv_scale = torch.arange(1, 5, dtype=torch.float32).reshape(2, 2)
+
+    layer.fp8_packed_safetensors_loader(
+        layer.weight,
+        TrackingSlice(query),
+        TrackingSlice(query_scale),
+        "q",
+        (3, 3),
+    )
+    layer.fp8_packed_safetensors_loader(
+        layer.weight,
+        TrackingSlice(key),
+        TrackingSlice(kv_scale),
+        "k",
+        (3, 3),
+    )
+    layer.fp8_packed_safetensors_loader(
+        layer.weight,
+        TrackingSlice(value),
+        TrackingSlice(kv_scale),
+        "v",
+        (3, 3),
+    )
+
+    expected_query = dequantize_fp8_block_weight(
+        query,
+        query_scale,
+        (3, 3),
+        output_dtype=layer.weight.dtype,
+    )[4:8]
+    expected_key = dequantize_fp8_block_weight(
+        key,
+        kv_scale,
+        (3, 3),
+        output_dtype=layer.weight.dtype,
+    )[2:4]
+    expected_value = dequantize_fp8_block_weight(
+        value,
+        kv_scale,
+        (3, 3),
+        output_dtype=layer.weight.dtype,
+    )[2:4]
+    torch.testing.assert_close(layer.weight[:4], expected_query)
+    torch.testing.assert_close(layer.weight[4:6], expected_key)
+    torch.testing.assert_close(layer.weight[6:8], expected_value)

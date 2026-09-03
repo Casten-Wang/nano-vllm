@@ -9,6 +9,28 @@ def divide(numerator, denominator):
     return numerator // denominator
 
 
+def _copy_fp8_weight_slice(
+    target: torch.Tensor,
+    loaded_weight,
+    loaded_scale,
+    block_size: tuple[int, int],
+    row_range: tuple[int, int],
+    column_range: tuple[int, int],
+) -> None:
+    from nanovllm.models.qwen35_fp8 import dequantize_fp8_block_weight_slice
+
+    target.copy_(
+        dequantize_fp8_block_weight_slice(
+            loaded_weight,
+            loaded_scale,
+            block_size,
+            row_range,
+            column_range,
+            output_dtype=target.dtype,
+        )
+    )
+
+
 class LinearBase(nn.Module):
 
     def __init__(
@@ -62,6 +84,7 @@ class ColumnParallelLinear(LinearBase):
         tp_size = dist.get_world_size()
         super().__init__(input_size, divide(output_size, tp_size), bias, 0)
         self.weight.safetensors_loader = self.safetensors_loader
+        self.weight.fp8_safetensors_loader = self.fp8_safetensors_loader
         if self.bias is not None:
             self.bias.safetensors_loader = self.safetensors_loader
 
@@ -87,6 +110,30 @@ class ColumnParallelLinear(LinearBase):
         index[self.tp_dim] = slice(start, start + shard_size)
         param.data.copy_(loaded_weight[tuple(index)])
 
+    def fp8_safetensors_loader(
+        self,
+        param: nn.Parameter,
+        loaded_weight,
+        loaded_scale,
+        block_size: tuple[int, int],
+    ):
+        shape = tuple(loaded_weight.get_shape())
+        expected_shape = (param.shape[0] * self.tp_size, param.shape[1])
+        if shape != expected_shape:
+            raise ValueError(
+                f"invalid column-parallel weight shape: {shape}; "
+                f"expected {expected_shape}"
+            )
+        start = self.tp_rank * param.shape[0]
+        _copy_fp8_weight_slice(
+            param.data,
+            loaded_weight,
+            loaded_scale,
+            block_size,
+            (start, start + param.shape[0]),
+            (0, param.shape[1]),
+        )
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return F.linear(x, self.weight, self.bias)
 
@@ -102,6 +149,9 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         self.output_sizes = output_sizes
         super().__init__(input_size, sum(output_sizes), bias)
         self.weight.packed_safetensors_loader = self.packed_safetensors_loader
+        self.weight.fp8_packed_safetensors_loader = (
+            self.fp8_packed_safetensors_loader
+        )
         if self.bias is not None:
             self.bias.packed_safetensors_loader = self.packed_safetensors_loader
 
@@ -137,6 +187,36 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         ) * (len(shape) - 1)
         target.copy_(loaded_weight[index])
 
+    def fp8_packed_safetensors_loader(
+        self,
+        param: nn.Parameter,
+        loaded_weight,
+        loaded_scale,
+        loaded_shard_id: int,
+        block_size: tuple[int, int],
+    ):
+        if not 0 <= loaded_shard_id < len(self.output_sizes):
+            raise ValueError("invalid merged column shard id")
+        shape = tuple(loaded_weight.get_shape())
+        expected_shape = (self.output_sizes[loaded_shard_id], param.shape[1])
+        if shape != expected_shape:
+            raise ValueError(
+                f"invalid merged column weight shape: {shape}; "
+                f"expected {expected_shape}"
+            )
+        shard_size = self.output_sizes[loaded_shard_id] // self.tp_size
+        source_start = self.tp_rank * shard_size
+        target_start = sum(self.output_sizes[:loaded_shard_id]) // self.tp_size
+        target = param.data.narrow(self.tp_dim, target_start, shard_size)
+        _copy_fp8_weight_slice(
+            target,
+            loaded_weight,
+            loaded_scale,
+            block_size,
+            (source_start, source_start + shard_size),
+            (0, param.shape[1]),
+        )
+
 
 class QKVParallelLinear(ColumnParallelLinear):
 
@@ -168,6 +248,9 @@ class QKVParallelLinear(ColumnParallelLinear):
         ) * tp_size
         super().__init__(hidden_size, output_size, bias)
         self.weight.packed_safetensors_loader = self.packed_safetensors_loader
+        self.weight.fp8_packed_safetensors_loader = (
+            self.fp8_packed_safetensors_loader
+        )
         if self.bias is not None:
             self.bias.packed_safetensors_loader = self.packed_safetensors_loader
 
@@ -235,6 +318,48 @@ class QKVParallelLinear(ColumnParallelLinear):
         ) * (len(shape) - 1)
         target.copy_(loaded_weight[index])
 
+    def fp8_packed_safetensors_loader(
+        self,
+        param: nn.Parameter,
+        loaded_weight,
+        loaded_scale,
+        loaded_shard_id: str,
+        block_size: tuple[int, int],
+    ):
+        if loaded_shard_id not in ("q", "k", "v"):
+            raise ValueError("invalid QKV shard id")
+        if loaded_shard_id == "q":
+            shard_size = self.num_heads * self.q_head_size
+            target_start = 0
+            source_rank = self.tp_rank
+            source_rows = shard_size * self.tp_size
+        else:
+            shard_size = self.num_kv_heads * self.head_size
+            target_start = self.num_heads * self.q_head_size
+            if loaded_shard_id == "v":
+                target_start += shard_size
+            source_rank = self.tp_rank // self.num_kv_head_replicas
+            source_rows = shard_size * (
+                self.tp_size // self.num_kv_head_replicas
+            )
+        shape = tuple(loaded_weight.get_shape())
+        expected_shape = (source_rows, param.shape[1])
+        if shape != expected_shape:
+            raise ValueError(
+                f"invalid QKV {loaded_shard_id} weight shape: {shape}; "
+                f"expected {expected_shape}"
+            )
+        source_start = source_rank * shard_size
+        target = param.data.narrow(self.tp_dim, target_start, shard_size)
+        _copy_fp8_weight_slice(
+            target,
+            loaded_weight,
+            loaded_scale,
+            block_size,
+            (source_start, source_start + shard_size),
+            (0, param.shape[1]),
+        )
+
 
 class KVParallelLinear(ColumnParallelLinear):
     """Shard KV heads, replicating source heads when TP is larger."""
@@ -261,6 +386,7 @@ class KVParallelLinear(ColumnParallelLinear):
             bias,
         )
         self.weight.safetensors_loader = self.safetensors_loader
+        self.weight.fp8_safetensors_loader = self.fp8_safetensors_loader
         if self.bias is not None:
             self.bias.safetensors_loader = self.safetensors_loader
 
@@ -290,6 +416,35 @@ class KVParallelLinear(ColumnParallelLinear):
         )
         param.data.copy_(loaded_weight[index])
 
+    def fp8_safetensors_loader(
+        self,
+        param: nn.Parameter,
+        loaded_weight,
+        loaded_scale,
+        block_size: tuple[int, int],
+    ):
+        shape = tuple(loaded_weight.get_shape())
+        expected_shape = (
+            self.total_num_kv_heads * self.head_size,
+            param.shape[1],
+        )
+        if shape != expected_shape:
+            raise ValueError(
+                f"invalid KV-parallel weight shape: {shape}; "
+                f"expected {expected_shape}"
+            )
+        shard_size = self.num_kv_heads * self.head_size
+        source_rank = self.tp_rank // self.num_kv_head_replicas
+        start = source_rank * shard_size
+        _copy_fp8_weight_slice(
+            param.data,
+            loaded_weight,
+            loaded_scale,
+            block_size,
+            (start, start + shard_size),
+            (0, param.shape[1]),
+        )
+
 
 class RowParallelLinear(LinearBase):
 
@@ -302,6 +457,7 @@ class RowParallelLinear(LinearBase):
         tp_size = dist.get_world_size()
         super().__init__(divide(input_size, tp_size), output_size, bias, 1)
         self.weight.safetensors_loader = self.safetensors_loader
+        self.weight.fp8_safetensors_loader = self.fp8_safetensors_loader
         if self.bias is not None:
             self.bias.safetensors_loader = self.safetensors_loader
 
@@ -331,6 +487,30 @@ class RowParallelLinear(LinearBase):
         shard_size = param.shape[self.tp_dim]
         start = self.tp_rank * shard_size
         param.data.copy_(loaded_weight[:, start : start + shard_size])
+
+    def fp8_safetensors_loader(
+        self,
+        param: nn.Parameter,
+        loaded_weight,
+        loaded_scale,
+        block_size: tuple[int, int],
+    ):
+        shape = tuple(loaded_weight.get_shape())
+        expected_shape = (param.shape[0], param.shape[1] * self.tp_size)
+        if shape != expected_shape:
+            raise ValueError(
+                f"invalid row-parallel weight shape: {shape}; "
+                f"expected {expected_shape}"
+            )
+        start = self.tp_rank * param.shape[1]
+        _copy_fp8_weight_slice(
+            param.data,
+            loaded_weight,
+            loaded_scale,
+            block_size,
+            (0, param.shape[0]),
+            (start, start + param.shape[1]),
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         y = F.linear(x, self.weight, self.bias if self.tp_rank == 0 else None)
