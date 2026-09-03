@@ -11,7 +11,9 @@ from nanovllm.engine.tp_cache_reshard import (
     plan_grouped_uniform_reshard,
     plan_kv_head_reshard,
     plan_uniform_reshard,
+    profile_qwen35_cache_transfer_layout,
     profile_tp_transfer_plan,
+    profile_tp_transfer_layout,
     reshard_kv_heads,
     reshard_qwen35_convolution_state,
     reshard_uniform_tensor,
@@ -126,6 +128,7 @@ def test_qwen36_kv_fanout_uses_all_available_source_replicas():
 
     per_head_bytes = global_kv.numel() // 2 * global_kv.element_size()
     assert profile.source_bytes == (per_head_bytes * 2,) * 4
+    assert profile.source_staging_bytes == (per_head_bytes,) * 4
     assert profile.destination_bytes == (per_head_bytes,) * 8
     assert profile.source_peer_counts == (2, 2, 2, 2)
     assert profile.destination_peer_counts == (1,) * 8
@@ -223,6 +226,23 @@ def test_request_profile_aggregates_all_qwen36_cache_components(
             convolution_profile,
         )
     )
+    estimated_profile = profile_qwen35_cache_transfer_layout(
+        src_tp_size=src_tp,
+        dst_tp_size=dst_tp,
+        total_kv_heads=2,
+        kv_bytes_per_head=(
+            global_kv.numel() // 2 * global_kv.element_size()
+        ),
+        kv_scale_bytes_per_head=(
+            global_scale.numel() // 2 * global_scale.element_size()
+        ),
+        recurrent_heads=32,
+        recurrent_bytes_per_head=(
+            global_recurrent.numel() // 32 * global_recurrent.element_size()
+        ),
+        convolution_group_widths=(16, 16, 32),
+        convolution_bytes_per_channel=query.shape[1] * query.element_size(),
+    )
 
     component_profiles = (
         kv_profile,
@@ -235,6 +255,13 @@ def test_request_profile_aggregates_all_qwen36_cache_components(
     )
     assert request_profile.source_bytes == tuple(
         sum(profile.source_bytes[rank] for profile in component_profiles)
+        for rank in range(src_tp)
+    )
+    assert request_profile.source_staging_bytes == tuple(
+        sum(
+            profile.source_staging_bytes[rank]
+            for profile in component_profiles
+        )
         for rank in range(src_tp)
     )
     assert request_profile.destination_bytes == tuple(
@@ -250,6 +277,67 @@ def test_request_profile_aggregates_all_qwen36_cache_components(
         profile.slice_count for profile in component_profiles
     )
     assert len(request_profile.peer_bytes) == max(src_tp, dst_tp)
+    assert estimated_profile == request_profile
+
+
+def test_layout_preflight_omits_scale_traffic_for_floating_kv_cache():
+    common = {
+        "src_tp_size": 4,
+        "dst_tp_size": 8,
+        "total_kv_heads": 2,
+        "kv_bytes_per_head": 1_024,
+        "recurrent_heads": 32,
+        "recurrent_bytes_per_head": 512,
+        "convolution_group_widths": (16, 16, 32),
+        "convolution_bytes_per_channel": 64,
+    }
+    floating = profile_qwen35_cache_transfer_layout(
+        **common,
+        kv_scale_bytes_per_head=0,
+    )
+    quantized = profile_qwen35_cache_transfer_layout(
+        **common,
+        kv_scale_bytes_per_head=32,
+    )
+
+    assert quantized.wire_bytes - floating.wire_bytes == 8 * 32
+    assert (
+        sum(quantized.source_staging_bytes)
+        - sum(floating.source_staging_bytes)
+        == 4 * 32
+    )
+    assert all(
+        quantized.destination_bytes[rank]
+        - floating.destination_bytes[rank]
+        == 32
+        for rank in range(8)
+    )
+
+
+@pytest.mark.parametrize(
+    "field,value,match",
+    [
+        ("kv_bytes_per_head", True, "kv_bytes_per_head"),
+        ("kv_scale_bytes_per_head", -1, "kv_scale_bytes_per_head"),
+        ("recurrent_heads", 0, "recurrent_heads"),
+        ("convolution_group_widths", [16, 16, 32], "group widths"),
+    ],
+)
+def test_layout_preflight_rejects_invalid_capacity_metadata(field, value, match):
+    arguments = {
+        "src_tp_size": 4,
+        "dst_tp_size": 8,
+        "total_kv_heads": 2,
+        "kv_bytes_per_head": 1_024,
+        "kv_scale_bytes_per_head": 0,
+        "recurrent_heads": 32,
+        "recurrent_bytes_per_head": 512,
+        "convolution_group_widths": (16, 16, 32),
+        "convolution_bytes_per_channel": 64,
+    }
+    arguments[field] = value
+    with pytest.raises(ValueError, match=match):
+        profile_qwen35_cache_transfer_layout(**arguments)
 
 
 @pytest.mark.parametrize("src_tp,dst_tp", [(4, 8), (8, 4), (4, 4)])
@@ -580,6 +668,7 @@ def test_transfer_profile_rejects_inconsistent_peer_ledger():
         TPTransferProfile(
             wire_bytes=4,
             source_bytes=(4,),
+            source_staging_bytes=(4,),
             destination_bytes=(4,),
             source_peer_counts=(1,),
             destination_peer_counts=(1,),
@@ -593,11 +682,26 @@ def test_transfer_profile_rejects_per_rank_byte_mismatch():
         TPTransferProfile(
             wire_bytes=4,
             source_bytes=(2, 2),
+            source_staging_bytes=(2, 2),
             destination_bytes=(2, 2),
             source_peer_counts=(2, 0),
             destination_peer_counts=(1, 1),
             peer_bytes=((0, 0, 2), (0, 1, 2)),
             slice_count=2,
+        )
+
+
+def test_transfer_profile_rejects_staging_larger_than_egress():
+    with pytest.raises(ValueError, match="staging bytes"):
+        TPTransferProfile(
+            wire_bytes=4,
+            source_bytes=(4,),
+            source_staging_bytes=(5,),
+            destination_bytes=(4,),
+            source_peer_counts=(1,),
+            destination_peer_counts=(1,),
+            peer_bytes=((0, 0, 4),),
+            slice_count=1,
         )
 
 

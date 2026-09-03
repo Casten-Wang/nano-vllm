@@ -49,6 +49,7 @@ class TPTransferProfile:
 
     wire_bytes: int
     source_bytes: tuple[int, ...]
+    source_staging_bytes: tuple[int, ...]
     destination_bytes: tuple[int, ...]
     source_peer_counts: tuple[int, ...]
     destination_peer_counts: tuple[int, ...]
@@ -62,6 +63,7 @@ class TPTransferProfile:
             self.wire_bytes,
             self.slice_count,
             *self.source_bytes,
+            *self.source_staging_bytes,
             *self.destination_bytes,
             *self.source_peer_counts,
             *self.destination_peer_counts,
@@ -75,6 +77,7 @@ class TPTransferProfile:
             raise ValueError("transfer profile wire bytes and slice count must be positive")
         if (
             len(self.source_bytes) != len(self.source_peer_counts)
+            or len(self.source_bytes) != len(self.source_staging_bytes)
             or len(self.destination_bytes) != len(self.destination_peer_counts)
         ):
             raise ValueError("transfer profile rank vectors have inconsistent lengths")
@@ -85,6 +88,14 @@ class TPTransferProfile:
             raise ValueError("transfer profile rank bytes do not match wire bytes")
         if any(byte_count <= 0 for byte_count in self.destination_bytes):
             raise ValueError("every destination rank must receive transfer bytes")
+        if any(
+            staged < 0 or staged > transmitted
+            for staged, transmitted in zip(
+                self.source_staging_bytes,
+                self.source_bytes,
+            )
+        ):
+            raise ValueError("source staging bytes exceed transmitted bytes")
 
         peer_map = {}
         source_peers = [set() for _ in self.source_bytes]
@@ -529,16 +540,19 @@ def plan_kv_head_reshard(
     return tuple(slices)
 
 
-def _validate_transfer_plan(
-    shards: Sequence[torch.Tensor],
+def _validate_transfer_layout(
     plan: Sequence[TPTransferSlice],
+    source_widths: Sequence[int],
     dst_tp_size: int,
     *,
-    shard_dim: int,
     dst_width: int,
-) -> int:
+) -> None:
     _validate_tp_size(dst_tp_size)
-    normalized_dim = _validate_shards(shards, shard_dim=shard_dim)
+    if not source_widths or any(
+        not isinstance(width, int) or isinstance(width, bool) or width <= 0
+        for width in source_widths
+    ):
+        raise ValueError("source widths must be positive integers")
     if not isinstance(dst_width, int) or isinstance(dst_width, bool) or dst_width <= 0:
         raise ValueError("destination width must be a positive integer")
     if not plan:
@@ -548,9 +562,9 @@ def _validate_transfer_plan(
     for entry in plan:
         if not isinstance(entry, TPTransferSlice):
             raise ValueError("tensor-parallel transfer plan entry is invalid")
-        if entry.src_rank >= len(shards) or entry.dst_rank >= dst_tp_size:
+        if entry.src_rank >= len(source_widths) or entry.dst_rank >= dst_tp_size:
             raise ValueError("tensor-parallel transfer rank is out of bounds")
-        if entry.src_start + entry.length > shards[entry.src_rank].shape[normalized_dim]:
+        if entry.src_start + entry.length > source_widths[entry.src_rank]:
             raise ValueError("tensor-parallel source slice is out of bounds")
         if entry.dst_start + entry.length > dst_width:
             raise ValueError("tensor-parallel destination slice is out of bounds")
@@ -562,7 +576,103 @@ def _validate_transfer_plan(
         )
     if any(not all(destination_coverage) for destination_coverage in covered):
         raise ValueError("tensor-parallel transfer plan leaves destination gaps")
+
+
+def _validate_transfer_plan(
+    shards: Sequence[torch.Tensor],
+    plan: Sequence[TPTransferSlice],
+    dst_tp_size: int,
+    *,
+    shard_dim: int,
+    dst_width: int,
+) -> int:
+    normalized_dim = _validate_shards(shards, shard_dim=shard_dim)
+    _validate_transfer_layout(
+        plan,
+        tuple(shard.shape[normalized_dim] for shard in shards),
+        dst_tp_size,
+        dst_width=dst_width,
+    )
     return normalized_dim
+
+
+def _profile_validated_transfer_layout(
+    plan: Sequence[TPTransferSlice],
+    source_widths: Sequence[int],
+    dst_tp_size: int,
+    *,
+    bytes_per_dim: int,
+) -> TPTransferProfile:
+    source_bytes = [0] * len(source_widths)
+    destination_bytes = [0] * dst_tp_size
+    source_peers = [set() for _ in source_widths]
+    destination_peers = [set() for _ in range(dst_tp_size)]
+    source_coverage = [[False] * width for width in source_widths]
+    peer_bytes = {}
+    for entry in plan:
+        transfer_bytes = entry.length * bytes_per_dim
+        source_bytes[entry.src_rank] += transfer_bytes
+        destination_bytes[entry.dst_rank] += transfer_bytes
+        source_peers[entry.src_rank].add(entry.dst_rank)
+        destination_peers[entry.dst_rank].add(entry.src_rank)
+        peer = (entry.src_rank, entry.dst_rank)
+        peer_bytes[peer] = peer_bytes.get(peer, 0) + transfer_bytes
+        source_coverage[entry.src_rank][
+            entry.src_start : entry.src_start + entry.length
+        ] = [True] * entry.length
+    return TPTransferProfile(
+        wire_bytes=sum(source_bytes),
+        source_bytes=tuple(source_bytes),
+        source_staging_bytes=tuple(
+            sum(covered) * bytes_per_dim for covered in source_coverage
+        ),
+        destination_bytes=tuple(destination_bytes),
+        source_peer_counts=tuple(len(peers) for peers in source_peers),
+        destination_peer_counts=tuple(len(peers) for peers in destination_peers),
+        peer_bytes=tuple(
+            (src_rank, dst_rank, byte_count)
+            for (src_rank, dst_rank), byte_count in sorted(peer_bytes.items())
+        ),
+        slice_count=len(plan),
+    )
+
+
+def profile_tp_transfer_layout(
+    plan: Sequence[TPTransferSlice],
+    src_tp_size: int,
+    dst_tp_size: int,
+    *,
+    src_width: int,
+    dst_width: int,
+    bytes_per_dim: int,
+) -> TPTransferProfile:
+    """Estimate exact peer traffic from shapes without allocating tensors."""
+
+    _validate_tp_size(src_tp_size)
+    if (
+        not isinstance(src_width, int)
+        or isinstance(src_width, bool)
+        or src_width <= 0
+    ):
+        raise ValueError("source width must be a positive integer")
+    if (
+        not isinstance(bytes_per_dim, int)
+        or isinstance(bytes_per_dim, bool)
+        or bytes_per_dim <= 0
+    ):
+        raise ValueError("bytes per dimension must be a positive integer")
+    _validate_transfer_layout(
+        plan,
+        (src_width,) * src_tp_size,
+        dst_tp_size,
+        dst_width=dst_width,
+    )
+    return _profile_validated_transfer_layout(
+        plan,
+        (src_width,) * src_tp_size,
+        dst_tp_size,
+        bytes_per_dim=bytes_per_dim,
+    )
 
 
 def profile_tp_transfer_plan(
@@ -587,30 +697,11 @@ def profile_tp_transfer_plan(
         // shards[0].shape[normalized_dim]
         * shards[0].element_size()
     )
-    source_bytes = [0] * len(shards)
-    destination_bytes = [0] * dst_tp_size
-    source_peers = [set() for _ in shards]
-    destination_peers = [set() for _ in range(dst_tp_size)]
-    peer_bytes = {}
-    for entry in plan:
-        transfer_bytes = entry.length * bytes_per_dim
-        source_bytes[entry.src_rank] += transfer_bytes
-        destination_bytes[entry.dst_rank] += transfer_bytes
-        source_peers[entry.src_rank].add(entry.dst_rank)
-        destination_peers[entry.dst_rank].add(entry.src_rank)
-        peer = (entry.src_rank, entry.dst_rank)
-        peer_bytes[peer] = peer_bytes.get(peer, 0) + transfer_bytes
-    return TPTransferProfile(
-        wire_bytes=sum(source_bytes),
-        source_bytes=tuple(source_bytes),
-        destination_bytes=tuple(destination_bytes),
-        source_peer_counts=tuple(len(peers) for peers in source_peers),
-        destination_peer_counts=tuple(len(peers) for peers in destination_peers),
-        peer_bytes=tuple(
-            (src_rank, dst_rank, byte_count)
-            for (src_rank, dst_rank), byte_count in sorted(peer_bytes.items())
-        ),
-        slice_count=len(plan),
+    return _profile_validated_transfer_layout(
+        plan,
+        tuple(shard.shape[normalized_dim] for shard in shards),
+        dst_tp_size,
+        bytes_per_dim=bytes_per_dim,
     )
 
 
@@ -633,11 +724,14 @@ def aggregate_tp_transfer_profiles(
         raise ValueError("tensor transfer profiles use different TP topologies")
 
     source_bytes = [0] * src_tp_size
+    source_staging_bytes = [0] * src_tp_size
     destination_bytes = [0] * dst_tp_size
     peer_bytes = {}
     for profile in profiles:
         for rank, byte_count in enumerate(profile.source_bytes):
             source_bytes[rank] += byte_count
+        for rank, byte_count in enumerate(profile.source_staging_bytes):
+            source_staging_bytes[rank] += byte_count
         for rank, byte_count in enumerate(profile.destination_bytes):
             destination_bytes[rank] += byte_count
         for src_rank, dst_rank, byte_count in profile.peer_bytes:
@@ -652,6 +746,7 @@ def aggregate_tp_transfer_profiles(
     return TPTransferProfile(
         wire_bytes=sum(profile.wire_bytes for profile in profiles),
         source_bytes=tuple(source_bytes),
+        source_staging_bytes=tuple(source_staging_bytes),
         destination_bytes=tuple(destination_bytes),
         source_peer_counts=tuple(len(peers) for peers in source_peers),
         destination_peer_counts=tuple(len(peers) for peers in destination_peers),
@@ -661,6 +756,106 @@ def aggregate_tp_transfer_profiles(
         ),
         slice_count=sum(profile.slice_count for profile in profiles),
     )
+
+
+def profile_qwen35_cache_transfer_layout(
+    *,
+    src_tp_size: int,
+    dst_tp_size: int,
+    total_kv_heads: int,
+    kv_bytes_per_head: int,
+    kv_scale_bytes_per_head: int,
+    recurrent_heads: int,
+    recurrent_bytes_per_head: int,
+    convolution_group_widths: tuple[int, int, int],
+    convolution_bytes_per_channel: int,
+) -> TPTransferProfile:
+    """Preflight a complete Qwen3.6 hybrid-cache transfer without tensors."""
+
+    _validate_tp_size(src_tp_size)
+    _validate_tp_size(dst_tp_size)
+    positive_values = (
+        ("kv_bytes_per_head", kv_bytes_per_head),
+        ("recurrent_heads", recurrent_heads),
+        ("recurrent_bytes_per_head", recurrent_bytes_per_head),
+        ("convolution_bytes_per_channel", convolution_bytes_per_channel),
+    )
+    for name, value in positive_values:
+        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+            raise ValueError(f"{name} must be a positive integer")
+    if (
+        not isinstance(kv_scale_bytes_per_head, int)
+        or isinstance(kv_scale_bytes_per_head, bool)
+        or kv_scale_bytes_per_head < 0
+    ):
+        raise ValueError("kv_scale_bytes_per_head must be a non-negative integer")
+    if (
+        not isinstance(convolution_group_widths, tuple)
+        or len(convolution_group_widths) != 3
+    ):
+        raise ValueError("convolution group widths must contain Q, K, and V")
+
+    src_kv_heads, _ = _kv_head_topology(total_kv_heads, src_tp_size)
+    dst_kv_heads, _ = _kv_head_topology(total_kv_heads, dst_tp_size)
+    kv_plan = plan_kv_head_reshard(
+        total_kv_heads,
+        src_tp_size,
+        dst_tp_size,
+    )
+    profiles = [
+        profile_tp_transfer_layout(
+            kv_plan,
+            src_tp_size,
+            dst_tp_size,
+            src_width=src_kv_heads,
+            dst_width=dst_kv_heads,
+            bytes_per_dim=kv_bytes_per_head,
+        )
+    ]
+    if kv_scale_bytes_per_head:
+        profiles.append(
+            profile_tp_transfer_layout(
+                kv_plan,
+                src_tp_size,
+                dst_tp_size,
+                src_width=src_kv_heads,
+                dst_width=dst_kv_heads,
+                bytes_per_dim=kv_scale_bytes_per_head,
+            )
+        )
+
+    recurrent_plan = plan_uniform_reshard(
+        recurrent_heads,
+        src_tp_size,
+        dst_tp_size,
+    )
+    profiles.append(
+        profile_tp_transfer_layout(
+            recurrent_plan,
+            src_tp_size,
+            dst_tp_size,
+            src_width=recurrent_heads // src_tp_size,
+            dst_width=recurrent_heads // dst_tp_size,
+            bytes_per_dim=recurrent_bytes_per_head,
+        )
+    )
+
+    convolution_plan = plan_grouped_uniform_reshard(
+        convolution_group_widths,
+        src_tp_size,
+        dst_tp_size,
+    )
+    profiles.append(
+        profile_tp_transfer_layout(
+            convolution_plan,
+            src_tp_size,
+            dst_tp_size,
+            src_width=sum(convolution_group_widths) // src_tp_size,
+            dst_width=sum(convolution_group_widths) // dst_tp_size,
+            bytes_per_dim=convolution_bytes_per_channel,
+        )
+    )
+    return aggregate_tp_transfer_profiles(profiles)
 
 
 def apply_tp_transfer_plan(
