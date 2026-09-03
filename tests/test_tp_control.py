@@ -767,6 +767,26 @@ class HybridStateContextTest(unittest.TestCase):
         self.assertEqual(stats["rotary_cache_bytes_local_rank"], 20)
         self.assertEqual(stats["total_model_state_bytes_local_rank"], 40)
 
+    def test_model_parameter_stats_deduplicate_tied_storage_by_dtype(self):
+        import torch
+
+        runner = object.__new__(ModelRunner)
+        model = torch.nn.Module()
+        model.first = torch.nn.Linear(3, 2, bias=False)
+        model.second = torch.nn.Linear(3, 2, bias=False)
+        model.second.weight.data = model.first.weight.data
+        model.extra = torch.nn.Parameter(torch.ones(4, dtype=torch.float64))
+        runner.model = model
+
+        stats = runner.get_model_parameter_stats()
+
+        self.assertEqual(stats["logical_parameter_count"], 3)
+        self.assertEqual(stats["logical_numel"], 16)
+        self.assertEqual(stats["unique_storage_count"], 2)
+        self.assertEqual(stats["by_dtype"]["torch.float32"]["bytes"], 24)
+        self.assertEqual(stats["by_dtype"]["torch.float64"]["bytes"], 32)
+        self.assertEqual(stats["total_bytes_local_rank"], 56)
+
     def test_single_rank_kv_cache_stats_report_data_and_scales(self):
         runner = object.__new__(ModelRunner)
         runner.rank = 0

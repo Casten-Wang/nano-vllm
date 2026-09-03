@@ -51,6 +51,9 @@ OPTIMIZATION_FIELDS = (
 )
 
 STORAGE_FIELDS = (
+    "model_parameter_storage",
+    "model_parameter_storage_by_rank",
+    "model_parameter_total_all_ranks_bytes",
     "kv_cache_storage",
     "kv_cache_storage_by_rank",
     "num_kvcache_blocks",

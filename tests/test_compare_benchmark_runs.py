@@ -96,6 +96,15 @@ def result(
             "p95_request_latency_s": 4.0,
             "p99_request_latency_s": 4.5,
         },
+        "model_parameter_storage": {
+            "total_bytes_local_rank": 4096,
+            "by_dtype": {"torch.bfloat16": {"storage_count": 2, "bytes": 4096}},
+        },
+        "model_parameter_storage_by_rank": [
+            {"rank": rank, "total_bytes_local_rank": 4096}
+            for rank in range(4)
+        ],
+        "model_parameter_total_all_ranks_bytes": 16384,
         "kv_cache_storage": {"total_bytes": 1024},
         "kv_cache_storage_by_rank": [
             {"rank": rank, "total_bytes": 1024} for rank in range(4)

@@ -84,6 +84,8 @@ def write_markdown(path: Path, result: dict) -> None:
         f"| output_throughput_tok_s | {result['output_throughput_tok_s']:.4f} |",
         f"| peak_torch_allocated_mib | {result['peak_torch_allocated_mib']:.2f} |",
         f"| peak_torch_reserved_mib | {result['peak_torch_reserved_mib']:.2f} |",
+        f"| model_parameters_local_rank_mib | {result['model_parameter_storage']['total_bytes_local_rank'] / 1024 / 1024:.2f} |",
+        f"| model_parameters_all_ranks_mib | {result['model_parameter_total_all_ranks_bytes'] / 1024 / 1024:.2f} |",
         f"| kv_storage_local_rank_mib | {result['kv_cache_storage']['total_mib']:.2f} |",
         f"| kv_storage_estimated_all_ranks_mib | {result['kv_cache_storage']['estimated_all_ranks_mib']:.2f} |",
         f"| recurrent_state_local_rank_mib | {result['recurrent_state_storage']['total_bytes_local_rank'] / 1024 / 1024:.2f} |",
@@ -253,6 +255,9 @@ def main() -> None:
     shape_trace = llm.model_runner.call("get_shape_trace")
     cudagraph_capture_stats = llm.model_runner.call("get_cudagraph_capture_stats")
     cuda_memory_by_rank = llm.model_runner.call("get_cuda_memory_stats")
+    model_parameter_by_rank = llm.model_runner.call(
+        "get_model_parameter_stats_by_rank"
+    )
     recurrent_state_by_rank = llm.model_runner.call(
         "get_recurrent_state_stats_by_rank"
     )
@@ -316,6 +321,11 @@ def main() -> None:
         "peak_torch_allocated_mib": peak_allocated_bytes / 1024 / 1024,
         "peak_torch_reserved_mib": peak_reserved_bytes / 1024 / 1024,
         "cuda_memory_by_rank": cuda_memory_by_rank,
+        "model_parameter_storage": model_parameter_by_rank[0],
+        "model_parameter_storage_by_rank": model_parameter_by_rank,
+        "model_parameter_total_all_ranks_bytes": sum(
+            item["total_bytes_local_rank"] for item in model_parameter_by_rank
+        ),
         "num_kvcache_blocks": llm.model_runner.config.num_kvcache_blocks,
         "kv_cache_storage": kv_cache_storage_metadata(llm.model_runner),
         "kv_cache_storage_by_rank": kv_cache_by_rank,

@@ -292,6 +292,49 @@ class ModelRunner:
         dist.all_gather_object(gathered, local)
         return gathered
 
+    def get_model_parameter_stats(self):
+        """Report physical parameter storage, deduplicating tied weights."""
+
+        by_dtype: dict[str, dict[str, int]] = {}
+        seen_storage = set()
+        logical_parameter_count = 0
+        logical_numel = 0
+        for parameter in self.model.parameters():
+            logical_parameter_count += 1
+            logical_numel += parameter.numel()
+            storage = parameter.untyped_storage()
+            storage_key = (
+                str(parameter.device),
+                storage.data_ptr(),
+                storage.nbytes(),
+            )
+            if storage_key in seen_storage:
+                continue
+            seen_storage.add(storage_key)
+            dtype = str(parameter.dtype)
+            item = by_dtype.setdefault(
+                dtype,
+                {"storage_count": 0, "bytes": 0},
+            )
+            item["storage_count"] += 1
+            item["bytes"] += storage.nbytes()
+        total_bytes = sum(item["bytes"] for item in by_dtype.values())
+        return {
+            "logical_parameter_count": logical_parameter_count,
+            "logical_numel": logical_numel,
+            "unique_storage_count": len(seen_storage),
+            "by_dtype": by_dtype,
+            "total_bytes_local_rank": total_bytes,
+        }
+
+    def get_model_parameter_stats_by_rank(self):
+        local = {"rank": self.rank, **self.get_model_parameter_stats()}
+        if self.world_size == 1:
+            return [local]
+        gathered = [None] * self.world_size
+        dist.all_gather_object(gathered, local)
+        return gathered
+
     def get_recurrent_state_stats(self):
         recurrent_bytes = 0
         convolution_bytes = 0
