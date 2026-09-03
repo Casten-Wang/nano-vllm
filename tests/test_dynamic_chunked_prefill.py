@@ -1159,6 +1159,90 @@ def test_mixed_postprocess_rejects_sample_count_before_mutating_sequences():
         ] == before
 
 
+def test_abort_releases_partial_prefill_kv_and_recurrent_state():
+    scheduler = make_scheduler(
+        max_tokens=4,
+        max_seqs=1,
+        block_size=4,
+        num_blocks=4,
+        hybrid=True,
+    )
+    seq = Sequence(list(range(12)))
+    scheduler.add(seq)
+    result = scheduler.schedule()
+
+    assert result.prefill_seqs == [seq]
+    assert seq in scheduler.waiting
+    assert scheduler.block_manager.num_used_blocks == 1
+    assert scheduler.state_manager.num_used_slots == 1
+
+    assert scheduler.abort(seq.seq_id)
+    assert seq.status is SequenceStatus.FINISHED
+    assert seq not in scheduler.waiting
+    assert seq.block_table == []
+    assert seq.state_slot is None
+    assert seq.num_scheduled_tokens == 0
+    assert scheduler.block_manager.num_used_blocks == 0
+    assert scheduler.state_manager.num_used_slots == 0
+    assert scheduler.aborted_requests == 1
+    assert scheduler.is_finished()
+
+
+def test_abort_is_idempotent_for_unknown_or_finished_request():
+    scheduler = make_scheduler()
+
+    assert not scheduler.abort(123456789)
+    assert scheduler.aborted_requests == 0
+
+
+def test_abort_releases_running_decode_resources():
+    scheduler = make_scheduler(
+        max_tokens=8,
+        max_seqs=1,
+        block_size=4,
+        num_blocks=4,
+        hybrid=True,
+    )
+    seq = Sequence([1, 2, 3, 4])
+    scheduler.add(seq)
+    result = scheduler.schedule()
+    scheduler.postprocess_mixed(result, [5])
+
+    assert seq in scheduler.running
+    assert scheduler.block_manager.num_used_blocks == 1
+    assert scheduler.state_manager.num_used_slots == 1
+
+    assert scheduler.abort(seq.seq_id)
+    assert seq not in scheduler.running
+    assert seq.status is SequenceStatus.FINISHED
+    assert seq.block_table == []
+    assert seq.state_slot is None
+    assert scheduler.block_manager.num_used_blocks == 0
+    assert scheduler.state_manager.num_used_slots == 0
+
+
+def test_abort_rejects_remote_prefill_without_mutating_transfer_state():
+    scheduler = make_scheduler(
+        max_tokens=8,
+        max_seqs=1,
+        block_size=4,
+        num_blocks=2,
+        hybrid=True,
+    )
+    seq = Sequence([1, 2, 3, 4])
+    scheduler.add(seq)
+    session = make_transfer(tp_size=1)
+    scheduler.reserve_remote_prefill(seq, session)
+
+    with pytest.raises(RuntimeError, match="transfer cancellation API"):
+        scheduler.abort(seq.seq_id)
+
+    assert scheduler.remote_prefills[session.transfer_id][0] is seq
+    assert scheduler.block_manager.num_used_blocks == 1
+    assert scheduler.state_manager.num_used_slots == 1
+    assert scheduler.aborted_requests == 0
+
+
 def test_randomized_dynamic_scheduler_preserves_hard_capacity_invariants():
     for seed in range(50):
         rng = random.Random(seed)

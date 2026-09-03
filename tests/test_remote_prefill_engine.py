@@ -193,6 +193,17 @@ def make_engine(*, tensor_parallel_size=1):
     return engine
 
 
+def test_local_request_returns_id_and_can_be_cancelled():
+    engine = make_engine()
+
+    seq_id = engine.add_request([1, 2, 3], SamplingParams(max_tokens=2))
+
+    assert engine.scheduler.waiting[0].seq_id == seq_id
+    assert engine.abort_request(seq_id)
+    assert engine.scheduler.is_finished()
+    assert not engine.abort_request(seq_id)
+
+
 def test_idle_remote_prefill_step_polls_without_running_model():
     engine = object.__new__(LLMEngine)
     engine.scheduler = SimpleNamespace(
@@ -207,6 +218,7 @@ def test_idle_remote_prefill_step_polls_without_running_model():
         preempted_token_progress=0,
         max_preempted_token_progress=0,
         reclaimed_kv_blocks=0,
+        aborted_requests=0,
     )
     engine.metrics = SimpleNamespace(record_scheduler_state=Mock())
     engine.model_runner = SimpleNamespace(call=Mock())

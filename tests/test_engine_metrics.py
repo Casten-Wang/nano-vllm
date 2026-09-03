@@ -91,6 +91,7 @@ class EngineMetricsTest(unittest.TestCase):
             preempted_token_progress=96,
             max_preempted_token_progress=64,
             reclaimed_kv_blocks=5,
+            aborted_requests=3,
         )
         result = metrics.to_dict()
 
@@ -100,6 +101,7 @@ class EngineMetricsTest(unittest.TestCase):
         self.assertEqual(result["preempted_token_progress"], 96)
         self.assertEqual(result["max_preempted_token_progress"], 64)
         self.assertEqual(result["reclaimed_kv_blocks"], 5)
+        self.assertEqual(result["aborted_requests"], 3)
 
         metrics.reset()
         result = metrics.to_dict()
@@ -109,6 +111,7 @@ class EngineMetricsTest(unittest.TestCase):
         self.assertEqual(result["preempted_token_progress"], 0)
         self.assertEqual(result["max_preempted_token_progress"], 0)
         self.assertEqual(result["reclaimed_kv_blocks"], 0)
+        self.assertEqual(result["aborted_requests"], 0)
 
     def test_request_latency_percentiles_capture_tail_distribution(self):
         metrics = EngineMetrics()

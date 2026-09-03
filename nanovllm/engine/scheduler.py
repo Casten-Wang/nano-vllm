@@ -81,6 +81,7 @@ class Scheduler:
         self.preempted_token_progress = 0
         self.max_preempted_token_progress = 0
         self.reclaimed_kv_blocks = 0
+        self.aborted_requests = 0
 
     def is_finished(self):
         return (
@@ -100,6 +101,52 @@ class Scheduler:
 
     def add(self, seq: Sequence):
         self.waiting.append(seq)
+
+    def abort(self, seq_id: int) -> bool:
+        """Cancel one local request and release all scheduler-owned state.
+
+        Remote-prefill requests have rank-wide transfer state and must use the
+        corresponding transfer cancellation API instead. Unknown or already
+        finished requests are intentionally idempotent for disconnect races.
+        """
+
+        if not isinstance(seq_id, int) or isinstance(seq_id, bool):
+            raise TypeError("sequence id must be an integer")
+        if any(
+            seq.seq_id == seq_id
+            for seq, _session in self.remote_prefills.values()
+        ) or any(
+            seq.seq_id == seq_id
+            for seq, _position in self.remote_prefill_sources.values()
+        ):
+            raise RuntimeError(
+                "remote-prefill requests must use their transfer cancellation API"
+            )
+
+        owner = None
+        seq = None
+        for queue in (self.waiting, self.running):
+            seq = next(
+                (candidate for candidate in queue if candidate.seq_id == seq_id),
+                None,
+            )
+            if seq is not None:
+                owner = queue
+                break
+        if seq is None:
+            return False
+
+        owner.remove(seq)
+        if seq.block_table:
+            self.block_manager.deallocate(seq)
+        if self.state_manager is not None:
+            self.state_manager.release(seq.seq_id)
+        seq.state_slot = None
+        seq.num_scheduled_tokens = 0
+        seq.status = SequenceStatus.FINISHED
+        seq.finish_time = perf_counter()
+        self.aborted_requests += 1
+        return True
 
     def reserve_remote_prefill(self, seq: Sequence, session) -> None:
         """Reserve destination cache/state without making ``seq`` runnable."""

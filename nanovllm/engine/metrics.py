@@ -35,6 +35,7 @@ class EngineMetrics:
     preempted_token_progress: int = 0
     max_preempted_token_progress: int = 0
     reclaimed_kv_blocks: int = 0
+    aborted_requests: int = 0
     remote_prefill_receive_started: int = 0
     remote_prefill_receive_committed: int = 0
     remote_prefill_receive_failed: int = 0
@@ -95,6 +96,7 @@ class EngineMetrics:
         self.preempted_token_progress = 0
         self.max_preempted_token_progress = 0
         self.reclaimed_kv_blocks = 0
+        self.aborted_requests = 0
         self.remote_prefill_receive_started = 0
         self.remote_prefill_receive_committed = 0
         self.remote_prefill_receive_failed = 0
@@ -180,6 +182,7 @@ class EngineMetrics:
         preempted_token_progress: int = 0,
         max_preempted_token_progress: int = 0,
         reclaimed_kv_blocks: int = 0,
+        aborted_requests: int = 0,
     ):
         """Record queue and KV block high-water marks.
 
@@ -202,6 +205,7 @@ class EngineMetrics:
         self.preempted_token_progress = preempted_token_progress
         self.max_preempted_token_progress = max_preempted_token_progress
         self.reclaimed_kv_blocks = reclaimed_kv_blocks
+        self.aborted_requests = aborted_requests
 
     def record_finished_sequences(self, seqs):
         """Record request-level latency metrics for finished sequences.
@@ -442,6 +446,7 @@ class EngineMetrics:
             "preempted_token_progress": self.preempted_token_progress,
             "max_preempted_token_progress": self.max_preempted_token_progress,
             "reclaimed_kv_blocks": self.reclaimed_kv_blocks,
+            "aborted_requests": self.aborted_requests,
             "remote_prefill_receive_started": self.remote_prefill_receive_started,
             "remote_prefill_receive_committed": self.remote_prefill_receive_committed,
             "remote_prefill_receive_failed": self.remote_prefill_receive_failed,

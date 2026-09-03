@@ -263,6 +263,17 @@ class LLMEngine:
     def add_request(self, prompt: str | list[int], sampling_params: SamplingParams):
         seq = self._create_sequence(prompt, sampling_params)
         self.scheduler.add(seq)
+        return seq.seq_id
+
+    def abort_request(self, seq_id: int) -> bool:
+        """Cancel a queued or running local request.
+
+        The engine executes a model step synchronously, so cancellation takes
+        effect at the next scheduler boundary. Remote-prefill transfers use
+        their dedicated cancellation methods to coordinate every TP rank.
+        """
+
+        return self.scheduler.abort(seq_id)
 
     def add_remote_prefill_request(
         self,
@@ -1180,16 +1191,17 @@ class LLMEngine:
             prefill_tokens = num_tokens if num_tokens > 0 else 0
             decode_tokens = -num_tokens if num_tokens < 0 else 0
         self.metrics.record_scheduler_state(
-            self.scheduler.num_waiting,
-            self.scheduler.num_running,
-            self.scheduler.block_manager.num_used_blocks,
-            self.scheduler.block_manager.num_total_blocks,
-            self.scheduler.prefill_starved_steps,
-            self.scheduler.max_prefill_starvation_steps,
-            self.scheduler.preemption_count,
-            self.scheduler.preempted_token_progress,
-            self.scheduler.max_preempted_token_progress,
-            self.scheduler.reclaimed_kv_blocks,
+            waiting_queue_len=self.scheduler.num_waiting,
+            running_queue_len=self.scheduler.num_running,
+            used_kvcache_blocks=self.scheduler.block_manager.num_used_blocks,
+            total_kvcache_blocks=self.scheduler.block_manager.num_total_blocks,
+            prefill_starved_steps=self.scheduler.prefill_starved_steps,
+            max_prefill_starvation_steps=self.scheduler.max_prefill_starvation_steps,
+            preemption_count=self.scheduler.preemption_count,
+            preempted_token_progress=self.scheduler.preempted_token_progress,
+            max_preempted_token_progress=self.scheduler.max_preempted_token_progress,
+            reclaimed_kv_blocks=self.scheduler.reclaimed_kv_blocks,
+            aborted_requests=self.scheduler.aborted_requests,
         )
         if not seqs:
             return [], 0, 0, 0
