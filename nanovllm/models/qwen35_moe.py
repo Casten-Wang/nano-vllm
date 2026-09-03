@@ -240,6 +240,16 @@ class Qwen35Experts(nn.Module):
             "prefill_host_route_sync_count": self.prefill_host_route_sync_count,
         }
 
+    def reset_dispatch_stats(self) -> None:
+        self.sorted_dispatch_count = 0
+        self.sorted_decode_dispatch_count = 0
+        self.sorted_prefill_dispatch_count = 0
+        self.batched_dispatch_count = 0
+        self.host_route_sync_count = 0
+        self.host_route_sync_items = 0
+        self.decode_host_route_sync_count = 0
+        self.prefill_host_route_sync_count = 0
+
     def _load_gate_up(
         self,
         param: nn.Parameter,

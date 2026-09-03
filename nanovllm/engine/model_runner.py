@@ -175,8 +175,9 @@ class ModelRunner:
         if self.supports_cudagraph():
             self.capture_cudagraph()
         # Model warmup and CUDA Graph capture are initialization work, not
-        # benchmark execution. Enable counters only after both are complete.
-        self.execution_stats_enabled = True
+        # runtime evidence. Clear both path and MoE-dispatch counters after
+        # initialization; benchmark warmups call this method again.
+        self.reset_execution_stats()
         torch.set_default_device("cpu")
         torch.set_default_dtype(default_dtype)
 
@@ -263,6 +264,10 @@ class ModelRunner:
 
     def reset_execution_stats(self):
         self.execution_stats.reset()
+        for module in self.model.modules():
+            reset_dispatch_stats = getattr(module, "reset_dispatch_stats", None)
+            if reset_dispatch_stats is not None:
+                reset_dispatch_stats()
         self.execution_stats_enabled = True
 
     def get_execution_stats(self):

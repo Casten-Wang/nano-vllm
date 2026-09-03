@@ -478,6 +478,26 @@ class TPControlTest(unittest.TestCase):
 
 
 class HybridStateContextTest(unittest.TestCase):
+
+    def test_reset_execution_stats_resets_moe_runtime_counters(self):
+        runner = object.__new__(ModelRunner)
+        execution_stats = SimpleNamespace(reset=unittest.mock.Mock())
+        reset_dispatch = unittest.mock.Mock()
+        runner.execution_stats = execution_stats
+        runner.execution_stats_enabled = False
+        runner.model = SimpleNamespace(
+            modules=lambda: [
+                SimpleNamespace(reset_dispatch_stats=reset_dispatch),
+                SimpleNamespace(),
+            ]
+        )
+
+        runner.reset_execution_stats()
+
+        execution_stats.reset.assert_called_once_with()
+        reset_dispatch.assert_called_once_with()
+        self.assertTrue(runner.execution_stats_enabled)
+
     def test_context_keeps_existing_positional_arguments_compatible(self):
         torch_module = types.ModuleType("torch")
         torch_module.Tensor = FakeTensor

@@ -1922,6 +1922,22 @@ def test_runtime_promotion_rejects_unstable_or_regressing_candidate():
     assert not result["checks"]["stable_repeats"]
 
 
+def test_runtime_promotion_requires_measured_decode_dispatch_evidence():
+    result = MODULE.evaluate_moe_runtime_candidate(
+        output_digest_matches=True,
+        throughput_speedup=1.1,
+        tpot_speedup=1.1,
+        peak_memory_delta_mib=0.0,
+        max_coefficient_of_variation=0.01,
+        baseline_decode_host_sync_observed=True,
+        candidate_decode_host_sync_eliminated=False,
+        candidate_batched_dispatch_observed=True,
+    )
+
+    assert not result["promote_to_default"]
+    assert not result["checks"]["candidate_decode_host_sync_eliminated"]
+
+
 def test_long_prefill_rejects_inaccurate_kernel():
     result = {
         "configuration": {

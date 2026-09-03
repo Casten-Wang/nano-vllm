@@ -349,6 +349,11 @@ def test_batched_single_token_decode_matches_sorted_backend():
         "prefill_host_route_sync_count": 0,
     }
 
+    sorted_experts.reset_dispatch_stats()
+    batched_experts.reset_dispatch_stats()
+    assert all(value == 0 for value in sorted_experts.dispatch_stats().values())
+    assert all(value == 0 for value in batched_experts.dispatch_stats().values())
+
 
 def test_batched_decode_does_not_allocate_discarded_wrapper_output():
     experts = make_experts(decode_backend="batched")
