@@ -236,18 +236,34 @@ def _validate_state_pairs(
         raise ValueError("cache transfer states must not be scalars")
 
 
-def _host_staging_like(
-    tensor: torch.Tensor,
-    shape: tuple[int, ...] | torch.Size | None = None,
-) -> torch.Tensor:
-    """Allocate host storage suitable for a direct device-to-host copy."""
+def _allocate_host_staging_views(
+    specs: list[tuple[torch.Tensor, tuple[int, ...]]],
+) -> list[torch.Tensor]:
+    """Allocate one aligned host storage for heterogeneous D2H tensors."""
 
-    return torch.empty(
-        tuple(tensor.shape if shape is None else shape),
-        dtype=tensor.dtype,
+    offsets = []
+    end = 0
+    for tensor, shape in specs:
+        alignment = tensor.dtype.itemsize
+        end = (end + alignment - 1) // alignment * alignment
+        offsets.append(end)
+        elements = 1
+        for dimension in shape:
+            elements *= dimension
+        end += elements * tensor.element_size()
+    storage = torch.empty(
+        end,
+        dtype=torch.uint8,
         device="cpu",
-        pin_memory=tensor.device.type == "cuda",
+        pin_memory=any(tensor.device.type == "cuda" for tensor, _ in specs),
     )
+    views = []
+    for (tensor, shape), offset in zip(specs, offsets):
+        nbytes = tensor.element_size()
+        for dimension in shape:
+            nbytes *= dimension
+        views.append(storage[offset : offset + nbytes].view(tensor.dtype).view(shape))
+    return views
 
 
 def _export_blocks_to_host(
@@ -255,11 +271,10 @@ def _export_blocks_to_host(
     block_ids: list[int],
     *,
     valid_last_block_tokens: int,
+    staging: torch.Tensor,
 ) -> torch.Tensor:
     """Copy physical blocks directly into logical-order host staging."""
 
-    shape = (*storage.shape[:2], len(block_ids), *storage.shape[3:])
-    staging = _host_staging_like(storage, shape)
     for logical_id, physical_id in enumerate(block_ids):
         source = storage[:, :, physical_id]
         target = staging[:, :, logical_id]
@@ -279,8 +294,8 @@ def _export_blocks_to_host(
 
 def _export_states_to_host(
     states: tuple[torch.Tensor, ...],
+    staging: tuple[torch.Tensor, ...],
 ) -> tuple[torch.Tensor, ...]:
-    staging = tuple(_host_staging_like(tensor) for tensor in states)
     for source, target in zip(states, staging):
         target.copy_(source, non_blocking=source.device.type == "cuda")
     return staging
@@ -337,22 +352,42 @@ def export_rank_cache(
     _validate_block_ids(block_ids, total_blocks=kv_cache.shape[2])
     valid_last_block_tokens = cached_tokens % block_size
     if to_host:
+        kv_shape = (*kv_cache.shape[:2], len(block_ids), *kv_cache.shape[3:])
+        specs = [(kv_cache, tuple(kv_shape))]
+        if kv_scale is not None:
+            scale_shape = (
+                *kv_scale.shape[:2],
+                len(block_ids),
+                *kv_scale.shape[3:],
+            )
+            specs.append((kv_scale, tuple(scale_shape)))
+        specs.extend((tensor, tuple(tensor.shape)) for tensor in recurrent_states)
+        specs.extend((tensor, tuple(tensor.shape)) for tensor in convolution_states)
+        staging_views = iter(_allocate_host_staging_views(specs))
         kv_blocks = _export_blocks_to_host(
             kv_cache,
             block_ids,
             valid_last_block_tokens=valid_last_block_tokens,
+            staging=next(staging_views),
         )
         kv_scales = (
             _export_blocks_to_host(
                 kv_scale,
                 block_ids,
                 valid_last_block_tokens=valid_last_block_tokens,
+                staging=next(staging_views),
             )
             if kv_scale is not None
             else None
         )
-        exported_recurrent = _export_states_to_host(recurrent_states)
-        exported_convolution = _export_states_to_host(convolution_states)
+        exported_recurrent = _export_states_to_host(
+            recurrent_states,
+            tuple(next(staging_views) for _ in recurrent_states),
+        )
+        exported_convolution = _export_states_to_host(
+            convolution_states,
+            tuple(next(staging_views) for _ in convolution_states),
+        )
         copied_tensors = [kv_cache, *recurrent_states, *convolution_states]
         if kv_scale is not None:
             copied_tensors.append(kv_scale)

@@ -153,6 +153,19 @@ def test_host_export_preserves_order_tail_scales_and_states():
     assert torch.count_nonzero(payload.kv_scales[:, :, 1, 1:]) == 0
     torch.testing.assert_close(payload.recurrent_states[0], recurrent[0])
     torch.testing.assert_close(payload.convolution_states[0], convolution[0])
+    staged_tensors = [
+        payload.kv_blocks,
+        payload.kv_scales,
+        *payload.recurrent_states,
+        *payload.convolution_states,
+    ]
+    assert len(
+        {tensor.untyped_storage().data_ptr() for tensor in staged_tensors}
+    ) == 1
+    assert all(
+        tensor.data_ptr() % tensor.element_size() == 0
+        for tensor in staged_tensors
+    )
 
 
 def test_host_export_does_not_materialize_unused_block_index(monkeypatch):
@@ -179,7 +192,40 @@ def test_host_export_does_not_materialize_unused_block_index(monkeypatch):
     )
 
     torch.testing.assert_close(payload.kv_blocks[:, :, 0], source[:, :, 3])
-    torch.testing.assert_close(payload.kv_blocks[:, :, 1, :1], source[:, :, 1, :1])
+    torch.testing.assert_close(
+        payload.kv_blocks[:, :, 1, :1],
+        source[:, :, 1, :1],
+    )
+
+
+def test_host_export_allocates_one_storage_for_complete_payload(monkeypatch):
+    source = make_float_cache()
+    recurrent, convolution = make_states()
+    original_empty = torch.empty
+    allocations = []
+
+    def tracked_empty(*args, **kwargs):
+        allocations.append((args, kwargs))
+        return original_empty(*args, **kwargs)
+
+    monkeypatch.setattr(torch, "empty", tracked_empty)
+    payload = export_rank_cache(
+        source,
+        None,
+        [3, 1],
+        transfer_id="request-host-storage/attempt-1",
+        tensor_parallel_rank=0,
+        tensor_parallel_size=1,
+        block_size=2,
+        cached_tokens=3,
+        recurrent_states=recurrent,
+        convolution_states=convolution,
+        to_host=True,
+    )
+
+    assert len(allocations) == 1
+    assert allocations[0][1]["dtype"] == torch.uint8
+    assert payload.nbytes == 288
 
 
 @pytest.mark.parametrize("block_ids", [[], [0, 0], [-1], [4]])
