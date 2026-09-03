@@ -354,6 +354,32 @@ def test_contiguous_prefill_output_benchmark_tracks_copy_launches():
     assert all(item["max_abs_error"] == 0 for item in result["errors"])
 
 
+def test_contiguous_state_reset_benchmark_tracks_reset_storage():
+    args = SimpleNamespace(
+        prefill_batch=3,
+        key_head_dim=4,
+        value_head_dim=5,
+        conv_kernel_size=2,
+        warmup=0,
+        iterations=1,
+        repeats=1,
+    )
+
+    result = MODULE.benchmark_contiguous_state_reset(
+        args,
+        torch.device("cpu"),
+        torch.bfloat16,
+        local_value_heads=2,
+        local_conv_channels=7,
+    )
+
+    expected_bytes = 3 * 2 * 4 * 5 * 4 + 3 * 7 * 2 * 2
+    assert result["reset_state_mib"] == expected_bytes / 1024 / 1024
+    assert result["reference_uses_advanced_indexing"]
+    assert result["candidate_uses_contiguous_views"]
+    assert all(item["max_abs_error"] == 0 for item in result["errors"])
+
+
 def test_greedy_sampler_benchmark_tracks_avoided_fp32_logits():
     args = SimpleNamespace(
         sampling_batch=4,

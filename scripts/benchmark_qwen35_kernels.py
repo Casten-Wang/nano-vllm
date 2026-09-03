@@ -2559,6 +2559,90 @@ def benchmark_contiguous_decode_state(
     return result
 
 
+def benchmark_contiguous_state_reset(
+    args,
+    device,
+    dtype,
+    local_value_heads: int,
+    local_conv_channels: int,
+) -> dict:
+    num_slots = args.prefill_batch + 2
+    recurrent_shape = (
+        1,
+        num_slots,
+        local_value_heads,
+        args.key_head_dim,
+        args.value_head_dim,
+    )
+    convolution_shape = (
+        1,
+        num_slots,
+        local_conv_channels,
+        args.conv_kernel_size,
+    )
+    indexed_recurrent = torch.ones(
+        recurrent_shape,
+        device=device,
+        dtype=torch.float32,
+    )
+    indexed_convolution = torch.ones(
+        convolution_shape,
+        device=device,
+        dtype=dtype,
+    )
+    contiguous_recurrent = indexed_recurrent.clone()
+    contiguous_convolution = indexed_convolution.clone()
+    slots = torch.arange(
+        1,
+        1 + args.prefill_batch,
+        device=device,
+        dtype=torch.long,
+    )
+
+    def reference():
+        indexed_recurrent[:, slots] = 0
+        indexed_convolution[:, slots] = 0
+        return indexed_recurrent, indexed_convolution
+
+    def candidate():
+        contiguous_recurrent.narrow(1, 1, args.prefill_batch).zero_()
+        contiguous_convolution.narrow(1, 1, args.prefill_batch).zero_()
+        return contiguous_recurrent, contiguous_convolution
+
+    result = compare(
+        reference,
+        candidate,
+        device=device,
+        warmup=args.warmup,
+        iterations=args.iterations,
+        repeats=args.repeats,
+    )
+    recurrent_elements = (
+        args.prefill_batch
+        * local_value_heads
+        * args.key_head_dim
+        * args.value_head_dim
+    )
+    convolution_elements = (
+        args.prefill_batch
+        * local_conv_channels
+        * args.conv_kernel_size
+    )
+    result.update(
+        {
+            "reset_state_mib": (
+                recurrent_elements * torch.float32.itemsize
+                + convolution_elements * dtype.itemsize
+            )
+            / 1024
+            / 1024,
+            "reference_uses_advanced_indexing": True,
+            "candidate_uses_contiguous_views": True,
+        }
+    )
+    return result
+
+
 def benchmark_contiguous_prefill_output_store(
     args,
     device,
@@ -3732,6 +3816,13 @@ def main() -> None:
                     local_value_heads,
                 )
             ),
+            "contiguous_state_reset": benchmark_contiguous_state_reset(
+                args,
+                device,
+                dtype,
+                local_value_heads,
+                local_conv_channels,
+            ),
             "delta_prefill_decay_workspace_reuse": (
                 benchmark_delta_prefill_decay_workspace_reuse(
                     args,
@@ -3908,6 +3999,13 @@ def main() -> None:
                     dtype,
                     local_value_heads,
                 )
+            ),
+            "contiguous_state_reset": benchmark_contiguous_state_reset(
+                args,
+                device,
+                dtype,
+                local_value_heads,
+                local_conv_channels,
             ),
             "gated_delta_decay_rate_precompute": benchmark_decay_rate(
                 args,
