@@ -383,6 +383,53 @@ def test_model_runner_exports_and_imports_complete_hybrid_state():
         )
 
 
+def test_import_avoids_full_payload_device_conversion(monkeypatch):
+    source = make_float_cache()
+    recurrent, convolution = make_states()
+    payload = export_rank_cache(
+        source,
+        None,
+        [3, 1],
+        transfer_id="request-direct-copy/attempt-1",
+        tensor_parallel_rank=0,
+        tensor_parallel_size=1,
+        block_size=2,
+        cached_tokens=3,
+        recurrent_states=recurrent,
+        convolution_states=convolution,
+    )
+    destination = make_float_cache(fill=False)
+    destination_recurrent, destination_convolution = make_states(fill=False)
+
+    with monkeypatch.context() as context:
+        context.setattr(
+            torch.Tensor,
+            "to",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("cache import must copy directly into destination")
+            ),
+        )
+        import_rank_cache(
+            payload,
+            destination,
+            None,
+            [0, 2],
+            transfer_id="request-direct-copy/attempt-1",
+            tensor_parallel_rank=0,
+            tensor_parallel_size=1,
+            block_size=2,
+            recurrent_states=destination_recurrent,
+            convolution_states=destination_convolution,
+        )
+
+    torch.testing.assert_close(destination[:, :, 0], payload.kv_blocks[:, :, 0])
+    torch.testing.assert_close(destination[:, :, 2], payload.kv_blocks[:, :, 1])
+    for actual, expected in zip(destination_recurrent, recurrent):
+        torch.testing.assert_close(actual, expected)
+    for actual, expected in zip(destination_convolution, convolution):
+        torch.testing.assert_close(actual, expected)
+
+
 def test_transfer_session_commits_only_after_every_rank_acknowledges():
     session = CacheTransferSession(
         "request-6/attempt-1",

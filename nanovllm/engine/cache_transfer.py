@@ -278,6 +278,25 @@ def _export_states_to_host(
     return staging
 
 
+def _install_cache_blocks(
+    destination: torch.Tensor,
+    source: torch.Tensor,
+    block_ids: list[int],
+    index: torch.Tensor,
+) -> None:
+    """Install logical blocks without a full-size cross-device temporary."""
+
+    if source.device == destination.device:
+        destination.index_copy_(2, index, source)
+        return
+    non_blocking = source.device.type == "cpu" and source.is_pinned()
+    for logical_id, physical_id in enumerate(block_ids):
+        destination[:, :, physical_id].copy_(
+            source[:, :, logical_id],
+            non_blocking=non_blocking,
+        )
+
+
 def export_rank_cache(
     kv_cache: torch.Tensor,
     kv_scale: torch.Tensor | None,
@@ -455,12 +474,23 @@ def import_rank_cache(
         if source.shape != destination.shape or source.dtype != destination.dtype:
             raise ValueError("cache transfer state layout does not match destination")
 
-    kv_cache.index_copy_(2, index, payload.kv_blocks.to(kv_cache.device))
+    _install_cache_blocks(
+        kv_cache,
+        payload.kv_blocks,
+        block_ids,
+        index,
+    )
     if kv_scale is not None:
         assert payload.kv_scales is not None
-        kv_scale.index_copy_(2, index, payload.kv_scales.to(kv_scale.device))
+        _install_cache_blocks(
+            kv_scale,
+            payload.kv_scales,
+            block_ids,
+            index,
+        )
     for source, destination in zip(
         (*payload.recurrent_states, *payload.convolution_states),
         (*recurrent_states, *convolution_states),
     ):
-        destination.copy_(source.to(destination.device))
+        non_blocking = source.device.type == "cpu" and source.is_pinned()
+        destination.copy_(source, non_blocking=non_blocking)
