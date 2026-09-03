@@ -357,6 +357,9 @@ class ModelRunner:
         moe_weight_total = sum(
             item["storage_bytes"] for item in moe_weight_stats
         )
+        moe_workspace_total = sum(
+            item.get("workspace_bytes", 0) for item in moe_weight_stats
+        )
         sampler_stats = self.sampler.storage_stats()
         sampler_total = sum(sampler_stats.values())
         return {
@@ -371,12 +374,14 @@ class ModelRunner:
             "int8_dequant_buffer_bytes": dequant_total,
             "moe_decode_weight_pool_count": len(moe_weight_stats),
             "moe_decode_weight_buffer_bytes": moe_weight_total,
+            "moe_decode_workspace_bytes": moe_workspace_total,
             "sampling_rank_buffer_bytes": sampler_stats["rank_buffer_bytes"],
             "sampling_noise_buffer_bytes": sampler_stats["noise_buffer_bytes"],
             "total_bytes_local_rank": (
                 partitioned_total
                 + dequant_total
                 + moe_weight_total
+                + moe_workspace_total
                 + sampler_total
             ),
         }

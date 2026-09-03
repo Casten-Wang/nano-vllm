@@ -2,17 +2,22 @@
 
 from __future__ import annotations
 
+from math import prod
+
 import torch
 import torch.nn.functional as F
 
 
 class BatchedExpertWeightBufferPool:
-    """Single-stream scratch storage for one gathered expert-weight tensor."""
+    """Single-stream scratch storage for batched expert decode."""
 
     def __init__(self) -> None:
         self.storage: torch.Tensor | None = None
         self.allocation_count = 0
         self.reuse_count = 0
+        self.workspace_storage: torch.Tensor | None = None
+        self.workspace_allocation_count = 0
+        self.workspace_reuse_count = 0
 
     def gather(
         self,
@@ -45,16 +50,60 @@ class BatchedExpertWeightBufferPool:
         torch.index_select(weight, 0, expert_ids, out=output)
         return output
 
+    def workspaces(
+        self,
+        *shapes: tuple[int, ...],
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> tuple[torch.Tensor, ...]:
+        """Return disjoint views for simultaneously live MoE intermediates."""
+
+        if torch.is_grad_enabled():
+            raise RuntimeError("expert workspace buffer is inference-only")
+        sizes = tuple(prod(shape) for shape in shapes)
+        required = sum(sizes)
+        if (
+            self.workspace_storage is None
+            or self.workspace_storage.device != device
+            or self.workspace_storage.dtype != dtype
+            or self.workspace_storage.numel() < required
+        ):
+            self.workspace_storage = torch.empty(
+                required,
+                dtype=dtype,
+                device=device,
+            )
+            self.workspace_allocation_count += 1
+        else:
+            self.workspace_reuse_count += 1
+        outputs = []
+        offset = 0
+        for shape, size in zip(shapes, sizes):
+            outputs.append(
+                self.workspace_storage[offset : offset + size].view(shape)
+            )
+            offset += size
+        return tuple(outputs)
+
     def storage_stats(self) -> dict[str, int]:
         storage_bytes = (
             0
             if self.storage is None
             else self.storage.numel() * self.storage.element_size()
         )
+        workspace_bytes = (
+            0
+            if self.workspace_storage is None
+            else self.workspace_storage.numel()
+            * self.workspace_storage.element_size()
+        )
         return {
             "storage_bytes": storage_bytes,
             "allocation_count": self.allocation_count,
             "reuse_count": self.reuse_count,
+            "workspace_bytes": workspace_bytes,
+            "workspace_allocation_count": self.workspace_allocation_count,
+            "workspace_reuse_count": self.workspace_reuse_count,
         }
 
 
@@ -137,6 +186,15 @@ def batched_expert_dispatch(
         end = min(start + chunk_size, hidden_states.shape[0])
         chunk_tokens = end - start
         expert_ids = topk_ids[start:end].reshape(-1)
+        route_count = expert_ids.numel()
+        gate_up_output = expert_output_buffer = None
+        if weight_buffer_pool is not None:
+            gate_up_output, expert_output_buffer = weight_buffer_pool.workspaces(
+                (chunk_tokens, top_k, gate_up_proj.shape[1], 1),
+                (route_count, down_proj.shape[1], 1),
+                dtype=hidden_states.dtype,
+                device=hidden_states.device,
+            )
         selected_gate_up = (
             gate_up_proj.index_select(0, expert_ids)
             if weight_buffer_pool is None
@@ -149,10 +207,18 @@ def batched_expert_dispatch(
         )
         # Broadcast each token across its top-k routes inside matmul instead
         # of materializing a [chunk, top_k, hidden] repeated-input tensor.
-        gate_up = torch.matmul(
-            selected_gate_up,
-            hidden_states[start:end, None, :, None],
-        ).squeeze(-1).flatten(0, 1)
+        if gate_up_output is None:
+            gate_up = torch.matmul(
+                selected_gate_up,
+                hidden_states[start:end, None, :, None],
+            ).squeeze(-1).flatten(0, 1)
+        else:
+            torch.matmul(
+                selected_gate_up,
+                hidden_states[start:end, None, :, None],
+                out=gate_up_output,
+            )
+            gate_up = gate_up_output.squeeze(-1).flatten(0, 1)
         del selected_gate_up
         gate, up = gate_up.chunk(2, dim=-1)
         activated = silu_and_mul(gate, up)
@@ -161,10 +227,18 @@ def batched_expert_dispatch(
             if weight_buffer_pool is None
             else weight_buffer_pool.gather(down_proj, expert_ids)
         )
-        expert_output = torch.bmm(
-            selected_down,
-            activated.unsqueeze(-1),
-        ).squeeze(-1)
+        if expert_output_buffer is None:
+            expert_output = torch.bmm(
+                selected_down,
+                activated.unsqueeze(-1),
+            ).squeeze(-1)
+        else:
+            torch.bmm(
+                selected_down,
+                activated.unsqueeze(-1),
+                out=expert_output_buffer,
+            )
+            expert_output = expert_output_buffer.squeeze(-1)
         route_weights = topk_weights[start:end]
         if expert_output.requires_grad or route_weights.requires_grad:
             output[start:end] = weighted_route_sum(

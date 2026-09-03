@@ -522,6 +522,9 @@ def test_batched_dispatch_reuses_one_expert_weight_storage():
     assert stats["allocation_count"] == 1
     assert stats["reuse_count"] == 3
     assert stats["storage_bytes"] == 4 * 6 * 4 * gate_up_proj.element_size()
+    assert stats["workspace_allocation_count"] == 1
+    assert stats["workspace_reuse_count"] == 1
+    assert stats["workspace_bytes"] == (4 * 6 + 4 * 4) * hidden.element_size()
 
 
 def test_batched_expert_layers_can_share_weight_buffer_pool():
@@ -550,10 +553,13 @@ def test_batched_expert_layers_can_share_weight_buffer_pool():
     with torch.inference_mode():
         first(hidden, topk_ids, topk_weights, is_decode=True)
         storage = pool.storage.data_ptr()
+        workspace_storage = pool.workspace_storage.data_ptr()
         second(hidden, topk_ids, topk_weights, is_decode=True)
 
     assert pool.storage.data_ptr() == storage
+    assert pool.workspace_storage.data_ptr() == workspace_storage
     assert pool.storage_stats()["allocation_count"] == 1
+    assert pool.storage_stats()["workspace_allocation_count"] == 1
 
 
 def test_mixed_batched_backend_only_splits_decode_prefix():

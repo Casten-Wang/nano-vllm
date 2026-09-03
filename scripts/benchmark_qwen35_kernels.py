@@ -1643,8 +1643,15 @@ def benchmark_expert_dispatch(args, device, dtype, token_count: int) -> dict:
                         / 1024
                         / 1024
                     ),
+                    "persistent_expert_workspace_mib": (
+                        weight_buffer_pool.storage_stats()["workspace_bytes"]
+                        / 1024
+                        / 1024
+                    ),
                     "eliminated_weight_allocations_per_chunk": 2,
+                    "eliminated_intermediate_allocations_per_chunk": 2,
                     "candidate_reuses_expert_weight_storage": True,
+                    "candidate_reuses_expert_intermediate_storage": True,
                     "measured_on_cuda": device.type == "cuda",
                 }
             repeated_output = expert_dispatch_batched_repeated_input(
@@ -1724,8 +1731,15 @@ def benchmark_expert_dispatch(args, device, dtype, token_count: int) -> dict:
                         / 1024
                         / 1024
                     ),
+                    "persistent_expert_workspace_mib": (
+                        weight_buffer_pool.storage_stats()["workspace_bytes"]
+                        / 1024
+                        / 1024
+                    ),
                     "eliminated_weight_allocations_per_chunk": 2,
+                    "eliminated_intermediate_allocations_per_chunk": 2,
                     "candidate_reuses_expert_weight_storage": True,
+                    "candidate_reuses_expert_intermediate_storage": True,
                 }
             )
             graph_safe_timing["promotion"] = evaluate_graph_safe_moe_candidate(
@@ -1886,7 +1900,13 @@ def benchmark_mixed_expert_dispatch(
                 / 1024
                 / 1024
             ),
+            "persistent_expert_workspace_mib": (
+                weight_buffer_pool.storage_stats()["workspace_bytes"]
+                / 1024
+                / 1024
+            ),
             "candidate_reuses_expert_weight_storage": True,
+            "candidate_reuses_expert_intermediate_storage": True,
         }
     )
     return result

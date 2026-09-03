@@ -858,6 +858,8 @@ def test_mixed_expert_benchmark_records_cuda_evidence_boundary():
     assert result["speedup_vs_grouped"] > 0
     assert result["avoided_route_hidden_allocation_mib_per_step"] > 0
     assert result["avoided_redundant_output_zero_mib_per_step"] > 0
+    assert result["persistent_expert_workspace_mib"] > 0
+    assert result["candidate_reuses_expert_intermediate_storage"]
     assert not result["measured_on_cuda"]
     assert result["errors"][0]["max_abs_error"] < 1e-5
 
@@ -930,6 +932,10 @@ def test_single_token_dispatch_reports_general_path_baseline():
     assert graph_safe["estimated_selected_weight_mib"] > 0
     assert graph_safe["reused_weighted_route_mib"] > 0
     assert graph_safe["errors_vs_current"]["max_abs_error"] < 1e-5
+    reuse = graph_safe["weight_buffer_reuse"]
+    assert reuse["persistent_expert_workspace_mib"] > 0
+    assert reuse["eliminated_intermediate_allocations_per_chunk"] == 2
+    assert reuse["candidate_reuses_expert_intermediate_storage"]
     assert not graph_safe["promotion"]["promote_to_runtime"]
     assert not graph_safe["promotion"]["checks"]["cuda_measurement"]
     assert set(result["graph_safe_chunk_sweep"]["candidates"]) == {"1", "2"}
