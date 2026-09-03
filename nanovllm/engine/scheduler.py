@@ -528,9 +528,26 @@ class Scheduler:
             + len(self.remote_prefills)
             + len(self.remote_prefill_sources)
         )
-        prefill_slots = max(self.max_num_seqs - active_decode_seqs, 0)
+        active_waiting_seqs = sum(
+            seq.state_slot is not None or bool(seq.block_table)
+            for seq in self.waiting
+        )
+        prefill_batch_slots = max(
+            self.max_num_seqs - len(decode_seqs),
+            0,
+        )
+        prefill_admission_slots = max(
+            self.max_num_seqs
+            - active_decode_seqs
+            - active_waiting_seqs,
+            0,
+        )
         running_before_prefill = len(self.running)
-        prefill_seqs = self.schedule_prefill_with_budget(prefill_budget, prefill_slots)
+        prefill_seqs = self.schedule_prefill_with_budget(
+            prefill_budget,
+            prefill_batch_slots,
+            admission_budget=prefill_admission_slots,
+        )
         # Remove requests admitted by this prefill step before considering
         # decode backfill. They have not been postprocessed yet and therefore
         # must never be selected for decode in the same scheduler step.
@@ -634,14 +651,28 @@ class Scheduler:
             self.waiting.remove(victim)
         return victim
 
-    def schedule_prefill_with_budget(self, token_budget: int, seq_budget: int) -> list[Sequence]:
+    def schedule_prefill_with_budget(
+        self,
+        token_budget: int,
+        seq_budget: int,
+        *,
+        admission_budget: int | None = None,
+    ) -> list[Sequence]:
+        if admission_budget is None:
+            admission_budget = seq_budget
+        if min(token_budget, seq_budget, admission_budget) < 0:
+            raise ValueError("prefill budgets must be non-negative")
         scheduled_seqs = []
         num_batched_tokens = 0
+        admitted_seqs = 0
         while self.waiting and len(scheduled_seqs) < seq_budget:
             remaining = token_budget - num_batched_tokens
             if remaining <= 0:
                 break
             seq = self.waiting[0]
+            owns_slot = seq.state_slot is not None or bool(seq.block_table)
+            if not owns_slot and admitted_seqs >= admission_budget:
+                break
             if not seq.block_table:
                 num_cached_blocks = (
                     self.block_manager.get_num_cached_blocks(seq)
@@ -668,6 +699,8 @@ class Scheduler:
                         num_cached_blocks,
                         num_blocks=seq.num_blocks,
                     )
+                    if not owns_slot:
+                        admitted_seqs += 1
                     seq.status = SequenceStatus.RUNNING
                     self.waiting.popleft()
                     self.running.append(seq)
@@ -687,6 +720,8 @@ class Scheduler:
                     num_cached_blocks,
                     num_blocks=target_blocks,
                 )
+                if not owns_slot:
+                    admitted_seqs += 1
             else:
                 num_tokens = seq.num_tokens - seq.num_cached_tokens
                 if num_tokens <= 0:

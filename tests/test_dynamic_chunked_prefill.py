@@ -635,6 +635,55 @@ def test_dynamic_schedule_counts_unscheduled_running_requests_in_slot_budget():
     assert waiting.block_table == []
 
 
+def test_dynamic_schedule_counts_partially_prefilled_waiters_in_slot_budget():
+    scheduler = make_scheduler(max_tokens=4, max_seqs=2, block_size=4)
+    running = Sequence([1, 2, 3, 4])
+    scheduler.block_manager.allocate(running, 0)
+    running.status = SequenceStatus.RUNNING
+    running.is_prefill = False
+    running.num_cached_tokens = len(running)
+    scheduler.running.append(running)
+
+    active_waiting = Sequence([5] * 8)
+    scheduler.block_manager.allocate(active_waiting, 0, num_blocks=1)
+    active_waiting.num_cached_tokens = 4
+    inactive_head = Sequence([9] * 4)
+    scheduler.waiting.extend((inactive_head, active_waiting))
+
+    result = scheduler.schedule()
+
+    assert result.decode_seqs == [running]
+    assert result.prefill_seqs == []
+    assert list(scheduler.waiting) == [inactive_head, active_waiting]
+    assert inactive_head.block_table == []
+    active_sequences = len(scheduler.running) + sum(
+        bool(seq.block_table) for seq in scheduler.waiting
+    )
+    assert active_sequences == scheduler.max_num_seqs
+
+
+def test_dynamic_schedule_continues_active_waiter_without_admission_slot():
+    scheduler = make_scheduler(max_tokens=4, max_seqs=2, block_size=4)
+    running = Sequence([1, 2, 3, 4])
+    scheduler.block_manager.allocate(running, 0)
+    running.status = SequenceStatus.RUNNING
+    running.is_prefill = False
+    running.num_cached_tokens = len(running)
+    scheduler.running.append(running)
+
+    active_waiting = Sequence([5] * 8)
+    scheduler.block_manager.allocate(active_waiting, 0, num_blocks=1)
+    active_waiting.num_cached_tokens = 4
+    scheduler.waiting.append(active_waiting)
+
+    result = scheduler.schedule()
+
+    assert result.decode_seqs == [running]
+    assert result.prefill_seqs == [active_waiting]
+    assert active_waiting.num_scheduled_tokens == 3
+    assert len(active_waiting.block_table) == 2
+
+
 def test_dynamic_scheduler_tracks_and_resets_consecutive_prefill_starvation():
     scheduler = make_scheduler(max_tokens=1, max_seqs=3, block_size=4)
     running = Sequence([1, 2, 3, 4])
