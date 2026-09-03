@@ -126,6 +126,38 @@ def causal_conv1d_step(
     return F.silu(output).to(x.dtype), next_state
 
 
+def causal_conv1d_step_accumulate_(
+    x: torch.Tensor,
+    state: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Inference candidate avoiding the full weighted-state temporary.
+
+    This deliberately remains an explicit candidate until CUDA benchmarks show
+    that its small sequence of pointwise launches beats the allocating baseline.
+    Both ``x`` and ``state`` are consumed and updated in place.
+    """
+
+    if torch.is_grad_enabled():
+        raise RuntimeError("in-place convolution accumulation is inference-only")
+    if x.ndim != 2 or state.ndim != 3 or weight.ndim != 2:
+        raise ValueError("invalid causal convolution tensor rank")
+    if state.shape[0] != x.shape[0] or state.shape[1:] != weight.shape:
+        raise ValueError("causal convolution shapes are inconsistent")
+    if x.dtype != state.dtype or x.dtype != weight.dtype:
+        raise ValueError("in-place convolution tensors must have the same dtype")
+
+    state[..., :-1].copy_(state[..., 1:])
+    state[..., -1].copy_(x)
+    x.copy_(state[..., 0]).mul_(weight[:, 0])
+    for offset in range(1, weight.shape[1]):
+        x.addcmul_(state[..., offset], weight[:, offset])
+    if bias is not None:
+        x.add_(bias)
+    return F.silu(x, inplace=True), state
+
+
 def causal_conv1d_scan(
     x: torch.Tensor,
     state: torch.Tensor,

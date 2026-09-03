@@ -2757,12 +2757,10 @@ def benchmark_decode_convolution(args, device, dtype, local_conv_channels) -> di
         # standalone microbenchmark input explicitly because the candidate
         # intentionally overwrites it; this makes timing conservative.
         candidate_input.copy_(x)
-        return GDN.causal_conv1d_step(
+        return GDN.causal_conv1d_step_accumulate_(
             candidate_input,
             candidate_state,
             weight,
-            inplace_state=True,
-            inplace_output=True,
         )
 
     result = compare(
@@ -2780,6 +2778,10 @@ def benchmark_decode_convolution(args, device, dtype, local_conv_channels) -> di
         x.numel() * x.element_size() / 1024 / 1024
     )
     result["candidate_reuses_projection_output"] = True
+    result["eliminated_weighted_state_temporary_mib"] = (
+        state.numel() * state.element_size() / 1024 / 1024
+    )
+    result["candidate_uses_inplace_channel_accumulation"] = True
     result["candidate_timing_includes_input_refresh_copy"] = True
     return result
 

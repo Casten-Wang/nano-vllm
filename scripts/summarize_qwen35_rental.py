@@ -2769,7 +2769,11 @@ def summarize(run_dir: Path, run_id: str) -> dict:
             ),
             "decode_convolution_state": summarize_buffer_reuse_candidate(
                 result["results"]["decode_convolution_state_reuse"],
-                ("reused_convolution_state_mib",),
+                (
+                    "reused_convolution_state_mib",
+                    "eliminated_weighted_state_temporary_mib",
+                ),
+                {"candidate_uses_inplace_channel_accumulation": True},
             ),
             "router_softmax": summarize_buffer_reuse_candidate(
                 result["results"]["router_topk_first"],

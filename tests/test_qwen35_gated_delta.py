@@ -333,6 +333,58 @@ def test_decode_convolution_preserves_state_when_autograd_is_enabled():
     torch.testing.assert_close(state, original)
 
 
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("kernel_size", [1, 2, 4])
+def test_decode_convolution_inplace_accumulation_matches_reference(
+    dtype,
+    kernel_size,
+):
+    torch.manual_seed(47)
+    x = torch.randn(5, 11, dtype=dtype)
+    state = torch.randn(5, 11, kernel_size, dtype=dtype)
+    weight = torch.randn(11, kernel_size, dtype=dtype)
+    bias = torch.randn(11, dtype=dtype)
+    expected_output, expected_state = qwen35_gated_delta.causal_conv1d_step(
+        x,
+        state,
+        weight,
+        bias,
+    )
+    candidate_input = x.clone()
+    candidate_state = state.clone()
+    input_storage = candidate_input.data_ptr()
+    state_storage = candidate_state.data_ptr()
+
+    with torch.inference_mode():
+        actual_output, actual_state = (
+            qwen35_gated_delta.causal_conv1d_step_accumulate_(
+                candidate_input,
+                candidate_state,
+                weight,
+                bias,
+            )
+        )
+
+    assert actual_output.data_ptr() == input_storage
+    assert actual_state.data_ptr() == state_storage
+    torch.testing.assert_close(
+        actual_output,
+        expected_output,
+        rtol=0.05 if dtype == torch.bfloat16 else 1e-5,
+        atol=0.01 if dtype == torch.bfloat16 else 1e-5,
+    )
+    torch.testing.assert_close(actual_state, expected_state)
+
+
+def test_decode_convolution_inplace_accumulation_rejects_autograd():
+    with pytest.raises(RuntimeError, match="inference-only"):
+        qwen35_gated_delta.causal_conv1d_step_accumulate_(
+            torch.randn(2, 3),
+            torch.randn(2, 3, 4),
+            torch.randn(3, 4),
+        )
+
+
 def test_recurrent_rule_chunked_prefill_matches_one_shot():
     q, k, v, decay, beta = inputs()
     expected, expected_state = recurrent_gated_delta_rule(q, k, v, decay, beta)

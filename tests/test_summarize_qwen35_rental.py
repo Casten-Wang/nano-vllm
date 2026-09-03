@@ -1484,6 +1484,8 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
                         {"max_abs_error": 0.0},
                     ],
                     "reused_convolution_state_mib": 8.0,
+                    "eliminated_weighted_state_temporary_mib": 32.0,
+                    "candidate_uses_inplace_channel_accumulation": True,
                 },
                 "router_topk_first": {
                     "reference": {"peak_extra_mib": 2.0},
