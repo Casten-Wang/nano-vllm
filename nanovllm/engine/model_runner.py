@@ -343,6 +343,7 @@ class ModelRunner:
         pools = {}
         dequant_pools = {}
         moe_weight_pools = {}
+        qwen35_key_pools = {}
         tp_logits_stats = []
         for module in self.model.modules():
             pool = getattr(module, "int8_partitioned_decode_pool", None)
@@ -358,6 +359,9 @@ class ModelRunner:
             )
             if moe_weight_pool is not None:
                 moe_weight_pools[id(moe_weight_pool)] = moe_weight_pool
+            qwen35_key_pool = getattr(module, "key_buffer_pool", None)
+            if qwen35_key_pool is not None:
+                qwen35_key_pools[id(qwen35_key_pool)] = qwen35_key_pool
             logits_stats = getattr(module, "tp_logits_storage_stats", None)
             if logits_stats is not None:
                 tp_logits_stats.append(logits_stats())
@@ -368,6 +372,9 @@ class ModelRunner:
         moe_weight_stats = [
             pool.storage_stats() for pool in moe_weight_pools.values()
         ]
+        qwen35_key_stats = [
+            pool.storage_stats() for pool in qwen35_key_pools.values()
+        ]
         partitioned_total = sum(item["total_bytes"] for item in stats)
         dequant_total = sum(item["total_bytes"] for item in dequant_stats)
         moe_weight_total = sum(
@@ -375,6 +382,9 @@ class ModelRunner:
         )
         moe_workspace_total = sum(
             item.get("workspace_bytes", 0) for item in moe_weight_stats
+        )
+        qwen35_key_total = sum(
+            item["storage_bytes"] for item in qwen35_key_stats
         )
         sampler_stats = self.sampler.storage_stats()
         sampler_total = sum(sampler_stats.values())
@@ -392,6 +402,14 @@ class ModelRunner:
             "moe_decode_weight_pool_count": len(moe_weight_stats),
             "moe_decode_weight_buffer_bytes": moe_weight_total,
             "moe_decode_workspace_bytes": moe_workspace_total,
+            "qwen35_key_buffer_pool_count": len(qwen35_key_stats),
+            "qwen35_key_buffer_bytes": qwen35_key_total,
+            "qwen35_key_buffer_allocation_count": sum(
+                item["allocation_count"] for item in qwen35_key_stats
+            ),
+            "qwen35_key_buffer_reuse_count": sum(
+                item["reuse_count"] for item in qwen35_key_stats
+            ),
             "sampling_rank_buffer_bytes": sampler_stats["rank_buffer_bytes"],
             "sampling_noise_buffer_bytes": sampler_stats["noise_buffer_bytes"],
             "tp_logits_local_buffer_bytes": sum(
@@ -431,6 +449,7 @@ class ModelRunner:
                 + dequant_total
                 + moe_weight_total
                 + moe_workspace_total
+                + qwen35_key_total
                 + sampler_total
                 + tp_logits_total
             ),

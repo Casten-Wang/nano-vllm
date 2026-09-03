@@ -77,6 +77,9 @@ def load_qwen35_module():
     modules["nanovllm.layers.embed_head"].ParallelLMHead = FakeHead
     modules["nanovllm.layers.embed_head"].VocabParallelEmbedding = FakeEmbedding
     modules["nanovllm.models.qwen35_attention"].Qwen35Attention = FakeMixer
+    modules[
+        "nanovllm.models.qwen35_attention"
+    ].Qwen35KeyBufferPool = FakeWeightBufferPool
     modules["nanovllm.models.qwen35_gated_delta"].Qwen35GatedDeltaNet = FakeMixer
     modules["nanovllm.models.qwen35_moe"].Qwen35RMSNorm = FakeNorm
     modules["nanovllm.models.qwen35_moe"].Qwen35SparseMoeBlock = FakeMoe
@@ -152,6 +155,9 @@ def test_text_model_uses_declared_hybrid_layer_pattern():
         layer.mlp.experts.decode_weight_buffer_pool is pool
         for layer in model.model.layers
     )
+    key_pool = model.model.full_attention_key_buffer_pool
+    assert isinstance(key_pool, FakeWeightBufferPool)
+    assert model.model.layers[-1].self_attn.key_buffer_pool is key_pool
 
 
 def test_residual_merge_reuses_branch_output_during_inference():

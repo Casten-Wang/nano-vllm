@@ -801,22 +801,32 @@ class HybridStateContextTest(unittest.TestCase):
                 "workspace_bytes": 12,
             }
         )
+        key_buffer_pool = SimpleNamespace(
+            storage_stats=lambda: {
+                "storage_bytes": 12,
+                "allocation_count": 1,
+                "reuse_count": 9,
+            }
+        )
         runner.model = SimpleNamespace(
             modules=lambda: [
                 SimpleNamespace(
                     int8_partitioned_decode_pool=pool,
                     int8_dequant_pool=dequant_pool,
                     decode_weight_buffer_pool=moe_weight_pool,
+                    key_buffer_pool=key_buffer_pool,
                 ),
                 SimpleNamespace(
                     int8_partitioned_decode_pool=pool,
                     int8_dequant_pool=dequant_pool,
                     decode_weight_buffer_pool=moe_weight_pool,
+                    key_buffer_pool=key_buffer_pool,
                 ),
                 SimpleNamespace(
                     int8_partitioned_decode_pool=None,
                     int8_dequant_pool=None,
                     decode_weight_buffer_pool=None,
+                    key_buffer_pool=None,
                     tp_logits_storage_stats=lambda: {
                         "local_bytes": 20,
                         "gathered_bytes": 28,
@@ -850,6 +860,10 @@ class HybridStateContextTest(unittest.TestCase):
         self.assertEqual(stats["moe_decode_weight_pool_count"], 1)
         self.assertEqual(stats["moe_decode_weight_buffer_bytes"], 16)
         self.assertEqual(stats["moe_decode_workspace_bytes"], 12)
+        self.assertEqual(stats["qwen35_key_buffer_pool_count"], 1)
+        self.assertEqual(stats["qwen35_key_buffer_bytes"], 12)
+        self.assertEqual(stats["qwen35_key_buffer_allocation_count"], 1)
+        self.assertEqual(stats["qwen35_key_buffer_reuse_count"], 9)
         self.assertEqual(stats["sampling_rank_buffer_bytes"], 4)
         self.assertEqual(stats["sampling_noise_buffer_bytes"], 8)
         self.assertEqual(stats["tp_logits_local_buffer_bytes"], 20)
@@ -862,7 +876,7 @@ class HybridStateContextTest(unittest.TestCase):
         self.assertEqual(stats["tp_top_k_reduction_count"], 5)
         self.assertEqual(stats["tp_top_k_candidate_bytes"], 320)
         self.assertEqual(stats["tp_top_k_full_gather_avoided_bytes"], 8192)
-        self.assertEqual(stats["total_bytes_local_rank"], 152)
+        self.assertEqual(stats["total_bytes_local_rank"], 164)
 
     def test_multi_rank_kv_cache_stats_are_gathered(self):
         runner = object.__new__(ModelRunner)

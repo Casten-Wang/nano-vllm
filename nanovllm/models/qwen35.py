@@ -6,7 +6,7 @@ import torch
 from torch import nn
 
 from nanovllm.layers.embed_head import ParallelLMHead, VocabParallelEmbedding
-from nanovllm.models.qwen35_attention import Qwen35Attention
+from nanovllm.models.qwen35_attention import Qwen35Attention, Qwen35KeyBufferPool
 from nanovllm.models.qwen35_gated_delta import Qwen35GatedDeltaNet
 from nanovllm.models.moe_dispatch import BatchedExpertWeightBufferPool
 from nanovllm.models.qwen35_moe import (
@@ -70,8 +70,13 @@ class Qwen35Model(nn.Module):
             Qwen35DecoderLayer(config, layer_idx)
             for layer_idx in range(int(config.num_hidden_layers))
         )
+        self.full_attention_key_buffer_pool = Qwen35KeyBufferPool()
         self.moe_decode_weight_buffer_pool = BatchedExpertWeightBufferPool()
         for layer in self.layers:
+            if isinstance(getattr(layer, "self_attn", None), Qwen35Attention):
+                layer.self_attn.key_buffer_pool = (
+                    self.full_attention_key_buffer_pool
+                )
             if isinstance(layer.mlp.experts, Qwen35Experts):
                 layer.mlp.experts.decode_weight_buffer_pool = (
                     self.moe_decode_weight_buffer_pool

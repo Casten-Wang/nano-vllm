@@ -15,6 +15,48 @@ from nanovllm.layers.rotary_embedding import get_rope
 from nanovllm.models.qwen35_moe import Qwen35RMSNorm
 
 
+class Qwen35KeyBufferPool:
+    """Single-stream scratch storage for the normalized full-attention key."""
+
+    def __init__(self) -> None:
+        self.storage: torch.Tensor | None = None
+        self.allocation_count = 0
+        self.reuse_count = 0
+
+    def copy(self, key: torch.Tensor) -> torch.Tensor:
+        if torch.is_grad_enabled():
+            raise RuntimeError("Qwen3.5 key buffer is inference-only")
+        required = key.numel()
+        if (
+            self.storage is None
+            or self.storage.device != key.device
+            or self.storage.dtype != key.dtype
+            or self.storage.numel() < required
+        ):
+            self.storage = torch.empty(
+                required,
+                dtype=key.dtype,
+                device=key.device,
+            )
+            self.allocation_count += 1
+        else:
+            self.reuse_count += 1
+        output = self.storage[:required].view_as(key)
+        output.copy_(key)
+        return output
+
+    def storage_stats(self) -> dict[str, int]:
+        return {
+            "storage_bytes": (
+                0
+                if self.storage is None
+                else self.storage.numel() * self.storage.element_size()
+            ),
+            "allocation_count": self.allocation_count,
+            "reuse_count": self.reuse_count,
+        }
+
+
 class Qwen35Attention(nn.Module):
     """Full attention with Qwen3.5 query gate and partial text RoPE."""
 
@@ -78,6 +120,7 @@ class Qwen35Attention(nn.Module):
             self.head_dim**-0.5,
             self.num_kv_heads,
         )
+        self.key_buffer_pool: Qwen35KeyBufferPool | None = None
 
     def forward(
         self,
@@ -106,7 +149,11 @@ class Qwen35Attention(nn.Module):
             -1,
             self.num_kv_heads,
             self.head_dim,
-        ).clone()
+        )
+        if torch.is_grad_enabled() or self.key_buffer_pool is None:
+            key = key.clone()
+        else:
+            key = self.key_buffer_pool.copy(key)
         value = value.view_as(key)
         query = self.q_norm(query, inplace_output=True)
         key = self.k_norm(key, inplace_output=True)

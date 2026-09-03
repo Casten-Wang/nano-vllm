@@ -214,6 +214,52 @@ def test_attention_norms_reuse_query_and_key_projection_storage():
     assert storage["key_output"] == storage["key_input"]
 
 
+@torch.no_grad()
+def test_attention_layers_can_share_key_buffer_pool():
+    first = make_attention()
+    second = make_attention()
+    pool = attention.Qwen35KeyBufferPool()
+    first.key_buffer_pool = pool
+    second.key_buffer_pool = pool
+    key_storage = []
+    first_hook = first.k_norm.register_forward_pre_hook(
+        lambda _module, inputs: key_storage.append(inputs[0].data_ptr())
+    )
+    second_hook = second.k_norm.register_forward_pre_hook(
+        lambda _module, inputs: key_storage.append(inputs[0].data_ptr())
+    )
+
+    try:
+        first(torch.arange(5), torch.randn(5, 8))
+        second(torch.arange(3), torch.randn(3, 8))
+    finally:
+        first_hook.remove()
+        second_hook.remove()
+
+    assert key_storage[0] == key_storage[1]
+    assert pool.storage_stats() == {
+        "storage_bytes": 5 * first.num_kv_heads * first.head_dim * 4,
+        "allocation_count": 1,
+        "reuse_count": 1,
+    }
+
+
+def test_attention_autograd_does_not_use_inference_key_buffer():
+    layer = make_attention()
+    pool = attention.Qwen35KeyBufferPool()
+    layer.key_buffer_pool = pool
+    hidden = torch.randn(3, 8, requires_grad=True)
+
+    layer(torch.arange(3), hidden).sum().backward()
+
+    assert hidden.grad is not None
+    assert pool.storage_stats() == {
+        "storage_bytes": 0,
+        "allocation_count": 0,
+        "reuse_count": 0,
+    }
+
+
 def test_query_gate_keeps_separate_autograd_output():
     layer = make_attention()
     storage = {}
