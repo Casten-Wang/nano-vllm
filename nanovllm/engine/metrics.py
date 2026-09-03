@@ -54,6 +54,9 @@ class EngineMetrics:
     remote_prefill_send_requests_polled: int = 0
     remote_prefill_receive_backpressure: int = 0
     remote_prefill_send_backpressure: int = 0
+    remote_prefill_receive_staged_bytes: int = 0
+    active_remote_prefill_receive_staged_bytes: int = 0
+    peak_remote_prefill_receive_staged_bytes: int = 0
     remote_prefill_send_staged_bytes: int = 0
     active_remote_prefill_send_staged_bytes: int = 0
     peak_remote_prefill_send_staged_bytes: int = 0
@@ -68,6 +71,7 @@ class EngineMetrics:
         self.request_latencies = []
 
     def reset(self):
+        active_receive_staged_bytes = self.active_remote_prefill_receive_staged_bytes
         active_send_staged_bytes = self.active_remote_prefill_send_staged_bytes
         self.total_prefill_tokens = 0
         self.total_decode_tokens = 0
@@ -110,6 +114,9 @@ class EngineMetrics:
         self.remote_prefill_send_requests_polled = 0
         self.remote_prefill_receive_backpressure = 0
         self.remote_prefill_send_backpressure = 0
+        self.remote_prefill_receive_staged_bytes = 0
+        self.active_remote_prefill_receive_staged_bytes = active_receive_staged_bytes
+        self.peak_remote_prefill_receive_staged_bytes = active_receive_staged_bytes
         self.remote_prefill_send_staged_bytes = 0
         self.active_remote_prefill_send_staged_bytes = active_send_staged_bytes
         self.peak_remote_prefill_send_staged_bytes = active_send_staged_bytes
@@ -217,8 +224,16 @@ class EngineMetrics:
             self.request_tpots.append(tpot)
             self.request_latencies.append(latency)
 
-    def record_remote_prefill_receive_started(self) -> None:
+    def record_remote_prefill_receive_started(self, staged_bytes: int = 0) -> None:
+        if staged_bytes < 0:
+            raise ValueError("remote prefill staged bytes must be non-negative")
         self.remote_prefill_receive_started += 1
+        self.remote_prefill_receive_staged_bytes += staged_bytes
+        self.active_remote_prefill_receive_staged_bytes += staged_bytes
+        self.peak_remote_prefill_receive_staged_bytes = max(
+            self.peak_remote_prefill_receive_staged_bytes,
+            self.active_remote_prefill_receive_staged_bytes,
+        )
 
     def record_remote_prefill_poll(self, request_count: int) -> None:
         if request_count <= 0:
@@ -231,6 +246,7 @@ class EngineMetrics:
         elapsed: float,
         *,
         outcome: str,
+        staged_bytes: int = 0,
     ) -> None:
         if elapsed < 0.0:
             raise ValueError("remote prefill receive elapsed time must be non-negative")
@@ -243,7 +259,13 @@ class EngineMetrics:
         counter = counters.get(outcome)
         if counter is None:
             raise ValueError("remote prefill receive outcome is invalid")
+        if (
+            staged_bytes < 0
+            or staged_bytes > self.active_remote_prefill_receive_staged_bytes
+        ):
+            raise ValueError("remote prefill finished staged bytes are invalid")
         setattr(self, counter, getattr(self, counter) + 1)
+        self.active_remote_prefill_receive_staged_bytes -= staged_bytes
         self.remote_prefill_receive_time += elapsed
         self.max_remote_prefill_receive_time = max(
             self.max_remote_prefill_receive_time,
@@ -431,6 +453,9 @@ class EngineMetrics:
             "remote_prefill_send_requests_polled": self.remote_prefill_send_requests_polled,
             "remote_prefill_receive_backpressure": self.remote_prefill_receive_backpressure,
             "remote_prefill_send_backpressure": self.remote_prefill_send_backpressure,
+            "remote_prefill_receive_staged_bytes": self.remote_prefill_receive_staged_bytes,
+            "active_remote_prefill_receive_staged_bytes": self.active_remote_prefill_receive_staged_bytes,
+            "peak_remote_prefill_receive_staged_bytes": self.peak_remote_prefill_receive_staged_bytes,
             "remote_prefill_send_staged_bytes": self.remote_prefill_send_staged_bytes,
             "active_remote_prefill_send_staged_bytes": self.active_remote_prefill_send_staged_bytes,
             "peak_remote_prefill_send_staged_bytes": self.peak_remote_prefill_send_staged_bytes,

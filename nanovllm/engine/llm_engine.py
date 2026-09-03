@@ -190,6 +190,8 @@ class LLMEngine:
         self.metrics = EngineMetrics()
         self._remote_prefill_receive_tokens: dict[str, int] = {}
         self._remote_prefill_receive_started_at: dict[str, float] = {}
+        self._remote_prefill_receive_staged_bytes: dict[str, int] = {}
+        self._remote_prefill_receive_expected_bytes: dict[str, dict[int, int]] = {}
         self._remote_prefill_receive_errors: dict[str, str] = {}
         self._remote_prefill_send_started_at: dict[str, float] = {}
         self._remote_prefill_send_staged_bytes: dict[str, int] = {}
@@ -303,8 +305,34 @@ class LLMEngine:
         if transfer_id in getattr(self, "_remote_prefill_receive_tokens", {}):
             raise ValueError("cache receive id is already active")
         seq, session = self.scheduler.remote_prefills[transfer_id]
+        estimates = self.model_runner.call_rank_results(
+            "estimate_sequence_cache_bytes",
+            seq,
+        )
+        expected_by_rank = _validate_rank_results(
+            estimates,
+            self.config.tensor_parallel_size,
+            "staged_bytes",
+        )
+        if any(expected > max_payload_bytes for expected in expected_by_rank.values()):
+            raise ValueError(
+                "expected cache receive payload exceeds max_payload_bytes"
+            )
+        staged_bytes = sum(expected_by_rank.values())
+        self._ensure_remote_prefill_staging_capacity(
+            staged_bytes,
+            direction="receive",
+        )
+        receive_staged_bytes = getattr(
+            self,
+            "_remote_prefill_receive_staged_bytes",
+            None,
+        )
+        if receive_staged_bytes is None:
+            receive_staged_bytes = self._remote_prefill_receive_staged_bytes = {}
+        receive_staged_bytes[transfer_id] = staged_bytes
         receive_started_at = perf_counter()
-        self.metrics.record_remote_prefill_receive_started()
+        self.metrics.record_remote_prefill_receive_started(staged_bytes)
         try:
             rank_results = self.model_runner.call_rank_results(
                 "receive_sequence_cache_from_endpoint",
@@ -313,6 +341,7 @@ class LLMEngine:
                 bind_endpoints,
                 timeout_s,
                 max_payload_bytes,
+                [expected_by_rank[rank] for rank in range(self.config.tensor_parallel_size)],
             )
             received = _validate_rank_results(
                 rank_results,
@@ -320,6 +349,15 @@ class LLMEngine:
                 "cached_tokens",
                 expected_value=seq.num_prompt_tokens,
             )
+            received_bytes = _validate_rank_results(
+                rank_results,
+                self.config.tensor_parallel_size,
+                "received_bytes",
+            )
+            if received_bytes != expected_by_rank:
+                raise RuntimeError(
+                    "cache receive payload bytes differ from the preflight estimate"
+                )
             now = perf_counter()
             for rank in received:
                 session.acknowledge(rank, now=now)
@@ -343,11 +381,13 @@ class LLMEngine:
             self.metrics.record_remote_prefill_receive_finished(
                 perf_counter() - receive_started_at,
                 outcome=outcome,
+                staged_bytes=receive_staged_bytes.pop(transfer_id),
             )
             raise
         self.metrics.record_remote_prefill_receive_finished(
             perf_counter() - receive_started_at,
             outcome="committed",
+            staged_bytes=receive_staged_bytes.pop(transfer_id),
         )
         return seq.seq_id
 
@@ -372,6 +412,25 @@ class LLMEngine:
         if transfer_id in receive_tokens:
             raise ValueError("cache receive id is already active")
         self._ensure_remote_prefill_transfer_capacity(direction="receive")
+        seq, _session = self.scheduler.remote_prefills[transfer_id]
+        estimates = self.model_runner.call_rank_results(
+            "estimate_sequence_cache_bytes",
+            seq,
+        )
+        expected_by_rank = _validate_rank_results(
+            estimates,
+            self.config.tensor_parallel_size,
+            "staged_bytes",
+        )
+        if any(expected > max_payload_bytes for expected in expected_by_rank.values()):
+            raise ValueError(
+                "expected cache receive payload exceeds max_payload_bytes"
+            )
+        staged_bytes = sum(expected_by_rank.values())
+        self._ensure_remote_prefill_staging_capacity(
+            staged_bytes,
+            direction="receive",
+        )
         receive_started_at = perf_counter()
         try:
             rank_results = self.model_runner.call_rank_results(
@@ -380,6 +439,7 @@ class LLMEngine:
                 bind_endpoints,
                 timeout_s,
                 max_payload_bytes,
+                [expected_by_rank[rank] for rank in range(self.config.tensor_parallel_size)],
             )
             _validate_rank_results(
                 rank_results,
@@ -407,9 +467,24 @@ class LLMEngine:
         if started_at is None:
             started_at = self._remote_prefill_receive_started_at = {}
         started_at[transfer_id] = receive_started_at
-        self.metrics.record_remote_prefill_receive_started()
+        receive_staged_bytes = getattr(
+            self,
+            "_remote_prefill_receive_staged_bytes",
+            None,
+        )
+        if receive_staged_bytes is None:
+            receive_staged_bytes = self._remote_prefill_receive_staged_bytes = {}
+        receive_staged_bytes[transfer_id] = staged_bytes
+        expected_bytes = getattr(
+            self,
+            "_remote_prefill_receive_expected_bytes",
+            None,
+        )
+        if expected_bytes is None:
+            expected_bytes = self._remote_prefill_receive_expected_bytes = {}
+        expected_bytes[transfer_id] = expected_by_rank
+        self.metrics.record_remote_prefill_receive_started(staged_bytes)
         getattr(self, "_remote_prefill_receive_errors", {}).pop(transfer_id, None)
-        seq, _session = self.scheduler.remote_prefills[transfer_id]
         return seq.seq_id
 
     def _abort_remote_prefill_receive(
@@ -427,6 +502,16 @@ class LLMEngine:
         except BaseException:
             pass
         self._remote_prefill_receive_tokens.pop(transfer_id, None)
+        staged_bytes = getattr(
+            self,
+            "_remote_prefill_receive_staged_bytes",
+            {},
+        ).pop(transfer_id, 0)
+        getattr(
+            self,
+            "_remote_prefill_receive_expected_bytes",
+            {},
+        ).pop(transfer_id, None)
         started_at = getattr(self, "_remote_prefill_receive_started_at", {}).pop(
             transfer_id,
             None,
@@ -435,6 +520,7 @@ class LLMEngine:
             self.metrics.record_remote_prefill_receive_finished(
                 perf_counter() - started_at,
                 outcome=outcome,
+                staged_bytes=staged_bytes,
             )
         if transfer_id in self.scheduler.remote_prefills:
             self.scheduler.abort_remote_prefill(
@@ -510,6 +596,14 @@ class LLMEngine:
                 "install_sequence_cache_receive",
                 seq,
                 transfer_id,
+                [
+                    getattr(
+                        self,
+                        "_remote_prefill_receive_expected_bytes",
+                        {},
+                    )[transfer_id][rank]
+                    for rank in range(self.config.tensor_parallel_size)
+                ],
             )
             received = _validate_rank_results(
                 installed,
@@ -517,6 +611,20 @@ class LLMEngine:
                 "cached_tokens",
                 expected_value=seq.num_prompt_tokens,
             )
+            received_bytes = _validate_rank_results(
+                installed,
+                self.config.tensor_parallel_size,
+                "received_bytes",
+            )
+            expected_bytes = getattr(
+                self,
+                "_remote_prefill_receive_expected_bytes",
+                {},
+            ).get(transfer_id)
+            if received_bytes != expected_bytes:
+                raise RuntimeError(
+                    "cache receive payload bytes differ from the preflight estimate"
+                )
             now = perf_counter()
             for rank in received:
                 session.acknowledge(rank, now=now)
@@ -532,6 +640,16 @@ class LLMEngine:
             )
             raise
         receive_tokens.pop(transfer_id, None)
+        staged_bytes = getattr(
+            self,
+            "_remote_prefill_receive_staged_bytes",
+            {},
+        ).pop(transfer_id, 0)
+        getattr(
+            self,
+            "_remote_prefill_receive_expected_bytes",
+            {},
+        ).pop(transfer_id, None)
         started_at = getattr(self, "_remote_prefill_receive_started_at", {}).pop(
             transfer_id,
             None,
@@ -540,6 +658,7 @@ class LLMEngine:
             self.metrics.record_remote_prefill_receive_finished(
                 perf_counter() - started_at,
                 outcome="committed",
+                staged_bytes=staged_bytes,
             )
         return seq.seq_id
 
@@ -652,16 +771,23 @@ class LLMEngine:
             f"{active_receives + active_sends}/{limit} active"
         )
 
-    def _ensure_remote_prefill_staging_capacity(self, staged_bytes: int) -> None:
+    def _ensure_remote_prefill_staging_capacity(
+        self,
+        staged_bytes: int,
+        *,
+        direction: str = "send",
+    ) -> None:
         limit = self.config.max_remote_prefill_staging_bytes
         if limit is None:
             return
         active_bytes = sum(
             getattr(self, "_remote_prefill_send_staged_bytes", {}).values()
+        ) + sum(
+            getattr(self, "_remote_prefill_receive_staged_bytes", {}).values()
         )
         if active_bytes + staged_bytes <= limit:
             return
-        self.metrics.record_remote_prefill_backpressure(direction="send")
+        self.metrics.record_remote_prefill_backpressure(direction=direction)
         raise RuntimeError(
             "remote prefill staging capacity is exhausted: "
             f"{active_bytes + staged_bytes}/{limit} bytes requested"

@@ -2,6 +2,7 @@ import socket
 from threading import Thread
 from time import monotonic, sleep
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 import torch
@@ -283,7 +284,9 @@ def test_model_runner_rank_endpoint_exports_receives_and_installs():
 
     assert send_result["rank"] == 0
     assert exported_to_host == [True]
-    assert receive_result == [{"rank": 0, "cached_tokens": 5}]
+    assert receive_result == [
+        {"rank": 0, "cached_tokens": 5, "received_bytes": payload.nbytes}
+    ]
     assert len(installed) == 1
     assert installed[0][0] == "destination-seq"
     assert installed[0][1].transfer_id == payload.transfer_id
@@ -342,7 +345,7 @@ def test_model_runner_async_receive_polls_then_installs_before_ack():
     assert destination.install_sequence_cache_receive(
         "destination-seq",
         payload.transfer_id,
-    ) == {"rank": 0, "cached_tokens": 5}
+    ) == {"rank": 0, "cached_tokens": 5, "received_bytes": payload.nbytes}
     sender_thread.join()
 
     assert sender_result[0]["sent_bytes"] > 0
@@ -368,6 +371,65 @@ def test_model_runner_batches_receive_states_in_one_result():
 
     with pytest.raises(ValueError, match="unique non-empty"):
         runner.poll_sequence_cache_receives(["ready", "ready"])
+
+
+def test_model_runner_async_receive_nacks_payload_smaller_than_preflight():
+    probe = socket.socket()
+    probe.bind(("127.0.0.1", 0))
+    port = probe.getsockname()[1]
+    probe.close()
+    endpoints = [("127.0.0.1", port)]
+    payload = make_payload()
+
+    source = object.__new__(ModelRunner)
+    source.rank = 0
+    source.world_size = 1
+    source.export_sequence_cache = lambda *_args, **_kwargs: payload
+    destination = object.__new__(ModelRunner)
+    destination.rank = 0
+    destination.world_size = 1
+    destination._pending_cache_receives = {}
+    destination.import_sequence_cache = Mock()
+    destination.start_sequence_cache_receive(
+        payload.transfer_id,
+        endpoints,
+        2.0,
+        expected_payload_bytes=[payload.nbytes + 1],
+    )
+    sender_errors = []
+
+    def send_payload():
+        try:
+            source.send_sequence_cache_to_endpoint(
+                "source-seq",
+                payload.transfer_id,
+                endpoints,
+                timeout_s=2.0,
+            )
+        except BaseException as exc:
+            sender_errors.append(exc)
+
+    sender_thread = Thread(target=send_payload)
+    sender_thread.start()
+    deadline = monotonic() + 2.0
+    poll = destination.poll_sequence_cache_receive(payload.transfer_id)
+    while poll["state"] == "receiving" and monotonic() < deadline:
+        sleep(0.001)
+        poll = destination.poll_sequence_cache_receive(payload.transfer_id)
+
+    assert poll == {"rank": 0, "state": "ready"}
+    with pytest.raises(ValueError, match="differ from the preflight"):
+        destination.install_sequence_cache_receive(
+            "destination-seq",
+            payload.transfer_id,
+            [payload.nbytes + 1],
+        )
+    sender_thread.join(timeout=2.0)
+
+    assert not sender_thread.is_alive()
+    assert len(sender_errors) == 1
+    assert "receiver rejected" in str(sender_errors[0])
+    destination.import_sequence_cache.assert_not_called()
 
 
 def test_model_runner_async_send_waits_for_receiver_ack():

@@ -1196,10 +1196,33 @@ class ModelRunner:
         bind_endpoints: list[tuple[str, int]],
         timeout_s: float = 30.0,
         max_payload_bytes: int = 16 * 1024**3,
+        expected_payload_bytes: list[int] | None = None,
     ) -> dict:
         """Receive, verify, and install this TP rank's remote prefill state."""
 
         from nanovllm.engine.cache_transfer_wire import RankCacheReceiver
+
+        expected_bytes = None
+        if expected_payload_bytes is not None:
+            if (
+                len(expected_payload_bytes) != self.world_size
+                or any(
+                    not isinstance(value, int)
+                    or isinstance(value, bool)
+                    or value <= 0
+                    for value in expected_payload_bytes
+                )
+            ):
+                raise ValueError("expected payload bytes must cover every TP rank")
+            expected_bytes = expected_payload_bytes[self.rank]
+            max_payload_bytes = min(max_payload_bytes, expected_bytes)
+
+        def install_verified(payload) -> None:
+            if expected_bytes is not None and payload.nbytes != expected_bytes:
+                raise ValueError(
+                    "cache receive payload bytes differ from the preflight estimate"
+                )
+            self.import_sequence_cache(seq, payload, transfer_id=transfer_id)
 
         host, port = self._rank_cache_endpoint(bind_endpoints)
         with RankCacheReceiver(
@@ -1210,13 +1233,13 @@ class ModelRunner:
         ) as receiver:
             payload = receiver.receive(
                 timeout_s=timeout_s,
-                on_verified=lambda received: self.import_sequence_cache(
-                    seq,
-                    received,
-                    transfer_id=transfer_id,
-                ),
+                on_verified=install_verified,
             )
-        return {"rank": self.rank, "cached_tokens": payload.cached_tokens}
+        return {
+            "rank": self.rank,
+            "cached_tokens": payload.cached_tokens,
+            "received_bytes": payload.nbytes,
+        }
 
     def start_sequence_cache_receive(
         self,
@@ -1224,6 +1247,7 @@ class ModelRunner:
         bind_endpoints: list[tuple[str, int]],
         timeout_s: float = 30.0,
         max_payload_bytes: int = 16 * 1024**3,
+        expected_payload_bytes: list[int] | None = None,
     ) -> dict:
         """Start rank-local TCP receive without touching CUDA state."""
 
@@ -1231,6 +1255,21 @@ class ModelRunner:
 
         if transfer_id in self._pending_cache_receives:
             raise ValueError("cache receive id is already active")
+        if expected_payload_bytes is not None:
+            if (
+                len(expected_payload_bytes) != self.world_size
+                or any(
+                    not isinstance(value, int)
+                    or isinstance(value, bool)
+                    or value <= 0
+                    for value in expected_payload_bytes
+                )
+            ):
+                raise ValueError("expected payload bytes must cover every TP rank")
+            max_payload_bytes = min(
+                max_payload_bytes,
+                expected_payload_bytes[self.rank],
+            )
         host, port = self._rank_cache_endpoint(bind_endpoints)
         receive = PendingRankCacheReceive(
             host,
@@ -1279,6 +1318,7 @@ class ModelRunner:
         self,
         seq: Sequence,
         transfer_id: str,
+        expected_payload_bytes: list[int] | None = None,
     ) -> dict:
         """Install a ready CPU payload, then ACK the producer."""
 
@@ -1287,6 +1327,23 @@ class ModelRunner:
             raise ValueError("cache receive id is not active")
         try:
             payload = receive.payload()
+            if expected_payload_bytes is not None:
+                if (
+                    len(expected_payload_bytes) != self.world_size
+                    or any(
+                        not isinstance(value, int)
+                        or isinstance(value, bool)
+                        or value <= 0
+                        for value in expected_payload_bytes
+                    )
+                ):
+                    raise ValueError(
+                        "expected payload bytes must cover every TP rank"
+                    )
+                if payload.nbytes != expected_payload_bytes[self.rank]:
+                    raise ValueError(
+                        "cache receive payload bytes differ from the preflight estimate"
+                    )
             self.import_sequence_cache(seq, payload, transfer_id=transfer_id)
         except BaseException:
             receive.finish(accepted=False)
@@ -1294,7 +1351,11 @@ class ModelRunner:
             raise
         receive.finish(accepted=True)
         self._pending_cache_receives.pop(transfer_id, None)
-        return {"rank": self.rank, "cached_tokens": payload.cached_tokens}
+        return {
+            "rank": self.rank,
+            "cached_tokens": payload.cached_tokens,
+            "received_bytes": payload.nbytes,
+        }
 
     def abort_sequence_cache_receive(self, transfer_id: str) -> dict:
         receive = self._pending_cache_receives.pop(transfer_id, None)

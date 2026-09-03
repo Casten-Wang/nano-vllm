@@ -132,6 +132,18 @@ def make_engine(*, tensor_parallel_size=1):
                 for rank in range(tensor_parallel_size)
             ]
         seq = args[0]
+        if method_name in {
+            "receive_sequence_cache_from_endpoint",
+            "install_sequence_cache_receive",
+        }:
+            return [
+                {
+                    "rank": rank,
+                    "cached_tokens": seq.num_prompt_tokens,
+                    "received_bytes": 100 + rank,
+                }
+                for rank in range(tensor_parallel_size)
+            ]
         value_name = (
             "cached_tokens"
             if method_name in {
@@ -152,6 +164,8 @@ def make_engine(*, tensor_parallel_size=1):
     )
     engine._remote_prefill_receive_tokens = {}
     engine._remote_prefill_receive_started_at = {}
+    engine._remote_prefill_receive_staged_bytes = {}
+    engine._remote_prefill_receive_expected_bytes = {}
     engine._remote_prefill_receive_errors = {}
     engine._remote_prefill_send_started_at = {}
     engine._remote_prefill_send_staged_bytes = {}
@@ -254,7 +268,13 @@ def test_engine_commits_remote_prefill_only_after_all_rank_receive():
     assert seq.status is SequenceStatus.RUNNING
     assert seq.completion_token_ids == [9]
     assert not engine.scheduler.remote_prefills
-    engine.model_runner.call_rank_results.assert_called_once()
+    assert [
+        call.args[0]
+        for call in engine.model_runner.call_rank_results.call_args_list
+    ] == [
+        "estimate_sequence_cache_bytes",
+        "receive_sequence_cache_from_endpoint",
+    ]
 
 
 def test_engine_receive_failure_releases_destination_and_requeues_prefill():
@@ -265,9 +285,14 @@ def test_engine_receive_failure_releases_destination_and_requeues_prefill():
         transfer_id="request/attempt-1",
         timeout_s=10.0,
     )
-    engine.model_runner.call_rank_results.side_effect = RuntimeError(
-        "checksum mismatch"
-    )
+    original = engine.model_runner.call_rank_results.side_effect
+
+    def fail_receive(method_name, *args):
+        if method_name == "receive_sequence_cache_from_endpoint":
+            raise RuntimeError("checksum mismatch")
+        return original(method_name, *args)
+
+    engine.model_runner.call_rank_results.side_effect = fail_receive
 
     with pytest.raises(RuntimeError, match="checksum mismatch"):
         engine.receive_remote_prefill(
@@ -317,11 +342,17 @@ def test_engine_rejects_inconsistent_rank_receive_results():
         SamplingParams(max_tokens=4),
         transfer_id="request/attempt-1",
     )
-    engine.model_runner.call_rank_results.side_effect = None
-    engine.model_runner.call_rank_results.return_value = [
-        {"rank": 0, "cached_tokens": 4},
-        {"rank": 1, "cached_tokens": 3},
-    ]
+    original = engine.model_runner.call_rank_results.side_effect
+
+    def inconsistent_receive(method_name, *args):
+        if method_name == "receive_sequence_cache_from_endpoint":
+            return [
+                {"rank": 0, "cached_tokens": 4, "received_bytes": 100},
+                {"rank": 1, "cached_tokens": 3, "received_bytes": 101},
+            ]
+        return original(method_name, *args)
+
+    engine.model_runner.call_rank_results.side_effect = inconsistent_receive
 
     with pytest.raises(RuntimeError, match="expected 4"):
         engine.receive_remote_prefill(
@@ -362,6 +393,11 @@ def test_engine_async_receive_commits_only_after_all_ranks_are_ready():
     assert metrics["remote_prefill_receive_started"] == 1
     assert metrics["remote_prefill_receive_committed"] == 1
     assert metrics["remote_prefill_poll_calls"] == 2
+    assert metrics["remote_prefill_receive_staged_bytes"] == 201
+    assert metrics["peak_remote_prefill_receive_staged_bytes"] == 201
+    assert metrics["active_remote_prefill_receive_staged_bytes"] == 0
+    assert not engine._remote_prefill_receive_staged_bytes
+    assert not engine._remote_prefill_receive_expected_bytes
 
 
 def test_engine_async_receive_failure_aborts_all_ranks_and_falls_back():
@@ -384,7 +420,9 @@ def test_engine_async_receive_failure_aborts_all_ranks_and_falls_back():
     assert engine.scheduler.waiting[0].seq_id == seq_id
     assert not engine.scheduler.remote_prefills
     assert "request/attempt-1" not in engine._remote_prefill_receive_tokens
-    assert engine.metrics.to_dict()["remote_prefill_receive_failed"] == 1
+    metrics = engine.metrics.to_dict()
+    assert metrics["remote_prefill_receive_failed"] == 1
+    assert metrics["active_remote_prefill_receive_staged_bytes"] == 0
 
 
 def test_engine_async_receive_can_be_cancelled_explicitly():
@@ -406,7 +444,41 @@ def test_engine_async_receive_can_be_cancelled_explicitly():
     ) == seq_id
     assert engine.scheduler.waiting[0].seq_id == seq_id
     assert not engine.scheduler.remote_prefills
-    assert engine.metrics.to_dict()["remote_prefill_receive_cancelled"] == 1
+    metrics = engine.metrics.to_dict()
+    assert metrics["remote_prefill_receive_cancelled"] == 1
+    assert metrics["active_remote_prefill_receive_staged_bytes"] == 0
+
+
+def test_engine_async_receive_rejects_payload_size_mismatch_and_falls_back():
+    engine = make_engine(tensor_parallel_size=2)
+    seq_id = engine.add_remote_prefill_request(
+        [1, 2, 3, 4],
+        SamplingParams(max_tokens=4),
+        transfer_id="request/attempt-1",
+    )
+    engine.start_remote_prefill_receive(
+        "request/attempt-1",
+        9,
+        [("127.0.0.1", 20001), ("127.0.0.1", 20002)],
+    )
+    original = engine.model_runner.call_rank_results.side_effect
+
+    def inconsistent_install(method_name, *args):
+        results = original(method_name, *args)
+        if method_name == "install_sequence_cache_receive":
+            results[1]["received_bytes"] += 1
+        return results
+
+    engine.model_runner.call_rank_results.side_effect = inconsistent_install
+    engine._test_async_state["value"] = "ready"
+
+    with pytest.raises(RuntimeError, match="differ from the preflight"):
+        engine.poll_remote_prefill_receive("request/attempt-1")
+
+    assert engine.scheduler.waiting[0].seq_id == seq_id
+    assert not engine.scheduler.remote_prefills
+    assert not engine._remote_prefill_receive_staged_bytes
+    assert engine.metrics.to_dict()["active_remote_prefill_receive_staged_bytes"] == 0
 
 
 def test_engine_releases_prefill_source_only_after_receiver_ack():
@@ -666,3 +738,56 @@ def test_staging_byte_capacity_rejects_before_host_copy():
     assert second.status is SequenceStatus.RUNNING
     assert second in engine.scheduler.running
     assert engine.metrics.to_dict()["remote_prefill_send_backpressure"] == 1
+
+
+def test_receive_staging_capacity_rejects_before_listener_start():
+    engine = make_engine(tensor_parallel_size=2)
+    engine.config.max_remote_prefill_staging_bytes = 200
+    seq_id = engine.add_remote_prefill_request(
+        [1, 2, 3, 4],
+        SamplingParams(max_tokens=4),
+        transfer_id="request/attempt-1",
+    )
+    engine.model_runner.call_rank_results.reset_mock()
+
+    with pytest.raises(RuntimeError, match="201/200 bytes requested"):
+        engine.start_remote_prefill_receive(
+            "request/attempt-1",
+            9,
+            [("127.0.0.1", 20001), ("127.0.0.1", 20002)],
+        )
+
+    calls = engine.model_runner.call_rank_results.call_args_list
+    assert [call.args[0] for call in calls] == ["estimate_sequence_cache_bytes"]
+    seq, _session = engine.scheduler.remote_prefills["request/attempt-1"]
+    assert seq.seq_id == seq_id
+    assert not engine._remote_prefill_receive_staged_bytes
+    assert engine.metrics.to_dict()["remote_prefill_receive_backpressure"] == 1
+
+
+def test_staging_byte_capacity_is_shared_by_send_and_receive():
+    engine = make_engine()
+    engine.config.max_remote_prefill_staging_bytes = 150
+    source = _prepare_remote_prefill_source(engine, 1)
+    engine.start_remote_prefill_send(
+        source.seq_id,
+        "source/attempt-1",
+        [("127.0.0.1", 20001)],
+    )
+    engine.add_remote_prefill_request(
+        [5, 6, 7, 8],
+        SamplingParams(max_tokens=4),
+        transfer_id="destination/attempt-1",
+    )
+    engine.model_runner.call_rank_results.reset_mock()
+
+    with pytest.raises(RuntimeError, match="200/150 bytes requested"):
+        engine.start_remote_prefill_receive(
+            "destination/attempt-1",
+            9,
+            [("127.0.0.1", 20002)],
+        )
+
+    calls = engine.model_runner.call_rank_results.call_args_list
+    assert [call.args[0] for call in calls] == ["estimate_sequence_cache_bytes"]
+    assert engine.metrics.to_dict()["remote_prefill_receive_backpressure"] == 1
