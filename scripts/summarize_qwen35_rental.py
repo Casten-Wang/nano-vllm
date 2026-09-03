@@ -46,6 +46,7 @@ MIXED_MOE_MIN_SPEEDUP = 1.0
 MIXED_MOE_MAX_PEAK_EXTRA_MIB = 64.0
 MIXED_MOE_MAX_ABS_ERROR = 0.05
 PD_INSTALL_MAX_LATENCY_RATIO = 1.25
+RESIDENT_FP8_MIN_THROUGHPUT_RATIO = 0.80
 KVCACHE_BLOCK_SIZE = 256
 OFFICIAL_CHECKPOINT_REPO = "Qwen/Qwen3.5-35B-A3B"
 OFFICIAL_SKIPPED_WEIGHT_GROUPS = {"model.visual": 333, "mtp": 785}
@@ -239,7 +240,11 @@ def summarize_optional_gptq(run_dir: Path, run_id: str) -> dict:
     }
 
 
-def summarize_optional_fp8_audit(run_dir: Path, run_id: str | None = None) -> dict:
+def summarize_optional_fp8_audit(
+    run_dir: Path,
+    run_id: str | None = None,
+    baseline_rows: list[dict] | None = None,
+) -> dict:
     """Summarize optional FP8 layout and reference-execution evidence."""
 
     path = run_dir / "fp8" / "official_checkpoint_header_audit.json"
@@ -362,13 +367,160 @@ def summarize_optional_fp8_audit(run_dir: Path, run_id: str | None = None) -> di
                 and item.get("resident_fp8_dequant_workspace_bytes") == 0
                 for item in rank_stats
             )
-        runtime_storage_by_tp[f"tp{tp_size}"] = {
-            "valid": valid,
-            "ranks": rank_stats,
-        }
+        tp_key = f"tp{tp_size}"
+        summary = runtime_storage_by_tp.setdefault(
+            tp_key,
+            {"valid": True, "configurations": []},
+        )
+        summary["valid"] = summary["valid"] and valid
+        summary["configurations"].append(
+            {
+                "valid": valid,
+                "recurrent_state_dtype": row.get("recurrent_state_dtype"),
+                "kv_cache_dtype": row.get("kv_cache_dtype"),
+                "qwen35_moe_decode_backend": row.get(
+                    "qwen35_moe_decode_backend"
+                ),
+                "ranks": rank_stats,
+            }
+        )
+        if (
+            row.get("recurrent_state_dtype") == "model"
+            and row.get("kv_cache_dtype") == "auto"
+            and row.get("qwen35_moe_decode_backend") == "sorted"
+        ):
+            summary["ranks"] = rank_stats
     runtime_storage_valid = (
         set(runtime_storage_by_tp) == tp_names
         and all(item["valid"] for item in runtime_storage_by_tp.values())
+    )
+    canonical_fp8_rows = [
+        row
+        for row in performance_runs
+        if row.get("recurrent_state_dtype") == "model"
+        and row.get("kv_cache_dtype") == "auto"
+        and row.get("qwen35_moe_decode_backend") == "sorted"
+        and row.get("repeat_output_digests_match") is True
+        and row.get("execution_paths_valid") is True
+        and row.get("generation_valid") is True
+    ]
+    canonical_baseline_rows = [
+        row
+        for row in (baseline_rows or [])
+        if row.get("recurrent_state_dtype") == "model"
+        and row.get("kv_cache_dtype") == "auto"
+        and row.get("qwen35_moe_decode_backend") == "sorted"
+        and row.get("repeat_output_digests_match") is True
+        and row.get("execution_paths_valid") is True
+        and row.get("generation_valid") is True
+    ]
+    fp8_rows_by_tp: dict[int, list[dict]] = {}
+    baseline_rows_by_tp: dict[int, list[dict]] = {}
+    for row in canonical_fp8_rows:
+        fp8_rows_by_tp.setdefault(row.get("tensor_parallel_size"), []).append(row)
+    for row in canonical_baseline_rows:
+        baseline_rows_by_tp.setdefault(row.get("tensor_parallel_size"), []).append(
+            row
+        )
+    performance_comparisons = {}
+    comparison_tp_sizes = sorted(
+        int(name.removeprefix("tp")) for name in tp_names
+    )
+    for tp_size in comparison_tp_sizes:
+        candidates = fp8_rows_by_tp.get(tp_size, [])
+        baselines = baseline_rows_by_tp.get(tp_size, [])
+        comparison_valid = len(candidates) == 1 and len(baselines) == 1
+        comparison = {
+            "valid": False,
+            "tensor_parallel_size": tp_size,
+            "configuration": {
+                "recurrent_state_dtype": "model",
+                "kv_cache_dtype": "auto",
+                "qwen35_moe_decode_backend": "sorted",
+            },
+            "candidate_count": len(candidates),
+            "baseline_count": len(baselines),
+        }
+        if comparison_valid:
+            candidate = candidates[0]
+            baseline = baselines[0]
+            candidate_median = candidate.get("median", {})
+            baseline_median = baseline.get("median", {})
+            fp8_peak = candidate_median.get("peak_torch_allocated_mib")
+            baseline_peak = baseline_median.get("peak_torch_allocated_mib")
+            fp8_throughput = candidate_median.get("output_throughput_tok_s")
+            baseline_throughput = baseline_median.get("output_throughput_tok_s")
+            metrics_valid = all(
+                isinstance(value, (int, float))
+                and math.isfinite(value)
+                and value > 0
+                for value in (
+                    fp8_peak,
+                    baseline_peak,
+                    fp8_throughput,
+                    baseline_throughput,
+                )
+            )
+            rank_stats = candidate.get("storage", {}).get(
+                "runtime_buffer_storage_by_rank", []
+            )
+            resident_expert_bytes = [
+                item.get("resident_fp8_expert_weight_bytes", 0)
+                + item.get("resident_fp8_expert_scale_bytes", 0)
+                for item in rank_stats
+            ]
+            workspace_bytes = [
+                item.get("resident_fp8_dequant_workspace_bytes", 0)
+                for item in rank_stats
+            ]
+            if metrics_valid:
+                peak_reduction = baseline_peak - fp8_peak
+                peak_ratio = fp8_peak / baseline_peak
+                throughput_ratio = fp8_throughput / baseline_throughput
+                memory_gate = peak_reduction > 0
+                throughput_gate = (
+                    throughput_ratio >= RESIDENT_FP8_MIN_THROUGHPUT_RATIO
+                )
+            else:
+                peak_reduction = None
+                peak_ratio = None
+                throughput_ratio = None
+                memory_gate = False
+                throughput_gate = False
+            benefit_required = runtime_backend == "resident"
+            comparison.update(
+                {
+                    "valid": metrics_valid
+                    and (not benefit_required or (memory_gate and throughput_gate)),
+                    "baseline": {
+                        "output_throughput_tok_s": baseline_throughput,
+                        "peak_torch_allocated_mib": baseline_peak,
+                    },
+                    "candidate": {
+                        "output_throughput_tok_s": fp8_throughput,
+                        "peak_torch_allocated_mib": fp8_peak,
+                    },
+                    "peak_memory_reduction_mib": peak_reduction,
+                    "peak_memory_ratio": peak_ratio,
+                    "throughput_ratio": throughput_ratio,
+                    "resident_expert_storage_bytes_by_rank": resident_expert_bytes,
+                    "resident_dequant_workspace_bytes_by_rank": workspace_bytes,
+                    "gates": {
+                        "benefit_required": benefit_required,
+                        "peak_memory_reduced": memory_gate,
+                        "min_throughput_ratio": (
+                            RESIDENT_FP8_MIN_THROUGHPUT_RATIO
+                            if benefit_required
+                            else None
+                        ),
+                        "throughput_preserved": throughput_gate,
+                    },
+                }
+            )
+        performance_comparisons[f"tp{tp_size}"] = comparison
+    performance_comparison_valid = (
+        bool(performance_comparisons)
+        and all(item["valid"] for item in performance_comparisons.values())
     )
     performance_valid = (
         bool(performance_runs)
@@ -379,10 +531,12 @@ def summarize_optional_fp8_audit(run_dir: Path, run_id: str | None = None) -> di
             row.get("requested_weight_quant_backend") == runtime_backend
             and row.get("weight_quant_backend") == runtime_backend
             and row.get("quantization_format") == "fp8_block"
+            and row.get("qwen35_moe_decode_backend") == "sorted"
             and row.get("enforce_eager") is True
             for row in performance_runs
         )
         and runtime_storage_valid
+        and performance_comparison_valid
     )
     quality_valid = (
         bool(quality_cases)
@@ -439,6 +593,8 @@ def summarize_optional_fp8_audit(run_dir: Path, run_id: str | None = None) -> di
             "local_checkpoint_matches_official": local_checkpoint_valid,
             "memory_preflight_valid": memory_valid,
             "performance_valid": performance_valid,
+            "performance_comparison_valid": performance_comparison_valid,
+            "performance_comparisons": performance_comparisons,
             "runtime_storage_valid": runtime_storage_valid,
             "runtime_storage_by_tp": runtime_storage_by_tp,
             "quality_valid": quality_valid,
@@ -1948,7 +2104,7 @@ def summarize(run_dir: Path, run_id: str) -> dict:
     )
     quality = load_json(run_dir / "quality" / f"{run_id}_summary.json")
     gptq = summarize_optional_gptq(run_dir, run_id)
-    fp8 = summarize_optional_fp8_audit(run_dir, run_id)
+    fp8 = summarize_optional_fp8_audit(run_dir, run_id, performance.get("runs"))
     kernel_paths = sorted((run_dir / "kernels").glob("tp*.json"))
     if not kernel_paths:
         raise ValueError("no kernel benchmark artifacts were found")

@@ -127,6 +127,8 @@ def write_fp8_summary_inputs(
     *,
     backend="reference",
     requested_backend="reference",
+    throughput_by_tp=None,
+    memory_by_tp=None,
 ):
     fp8_run_id = f"{run_id}-fp8"
     shards = [
@@ -193,9 +195,13 @@ def write_fp8_summary_inputs(
         root / "fp8/preflight/memory_preflight.json",
         {"valid": True, "results": {"tp4": {}, "tp8": {}}},
     )
+    throughput_by_tp = throughput_by_tp or {4: 90.0, 8: 160.0}
+    memory_by_tp = memory_by_tp or {4: 15_000.0, 8: 9_000.0}
     rows = [
         {
             "tensor_parallel_size": tp,
+            "recurrent_state_dtype": "model",
+            "kv_cache_dtype": "auto",
             "requested_weight_quant_backend": requested_backend,
             "weight_quant_backend": backend,
             "quantization_format": "fp8_block",
@@ -238,7 +244,10 @@ def write_fp8_summary_inputs(
                 "peak_torch_allocated_mib": memory,
             },
         }
-        for tp, throughput, memory in ((4, 90.0, 21_000.0), (8, 160.0, 13_000.0))
+        for tp, throughput, memory in (
+            (4, throughput_by_tp[4], memory_by_tp[4]),
+            (8, throughput_by_tp[8], memory_by_tp[8]),
+        )
     ]
     write(
         root / f"fp8/performance/{fp8_run_id}_matrix_summary.json",
@@ -275,6 +284,28 @@ def write_fp8_summary_inputs(
             "cases": {},
         },
     )
+
+
+def fp8_baseline_rows():
+    return [
+        {
+            "tensor_parallel_size": tp,
+            "recurrent_state_dtype": "model",
+            "kv_cache_dtype": "auto",
+            "qwen35_moe_decode_backend": "sorted",
+            "repeat_output_digests_match": True,
+            "execution_paths_valid": True,
+            "generation_valid": True,
+            "median": {
+                "output_throughput_tok_s": throughput,
+                "peak_torch_allocated_mib": memory,
+            },
+        }
+        for tp, throughput, memory in (
+            (4, 100.0, 20_000.0),
+            (8, 180.0, 12_000.0),
+        )
+    ]
 
 
 def test_optional_gptq_summary_is_disabled_when_directory_is_absent(tmp_path):
@@ -340,7 +371,9 @@ def test_optional_fp8_audit_reports_tp_alignment_without_execution_claim(
 def test_optional_fp8_summary_requires_reference_execution_and_quality(tmp_path):
     write_fp8_summary_inputs(tmp_path, "run")
 
-    report = MODULE.summarize_optional_fp8_audit(tmp_path, "run")
+    report = MODULE.summarize_optional_fp8_audit(
+        tmp_path, "run", fp8_baseline_rows()
+    )
 
     assert report["valid"]
     assert report["executable"]
@@ -352,7 +385,9 @@ def test_optional_fp8_summary_requires_reference_execution_and_quality(tmp_path)
     assert report["best_throughput"]["tensor_parallel_size"] == 8
 
     write_fp8_summary_inputs(tmp_path, "run", backend="triton")
-    invalid = MODULE.summarize_optional_fp8_audit(tmp_path, "run")
+    invalid = MODULE.summarize_optional_fp8_audit(
+        tmp_path, "run", fp8_baseline_rows()
+    )
     assert not invalid["valid"]
     assert not invalid["executable"]
 
@@ -365,7 +400,9 @@ def test_optional_fp8_summary_accepts_resident_execution_without_native_claim(tm
         requested_backend="resident",
     )
 
-    report = MODULE.summarize_optional_fp8_audit(tmp_path, "run")
+    report = MODULE.summarize_optional_fp8_audit(
+        tmp_path, "run", fp8_baseline_rows()
+    )
 
     assert report["valid"]
     assert report["runtime_backend"] == "resident"
@@ -373,6 +410,19 @@ def test_optional_fp8_summary_accepts_resident_execution_without_native_claim(tm
     assert report["runtime_storage_by_tp"]["tp8"]["valid"]
     assert not report["native_fp8"]
     assert "on-demand" in report["scope"]
+    assert report["performance_comparison_valid"]
+    assert report["performance_comparisons"]["tp4"][
+        "peak_memory_reduction_mib"
+    ] == 5_000.0
+    assert report["performance_comparisons"]["tp8"][
+        "throughput_ratio"
+    ] == pytest.approx(160.0 / 180.0)
+    assert report["performance_comparisons"]["tp4"][
+        "resident_expert_storage_bytes_by_rank"
+    ] == [1_010_000] * 4
+    assert report["performance_comparisons"]["tp4"][
+        "resident_dequant_workspace_bytes_by_rank"
+    ] == [65_536] * 4
 
     performance_path = (
         tmp_path / "fp8/performance/run-fp8_matrix_summary.json"
@@ -382,10 +432,62 @@ def test_optional_fp8_summary_accepts_resident_execution_without_native_claim(tm
         "resident_fp8_dequant_workspace_reuse_count"
     ] = 0
     write(performance_path, performance)
-    invalid = MODULE.summarize_optional_fp8_audit(tmp_path, "run")
+    invalid = MODULE.summarize_optional_fp8_audit(
+        tmp_path, "run", fp8_baseline_rows()
+    )
     assert not invalid["runtime_storage_valid"]
     assert not invalid["performance_valid"]
     assert not invalid["valid"]
+
+
+def test_resident_fp8_summary_rejects_missing_or_regressed_bf16_comparison(tmp_path):
+    write_fp8_summary_inputs(
+        tmp_path,
+        "run",
+        backend="resident",
+        requested_backend="resident",
+    )
+
+    missing = MODULE.summarize_optional_fp8_audit(tmp_path, "run")
+    assert not missing["performance_comparison_valid"]
+    assert not missing["performance_valid"]
+    assert not missing["valid"]
+
+    no_memory_win = MODULE.summarize_optional_fp8_audit(
+        tmp_path,
+        "run",
+        [
+            {
+                **row,
+                "median": {
+                    **row["median"],
+                    "peak_torch_allocated_mib": 10_000.0
+                    if row["tensor_parallel_size"] == 4
+                    else row["median"]["peak_torch_allocated_mib"],
+                },
+            }
+            for row in fp8_baseline_rows()
+        ],
+    )
+    assert not no_memory_win["performance_comparisons"]["tp4"]["valid"]
+    assert not no_memory_win["valid"]
+
+    write_fp8_summary_inputs(
+        tmp_path,
+        "run",
+        backend="resident",
+        requested_backend="resident",
+        throughput_by_tp={4: 79.0, 8: 160.0},
+    )
+    too_slow = MODULE.summarize_optional_fp8_audit(
+        tmp_path, "run", fp8_baseline_rows()
+    )
+    assert (
+        too_slow["performance_comparisons"]["tp4"]["throughput_ratio"]
+        == 0.79
+    )
+    assert not too_slow["performance_comparisons"]["tp4"]["valid"]
+    assert not too_slow["valid"]
 
 
 def test_optional_gptq_summary_requires_actual_triton_execution(tmp_path):
