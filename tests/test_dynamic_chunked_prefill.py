@@ -229,6 +229,44 @@ def test_remote_prefill_commit_indexes_imported_prefix_blocks(
         assert same_prefix.block_table[:cached_blocks] == imported_blocks
 
 
+def test_remote_prefill_commit_failure_remains_abortable(monkeypatch):
+    scheduler = make_scheduler(
+        max_tokens=8,
+        max_seqs=2,
+        block_size=4,
+        num_blocks=8,
+    )
+    seq = Sequence([1, 2, 3, 4, 5])
+    scheduler.add(seq)
+    session = make_transfer(tp_size=1)
+    scheduler.reserve_remote_prefill(seq, session)
+    session.acknowledge(0, now=11.0)
+    monkeypatch.setattr(
+        scheduler.block_manager,
+        "hash_imported_prompt",
+        lambda _seq: (_ for _ in ()).throw(RuntimeError("index failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="index failed"):
+        scheduler.commit_remote_prefill(
+            session.transfer_id,
+            first_token_id=9,
+            now=11.0,
+        )
+
+    assert session.phase is CacheTransferPhase.READY
+    rolled_back = scheduler.abort_remote_prefill(
+        session.transfer_id,
+        "destination commit failed",
+        now=11.0,
+    )
+    assert rolled_back is seq
+    assert session.phase is CacheTransferPhase.ABORTED
+    assert seq.status is SequenceStatus.WAITING
+    assert not seq.block_table
+    assert scheduler.block_manager.num_used_blocks == 0
+
+
 def test_legacy_scheduler_can_idle_while_remote_prefill_is_pending():
     scheduler = make_scheduler(
         max_tokens=8,

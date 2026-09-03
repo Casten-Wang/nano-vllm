@@ -387,9 +387,12 @@ class Scheduler:
         now: float,
     ) -> Sequence:
         seq, session = self.remote_prefills[transfer_id]
-        session.commit(now=now)
         if self.prefix_cache_enabled:
             self.block_manager.hash_imported_prompt(seq)
+        # Keep the transfer abortable until every fallible destination-side
+        # installation step has completed.  The engine's error path owns the
+        # reservation rollback while the session is still READY.
+        session.commit(now=now)
         self.remote_prefills.pop(transfer_id)
         seq.num_cached_tokens = seq.num_prompt_tokens
         seq.num_scheduled_tokens = 0
