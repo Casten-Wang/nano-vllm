@@ -43,6 +43,7 @@ class Scheduler:
     def __init__(self, config: Config):
         self.max_num_seqs = config.max_num_seqs
         self.max_num_batched_tokens = config.max_num_batched_tokens
+        self.vocab_size = int(config.model_config.vocab_size)
         eos = config.eos if isinstance(config.eos, tuple) else (config.eos,)
         self.eos_token_ids = frozenset(eos)
         self.block_size = config.kvcache_block_size
@@ -1044,18 +1045,18 @@ class Scheduler:
         self.reclaimed_kv_blocks += reclaimed_blocks
 
     def postprocess(self, seqs: list[Sequence], token_ids: list[int], is_prefill: bool):
-        self._validate_sample_count(seqs, token_ids)
+        self._validate_sample_output(seqs, token_ids)
         for seq, token_id in zip(seqs, token_ids):
             self.postprocess_one(seq, token_id, is_prefill)
 
     def postprocess_mixed(self, result: ScheduleResult, token_ids: list[int]):
         seqs = result.decode_seqs + result.prefill_seqs
-        self._validate_sample_count(seqs, token_ids)
+        self._validate_sample_output(seqs, token_ids)
         for seq, token_id in zip(seqs, token_ids):
             self.postprocess_one(seq, token_id, seq.is_prefill)
 
-    @staticmethod
-    def _validate_sample_count(
+    def _validate_sample_output(
+        self,
         seqs: list[Sequence],
         token_ids: list[int],
     ) -> None:
@@ -1064,6 +1065,16 @@ class Scheduler:
                 "sampler returned an unexpected number of tokens: "
                 f"expected {len(seqs)}, got {len(token_ids)}"
             )
+        for index, token_id in enumerate(token_ids):
+            if not isinstance(token_id, int) or isinstance(token_id, bool):
+                raise RuntimeError(
+                    f"sampler returned a non-integer token at index {index}"
+                )
+            if not 0 <= token_id < self.vocab_size:
+                raise RuntimeError(
+                    f"sampler returned token {token_id} outside the vocabulary "
+                    f"range [0, {self.vocab_size}) at index {index}"
+                )
 
     def postprocess_one(self, seq: Sequence, token_id: int, is_prefill: bool):
         if self.prefix_cache_enabled:

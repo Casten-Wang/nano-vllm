@@ -2,7 +2,7 @@ import importlib.util
 import sys
 import types
 import unittest
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from hashlib import sha256
 from pathlib import Path
 
@@ -39,6 +39,9 @@ class FakeConfig:
     num_kvcache_blocks: int = 8
     enable_dynamic_chunked_prefill: bool = True
     model_spec: object | None = None
+    model_config: object = field(
+        default_factory=lambda: types.SimpleNamespace(vocab_size=4096)
+    )
 
 
 def load_module(name: str, path: Path):

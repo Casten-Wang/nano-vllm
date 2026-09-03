@@ -2,7 +2,7 @@ import importlib.util
 import random
 import sys
 import types
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -32,6 +32,9 @@ class FakeConfig:
     prefill_starvation_token_budget: int = 1
     preemption_policy: str = "fcfs"
     enable_decode_kv_reservation: bool = False
+    model_config: object = field(
+        default_factory=lambda: SimpleNamespace(vocab_size=4096)
+    )
 
 
 MANAGED_MODULES = (
@@ -1395,6 +1398,34 @@ def test_mixed_postprocess_rejects_sample_count_before_mutating_sequences():
             (seq.num_tokens, seq.num_cached_tokens, seq.last_token)
             for seq in result.seqs
         ] == before
+
+
+@pytest.mark.parametrize("token_ids", [[101, True], [101, -1], [101, 4096]])
+def test_mixed_postprocess_rejects_invalid_tokens_before_mutating_sequences(
+    token_ids,
+):
+    scheduler = make_scheduler(max_tokens=8, max_seqs=8, block_size=4)
+    running = Sequence([1, 2, 3, 4])
+    waiting = Sequence([10, 11, 12, 13])
+    scheduler.block_manager.allocate(running, 0)
+    running.status = SequenceStatus.RUNNING
+    running.is_prefill = False
+    running.num_cached_tokens = len(running)
+    scheduler.running.append(running)
+    scheduler.waiting.append(waiting)
+    result = scheduler.schedule()
+    before = [
+        (seq.num_tokens, seq.num_cached_tokens, seq.last_token)
+        for seq in result.seqs
+    ]
+
+    with pytest.raises(RuntimeError, match="sampler returned"):
+        scheduler.postprocess_mixed(result, token_ids)
+
+    assert [
+        (seq.num_tokens, seq.num_cached_tokens, seq.last_token)
+        for seq in result.seqs
+    ] == before
 
 
 def test_abort_releases_partial_prefill_kv_and_recurrent_state():
