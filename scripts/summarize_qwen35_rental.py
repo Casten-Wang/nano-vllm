@@ -1519,6 +1519,14 @@ def summarize_kv_pressure_case(
         and metrics.get("max_preempted_token_progress", 0) > 0
         and metrics.get("reclaimed_kv_blocks", 0) > 0
     )
+    waiting_prefill_preemptions = metrics.get(
+        "waiting_prefill_preemptions"
+    )
+    waiting_prefill_metric_valid = (
+        isinstance(waiting_prefill_preemptions, int)
+        and not isinstance(waiting_prefill_preemptions, bool)
+        and waiting_prefill_preemptions >= 0
+    )
     reservation_stops = metrics.get(
         "prefill_stopped_by_decode_kv_reservation", 0
     )
@@ -1553,20 +1561,20 @@ def summarize_kv_pressure_case(
         "valid": (
             configuration_valid
             and (preemption_observed or reservation_observed)
+            and waiting_prefill_metric_valid
             and completion_valid
             and latency_metrics_valid
         ),
         "configuration_valid": configuration_valid,
         "preemption_observed": preemption_observed,
+        "waiting_prefill_metric_valid": waiting_prefill_metric_valid,
         "decode_kv_reservation_enabled": expected_decode_reservation,
         "decode_kv_reservation_observed": reservation_observed,
         "prefill_stopped_by_decode_kv_reservation": reservation_stops,
         "completion_valid": completion_valid,
         "latency_metrics_valid": latency_metrics_valid,
         "preemption_count": metrics.get("preemption_count"),
-        "waiting_prefill_preemptions": metrics.get(
-            "waiting_prefill_preemptions"
-        ),
+        "waiting_prefill_preemptions": waiting_prefill_preemptions,
         "preempted_token_progress": metrics.get("preempted_token_progress"),
         "max_preempted_token_progress": metrics.get(
             "max_preempted_token_progress"
@@ -1616,6 +1624,7 @@ def summarize_kv_pressure_repeats(
     ]
     stable_names = (
         "preemption_count",
+        "waiting_prefill_preemptions",
         "preempted_token_progress",
         "max_preempted_token_progress",
         "reclaimed_kv_blocks",
@@ -1684,6 +1693,9 @@ def summarize_kv_pressure_repeats(
         ),
         "preemption_observed": all(
             row["preemption_observed"] for row in rows
+        ),
+        "waiting_prefill_metric_valid": all(
+            row["waiting_prefill_metric_valid"] for row in rows
         ),
         "decode_kv_reservation_enabled": expected_decode_reservation,
         "decode_kv_reservation_observed": all(
@@ -2991,6 +3003,10 @@ def summarize(run_dir: Path, run_id: str) -> dict:
         baseline_progress = baseline["preempted_token_progress"]
         candidate_progress = candidate["preempted_token_progress"]
         reserved_progress = reserved["preempted_token_progress"]
+        comparison_progress_valid = all(
+            isinstance(value, int) and not isinstance(value, bool)
+            for value in (baseline_progress, candidate_progress)
+        )
         reservation_output_parity = (
             candidate["generated_token_ids_digest"] is not None
             and candidate["generated_token_ids_digest"]
@@ -3032,12 +3048,19 @@ def summarize(run_dir: Path, run_id: str) -> dict:
                 baseline["valid"]
                 and candidate["valid"]
                 and output_parity
+                and comparison_progress_valid
                 and candidate_progress < baseline_progress
             ),
             "output_parity": output_parity,
-            "recomputed_token_reduction": baseline_progress - candidate_progress,
+            "recomputed_token_reduction": (
+                baseline_progress - candidate_progress
+                if comparison_progress_valid
+                else None
+            ),
             "recomputed_token_reduction_ratio": (
                 1.0 - candidate_progress / baseline_progress
+                if comparison_progress_valid and baseline_progress > 0
+                else None
             ),
             "elapsed_speedup": (
                 baseline["total_time_s"] / candidate["total_time_s"]

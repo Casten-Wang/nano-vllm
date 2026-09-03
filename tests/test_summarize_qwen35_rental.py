@@ -947,6 +947,9 @@ def write_pressure_case(root):
                         "preemption_count": (
                             2 if policy == "fcfs" else (0 if reservation else 1)
                         ),
+                        "waiting_prefill_preemptions": (
+                            1 if policy == "min_recompute" and not reservation else 0
+                        ),
                         "preempted_token_progress": token_progress,
                         "max_preempted_token_progress": max_progress,
                         "reclaimed_kv_blocks": reclaimed,
@@ -2180,6 +2183,7 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
         "decode_kv_reservation_observed"
     ]
     assert pressure["fcfs"]["preemption_count"] == 2
+    assert pressure["min_recompute"]["waiting_prefill_preemptions"] == 1
     assert pressure["min_recompute"]["preempted_token_progress"] == 256
     comparison = report["kv_pressure"]["comparisons"]["tp4"]
     assert comparison["valid"]
@@ -2224,6 +2228,22 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
         "prefill_stopped_by_decode_kv_reservation"
     ] = 2
     write(reserved_pressure_path, reserved_pressure)
+    candidate_pressure = json.loads(candidate_pressure_path.read_text())
+    waiting_prefill_preemptions = candidate_pressure["metrics"].pop(
+        "waiting_prefill_preemptions"
+    )
+    write(candidate_pressure_path, candidate_pressure)
+    missing_waiting_prefill_metric = MODULE.summarize(tmp_path, run_id)
+    assert not missing_waiting_prefill_metric["evidence"][
+        "kv_pressure_evidence"
+    ]
+    assert not missing_waiting_prefill_metric["kv_pressure"]["by_tp"]["tp4"][
+        "min_recompute"
+    ]["waiting_prefill_metric_valid"]
+    candidate_pressure["metrics"]["waiting_prefill_preemptions"] = (
+        waiting_prefill_preemptions
+    )
+    write(candidate_pressure_path, candidate_pressure)
     memory = report["memory"]["by_tp"]["tp4"]
     assert memory["int8_kv_reduction_ratio"] == 0.49609375
     assert memory["minimum_budget_margin_bytes"] == 5_000
