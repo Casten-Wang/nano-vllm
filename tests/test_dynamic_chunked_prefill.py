@@ -1150,6 +1150,41 @@ def test_min_recompute_can_reclaim_partial_waiting_prefill():
     assert scheduler.preempted_token_progress == 4
 
 
+def test_prefill_pressure_reclaims_another_partial_waiting_request():
+    scheduler = make_scheduler(
+        max_tokens=12,
+        max_seqs=5,
+        block_size=4,
+        num_blocks=9,
+        preemption_policy="min_recompute",
+        hybrid=True,
+    )
+    head = Sequence([1] * 17)
+    scheduler.block_manager.allocate(head, 0, num_blocks=3)
+    head.num_cached_tokens = 12
+    head.state_slot = scheduler.state_manager.acquire(head.seq_id)
+
+    victim = Sequence([2] * 24)
+    scheduler.block_manager.allocate(victim, 0, num_blocks=5)
+    victim.num_cached_tokens = 20
+    victim.state_slot = scheduler.state_manager.acquire(victim.seq_id)
+    scheduler.waiting.extend((head, victim))
+
+    result = scheduler.schedule()
+
+    assert result.prefill_seqs == [head, victim]
+    assert head.num_scheduled_tokens == 5
+    assert head in scheduler.running
+    assert victim in scheduler.waiting
+    assert victim.num_scheduled_tokens == 7
+    assert len(victim.block_table) == 2
+    assert victim.num_cached_tokens == 0
+    assert victim.state_slot is not None
+    assert scheduler.preemption_count == 1
+    assert scheduler.preempted_token_progress == 20
+    assert scheduler.reclaimed_kv_blocks == 5
+
+
 def test_fcfs_preemption_considers_newer_partial_waiting_prefill():
     scheduler = make_scheduler(preemption_policy="fcfs")
     current = Sequence([1] * 8)
@@ -1376,16 +1411,19 @@ def test_abort_rejects_remote_prefill_without_mutating_transfer_state():
 
 
 def test_randomized_dynamic_scheduler_preserves_hard_capacity_invariants():
-    for seed in range(50):
+    for seed in range(200):
         rng = random.Random(seed)
         max_seqs = rng.randint(1, 6)
         max_tokens = rng.randint(1, 12)
+        num_blocks = rng.randint(8, 32)
         scheduler = make_scheduler(
             max_tokens=max_tokens,
             max_seqs=max_seqs,
             block_size=4,
-            num_blocks=256,
+            num_blocks=num_blocks,
             starvation_token_budget=rng.randint(1, max_tokens),
+            preemption_policy=rng.choice(("fcfs", "min_recompute")),
+            decode_kv_reservation=rng.choice((False, True)),
             hybrid=True,
         )
         scheduler.prefill_starvation_threshold = rng.randint(0, 4)
@@ -1413,6 +1451,7 @@ def test_randomized_dynamic_scheduler_preserves_hard_capacity_invariants():
             )
             assert len(scheduler.running) + active_waiting <= max_seqs
             assert scheduler.state_manager.num_used_slots <= max_seqs
+            assert scheduler.block_manager.num_used_blocks <= num_blocks
             scheduler.postprocess_mixed(result, [1] * len(result.seqs))
         else:
             raise AssertionError(f"scheduler did not drain for seed {seed}")

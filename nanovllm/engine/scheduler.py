@@ -813,6 +813,44 @@ class Scheduler:
             self.waiting.remove(victim)
         return victim
 
+    def _reclaim_waiting_prefill(self, current: Sequence) -> bool:
+        """Release a different partial prefill that blocks the queue head.
+
+        Chunked prefills retain their KV blocks while waiting for another
+        chunk. Under pressure, several such requests can consume every free
+        block while no decode request remains available to trigger the normal
+        preemption path. Preserve the queue head and reclaim one other owner so
+        the oldest request can make forward progress.
+        """
+
+        candidates = [
+            seq
+            for seq in self.waiting
+            if seq is not current and bool(seq.block_table)
+        ]
+        if not candidates:
+            return False
+        if self.preemption_policy == "fcfs":
+            victim = max(candidates, key=lambda seq: seq.seq_id)
+        elif self.preemption_policy == "min_recompute":
+            victim = min(
+                candidates,
+                key=lambda seq: (
+                    seq.num_cached_tokens,
+                    len(seq.block_table),
+                    -seq.seq_id,
+                ),
+            )
+        else:
+            raise RuntimeError(
+                f"unsupported preemption policy: {self.preemption_policy}"
+            )
+        self.waiting.remove(victim)
+        self.preempt(victim)
+        self.waiting.remove(current)
+        self.waiting.appendleft(current)
+        return True
+
     def schedule_prefill_with_budget(
         self,
         token_budget: int,
@@ -861,6 +899,8 @@ class Scheduler:
                         )
                         == -1
                     ):
+                        if self._reclaim_waiting_prefill(seq):
+                            continue
                         self._mark_kv_stop(
                             reserve_free_blocks,
                             self.block_manager.can_allocate(
@@ -892,6 +932,8 @@ class Scheduler:
                     num_cached_blocks=num_cached_blocks,
                     reserve_free_blocks=reserve_free_blocks,
                 ) == -1:
+                    if self._reclaim_waiting_prefill(seq):
+                        continue
                     self._mark_kv_stop(
                         reserve_free_blocks,
                         self.block_manager.can_allocate(
@@ -925,6 +967,8 @@ class Scheduler:
                     target_blocks,
                     reserve_free_blocks=reserve_free_blocks,
                 ):
+                    if self._reclaim_waiting_prefill(seq):
+                        continue
                     self._mark_kv_stop(
                         reserve_free_blocks,
                         self.block_manager.can_grow(seq, target_blocks),
