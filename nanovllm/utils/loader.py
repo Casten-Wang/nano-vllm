@@ -55,23 +55,6 @@ def load_model(model: nn.Module, path: str):
                     ".weight_scale_inv"
                 ):
                     continue
-                loaded_tensor = None
-                if fp8_block_size is not None and source_weight_name.endswith(
-                    ".weight"
-                ):
-                    source_slice = f.get_slice(source_weight_name)
-                    if source_slice.get_dtype().startswith("F8_"):
-                        scale_name = f"{source_weight_name}_scale_inv"
-                        if scale_name not in source_names:
-                            raise RuntimeError(
-                                f"FP8 checkpoint weight is missing scale: {scale_name}"
-                            )
-                        loaded_tensor = dequantize_fp8_block_weight(
-                            f.get_tensor(source_weight_name),
-                            f.get_tensor(scale_name),
-                            fp8_block_size,
-                            output_dtype=torch.get_default_dtype(),
-                        )
                 weight_name = map_weight_name(source_weight_name)
                 if weight_name is None:
                     continue
@@ -90,6 +73,51 @@ def load_model(model: nn.Module, path: str):
                         weight_name,
                         packed_modules_mapping,
                     )
+                loaded_tensor = None
+                if fp8_block_size is not None and source_weight_name.endswith(
+                    ".weight"
+                ):
+                    source_slice = f.get_slice(source_weight_name)
+                    if source_slice.get_dtype().startswith("F8_"):
+                        scale_name = f"{source_weight_name}_scale_inv"
+                        if scale_name not in source_names:
+                            raise RuntimeError(
+                                f"FP8 checkpoint weight is missing scale: {scale_name}"
+                            )
+                        if packed_parameter is not None:
+                            param_name, shard_id = packed_parameter
+                            param = model.get_parameter(param_name)
+                            fp8_loader = getattr(
+                                param,
+                                "fp8_packed_safetensors_loader",
+                                None,
+                            )
+                            if fp8_loader is not None:
+                                shards = loaded_packed_shards.setdefault(
+                                    param_name,
+                                    set(),
+                                )
+                                if shard_id in shards:
+                                    raise RuntimeError(
+                                        f"packed parameter {param_name} contains "
+                                        f"duplicate shard {shard_id!r}"
+                                    )
+                                shards.add(shard_id)
+                                fp8_loader(
+                                    param,
+                                    source_slice,
+                                    f.get_slice(scale_name),
+                                    shard_id,
+                                    fp8_block_size,
+                                )
+                                loaded_parameters.add(param_name)
+                                continue
+                        loaded_tensor = dequantize_fp8_block_weight(
+                            f.get_tensor(source_weight_name),
+                            f.get_tensor(scale_name),
+                            fp8_block_size,
+                            output_dtype=torch.get_default_dtype(),
+                        )
                 if packed_parameter is not None:
                     param_name, shard_id = packed_parameter
                     shards = loaded_packed_shards.setdefault(param_name, set())

@@ -10,6 +10,7 @@ from torch import nn
 
 from nanovllm.models.qwen35_fp8 import (
     dequantize_fp8_block_weight,
+    dequantize_fp8_block_weight_slice,
     resolve_fp8_expert_parameter,
 )
 from nanovllm.utils.loader import load_model
@@ -105,6 +106,30 @@ def test_block_fp8_dequantization_broadcasts_exact_blocks_without_expansion(
         dtype=torch.float32,
     )
     torch.testing.assert_close(result, expected)
+
+
+def test_block_fp8_slice_dequantization_preserves_global_block_offsets():
+    weight = torch.arange(1, 36, dtype=torch.float32).reshape(5, 7).to(
+        torch.float8_e4m3fn
+    )
+    scale = torch.arange(1, 7, dtype=torch.float32).reshape(2, 3)
+    full = dequantize_fp8_block_weight(
+        weight,
+        scale,
+        (3, 3),
+        output_dtype=torch.float32,
+    )
+
+    shard = dequantize_fp8_block_weight_slice(
+        weight,
+        scale,
+        (3, 3),
+        (2, 5),
+        (2, 7),
+        output_dtype=torch.float32,
+    )
+
+    torch.testing.assert_close(shard, full[2:5, 2:7])
 
 
 def test_block_fp8_dequantization_rejects_wrong_scale_grid():
@@ -206,14 +231,20 @@ def test_model_loader_rejects_fp8_weight_without_scale(tmp_path):
 class TinyFP8ExpertsModel(nn.Module):
     strict_weight_loading = True
 
-    def __init__(self):
+    def __init__(
+        self,
+        *,
+        tp_rank: int = 0,
+        tp_size: int = 1,
+        block_size: tuple[int, int] = (2, 2),
+    ):
         super().__init__()
         self.model = nn.Module()
         layer = nn.Module()
         layer.mlp = nn.Module()
         with (
-            patch("torch.distributed.get_world_size", return_value=1),
-            patch("torch.distributed.get_rank", return_value=0),
+            patch("torch.distributed.get_world_size", return_value=tp_size),
+            patch("torch.distributed.get_rank", return_value=tp_rank),
         ):
             layer.mlp.experts = Qwen35Experts(
                 hidden_size=4,
@@ -224,7 +255,7 @@ class TinyFP8ExpertsModel(nn.Module):
         self.model.layers = nn.ModuleList([layer])
         self.checkpoint_quantization_spec = SimpleNamespace(
             format="fp8_block",
-            weight_block_size=(2, 2),
+            weight_block_size=block_size,
         )
 
     def resolve_checkpoint_parameter(self, weight_name):
@@ -269,4 +300,46 @@ def test_model_loader_assembles_per_expert_fp8_weights(tmp_path):
         torch.testing.assert_close(
             experts.down_proj[expert_id],
             expected[(expert_id, "down")],
+        )
+
+
+def test_fp8_expert_loader_dequantizes_only_non_aligned_tp_shards(tmp_path):
+    model = TinyFP8ExpertsModel(tp_rank=1, tp_size=2, block_size=(3, 3))
+    tensors = {}
+    expected = {}
+    for expert_id in range(2):
+        for projection in ("gate", "up", "down"):
+            name = f"model.layers.0.mlp.experts.{expert_id}.{projection}_proj.weight"
+            value = torch.arange(1, 17, dtype=torch.float32).reshape(4, 4)
+            value = (value + expert_id * 20).to(torch.float8_e4m3fn)
+            scale = torch.tensor([[1.0, 2.0], [3.0, 4.0]])
+            tensors[name] = value
+            tensors[f"{name}_scale_inv"] = scale
+            expected[(expert_id, projection)] = dequantize_fp8_block_weight(
+                value,
+                scale,
+                (3, 3),
+                output_dtype=torch.float32,
+            )
+    save_file(tensors, tmp_path / "model.safetensors")
+
+    with patch(
+        "nanovllm.utils.loader.dequantize_fp8_block_weight",
+        side_effect=AssertionError("expert loader must not dequantize full weights"),
+    ):
+        load_model(model, str(tmp_path))
+
+    experts = model.model.layers[0].mlp.experts
+    for expert_id in range(2):
+        torch.testing.assert_close(
+            experts.gate_up_proj[expert_id, :2],
+            expected[(expert_id, "gate")][2:4],
+        )
+        torch.testing.assert_close(
+            experts.gate_up_proj[expert_id, 2:],
+            expected[(expert_id, "up")][2:4],
+        )
+        torch.testing.assert_close(
+            experts.down_proj[expert_id],
+            expected[(expert_id, "down")][:, 2:4],
         )

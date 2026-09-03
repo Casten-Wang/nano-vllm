@@ -66,6 +66,10 @@ INT8_ATTENTION = load_source_module(
     "qwen35_int8_attention_benchmark",
     "nanovllm/layers/int8_fused_attention.py",
 )
+FP8 = load_source_module(
+    "qwen35_fp8_benchmark",
+    "nanovllm/models/qwen35_fp8.py",
+)
 
 
 def synchronize(device: torch.device) -> None:
@@ -376,6 +380,72 @@ def benchmark_router(args, device, dtype) -> dict:
         args.router_tokens * args.top_k * 4 / 1024 / 1024
     )
     result["reused_selected_logits_mib"] = result["selected_probability_mib"]
+    return result
+
+
+def benchmark_fp8_expert_shard_dequantization(args, device, dtype) -> dict:
+    """Compare full-weight dequantization with TP-local expert loading."""
+
+    rows = args.moe_intermediate_size
+    columns = args.hidden_size
+    block_size = args.fp8_weight_block_size
+    local_rows = rows // args.tp_size
+    tp_rank = args.tp_size - 1
+    row_start = tp_rank * local_rows
+    weight = torch.randn(rows, columns, device=device).to(torch.float8_e4m3fn)
+    scale = torch.rand(
+        math.ceil(rows / block_size),
+        math.ceil(columns / block_size),
+        device=device,
+        dtype=torch.float32,
+    )
+
+    def reference():
+        full = FP8.dequantize_fp8_block_weight(
+            weight,
+            scale,
+            (block_size, block_size),
+            output_dtype=dtype,
+        )
+        return (full[row_start : row_start + local_rows],)
+
+    def candidate():
+        return (
+            FP8.dequantize_fp8_block_weight_slice(
+                weight,
+                scale,
+                (block_size, block_size),
+                (row_start, row_start + local_rows),
+                (0, columns),
+                output_dtype=dtype,
+            ),
+        )
+
+    result = compare(
+        reference,
+        candidate,
+        device=device,
+        warmup=args.warmup,
+        iterations=args.iterations,
+        repeats=args.repeats,
+    )
+    element_size = torch.empty((), dtype=dtype).element_size()
+    result.update(
+        {
+            "tp_rank": tp_rank,
+            "weight_shape": [rows, columns],
+            "local_weight_shape": [local_rows, columns],
+            "block_size": [block_size, block_size],
+            "row_block_offset": row_start % block_size,
+            "full_dequantized_weight_mib": (
+                rows * columns * element_size / 1024**2
+            ),
+            "local_dequantized_weight_mib": (
+                local_rows * columns * element_size / 1024**2
+            ),
+            "dequantized_temporary_reduction": args.tp_size,
+        }
+    )
     return result
 
 
@@ -3269,6 +3339,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sampling-top-k", type=int, default=50)
     parser.add_argument("--sampling-top-p", type=float, default=0.9)
     parser.add_argument("--moe-intermediate-size", type=int, default=512)
+    parser.add_argument("--fp8-weight-block-size", type=int, default=128)
     parser.add_argument("--num-hidden-layers", type=int, default=40)
     parser.add_argument(
         "--expert-token-counts",
@@ -3359,6 +3430,7 @@ def main() -> None:
         "sampling_batch": args.sampling_batch,
         "sampling_top_k": args.sampling_top_k,
         "moe_intermediate_size": args.moe_intermediate_size,
+        "fp8_weight_block_size": args.fp8_weight_block_size,
         "num_hidden_layers": args.num_hidden_layers,
         "prefill_batch": args.prefill_batch,
         "prefill_tokens": args.prefill_tokens,
@@ -3498,6 +3570,9 @@ def main() -> None:
                 local_kv_heads,
             ),
             "router_topk_first": benchmark_router(args, device, dtype),
+            "fp8_expert_shard_dequantization": (
+                benchmark_fp8_expert_shard_dequantization(args, device, dtype)
+            ),
             "sampling_filter_fast_paths": benchmark_sampling_filter(
                 args,
                 device,

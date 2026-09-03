@@ -132,6 +132,12 @@ class Qwen35Experts(nn.Module):
         self.down_proj.weight_loader = self._load_down
         self.down_proj.safetensors_loader = self._load_down_slice
         if checkpoint_format == "fp8_block":
+            self.gate_up_proj.fp8_packed_safetensors_loader = (
+                self._load_gate_up_fp8_slice
+            )
+            self.down_proj.fp8_packed_safetensors_loader = (
+                self._load_down_fp8_slice
+            )
             self.gate_up_proj.required_checkpoint_shards = frozenset(
                 (expert_id, projection)
                 for expert_id in range(num_experts)
@@ -213,6 +219,46 @@ class Qwen35Experts(nn.Module):
             ]
         )
 
+    def _load_gate_up_fp8_slice(
+        self,
+        param: nn.Parameter,
+        loaded_weight,
+        loaded_scale,
+        loaded_shard_id: tuple[int, str],
+        block_size: tuple[int, int],
+    ) -> None:
+        from nanovllm.models.qwen35_fp8 import (
+            dequantize_fp8_block_weight_slice,
+        )
+
+        expert_id, projection = loaded_shard_id
+        if not 0 <= expert_id < self.num_experts or projection not in (
+            "gate",
+            "up",
+        ):
+            raise ValueError("invalid FP8 gate/up expert shard")
+        expected_shape = (self.intermediate_size, self.hidden_size)
+        shape = self._slice_shape(loaded_weight)
+        if shape != expected_shape:
+            raise ValueError(
+                f"invalid {projection} expert {expert_id} shape: "
+                f"{shape}; expected {expected_shape}"
+            )
+        source_start = self.tp_rank * self.local_intermediate_size
+        local_weight = dequantize_fp8_block_weight_slice(
+            loaded_weight,
+            loaded_scale,
+            block_size,
+            (source_start, source_start + self.local_intermediate_size),
+            (0, self.hidden_size),
+            output_dtype=param.dtype,
+        )
+        target_start = 0 if projection == "gate" else self.local_intermediate_size
+        param.data[
+            expert_id,
+            target_start : target_start + self.local_intermediate_size,
+        ].copy_(local_weight)
+
     def _load_down(
         self,
         param: nn.Parameter,
@@ -263,6 +309,39 @@ class Qwen35Experts(nn.Module):
         start = self.tp_rank * self.local_intermediate_size
         end = start + self.local_intermediate_size
         param.data.copy_(loaded_weight[:, :, start:end])
+
+    def _load_down_fp8_slice(
+        self,
+        param: nn.Parameter,
+        loaded_weight,
+        loaded_scale,
+        loaded_shard_id: tuple[int, str],
+        block_size: tuple[int, int],
+    ) -> None:
+        from nanovllm.models.qwen35_fp8 import (
+            dequantize_fp8_block_weight_slice,
+        )
+
+        expert_id, projection = loaded_shard_id
+        if not 0 <= expert_id < self.num_experts or projection != "down":
+            raise ValueError("invalid FP8 down expert shard")
+        expected_shape = (self.hidden_size, self.intermediate_size)
+        shape = self._slice_shape(loaded_weight)
+        if shape != expected_shape:
+            raise ValueError(
+                f"invalid down expert {expert_id} shape: "
+                f"{shape}; expected {expected_shape}"
+            )
+        source_start = self.tp_rank * self.local_intermediate_size
+        local_weight = dequantize_fp8_block_weight_slice(
+            loaded_weight,
+            loaded_scale,
+            block_size,
+            (0, self.hidden_size),
+            (source_start, source_start + self.local_intermediate_size),
+            output_dtype=param.dtype,
+        )
+        param.data[expert_id].copy_(local_weight)
 
     def forward(
         self,

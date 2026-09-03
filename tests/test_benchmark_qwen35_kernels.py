@@ -806,6 +806,30 @@ def test_mixed_expert_dispatch_matches_whole_batch_grouped_path():
     torch.testing.assert_close(actual, expected)
 
 
+def test_fp8_expert_shard_benchmark_covers_non_aligned_tp_slice():
+    args = SimpleNamespace(
+        moe_intermediate_size=12,
+        hidden_size=8,
+        fp8_weight_block_size=8,
+        tp_size=4,
+        warmup=0,
+        iterations=1,
+        repeats=1,
+    )
+
+    result = MODULE.benchmark_fp8_expert_shard_dequantization(
+        args,
+        torch.device("cpu"),
+        torch.float32,
+    )
+
+    assert result["local_weight_shape"] == [3, 8]
+    assert result["row_block_offset"] == 1
+    assert result["dequantized_temporary_reduction"] == 4
+    assert result["candidate"]["median_ms"] > 0
+    assert result["errors"][0]["max_abs_error"] == 0
+
+
 def test_mixed_expert_benchmark_records_cuda_evidence_boundary():
     args = SimpleNamespace(
         mixed_decode_tokens=2,
