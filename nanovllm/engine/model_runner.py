@@ -60,6 +60,8 @@ except ModuleNotFoundError:
 CONTROL_SHM_SIZE = 2**20
 CONTROL_ACK_TIMEOUT_S = 300.0
 CONTROL_STATUS_SIZE = 64 * 1024
+CONTROL_RESULT_COMMAND = "__nanovllm_call_with_result__"
+_NO_CONTROL_RESULT = object()
 
 
 def dtype_nbytes(dtype: torch.dtype) -> int:
@@ -462,12 +464,19 @@ class ModelRunner:
             error = None
             try:
                 method_name, args = self.read_shm()
-                self.call(method_name, *args)
+                return_result = method_name == CONTROL_RESULT_COMMAND
+                if return_result:
+                    if not args or not isinstance(args[0], str):
+                        raise RuntimeError("invalid worker result command")
+                    method_name, *args = args
+                result = self.call(method_name, *args)
+                self.write_worker_status(
+                    None,
+                    result=result if return_result else _NO_CONTROL_RESULT,
+                )
             except BaseException as exc:
                 error = exc
                 self.write_worker_status(exc)
-            else:
-                self.write_worker_status(None)
             finally:
                 # The rank-0 process must not publish another command until
                 # every worker has consumed and completed (or failed) this one.
@@ -477,24 +486,41 @@ class ModelRunner:
             if method_name == "exit":
                 break
 
-    def write_worker_status(self, error: BaseException | None):
+    def write_worker_status(
+        self,
+        error: BaseException | None,
+        *,
+        result=_NO_CONTROL_RESULT,
+    ):
         if not (self.world_size > 1 and self.rank > 0):
             raise RuntimeError("only tensor-parallel worker ranks write status")
         status_buffer = self.event[2]
-        if error is None:
+        if error is None and result is _NO_CONTROL_RESULT:
             status_buffer[0:4] = (0).to_bytes(4, "little")
             return
-        payload = pickle.dumps(
-            {
-                "rank": self.rank,
-                "error_type": type(error).__name__,
-                "message": str(error),
-                "traceback": traceback.format_exc(),
-            }
-        )
+        if error is None:
+            payload = pickle.dumps(
+                {"kind": "result", "rank": self.rank, "value": result}
+            )
+            if len(payload) > CONTROL_STATUS_SIZE - 4:
+                raise ValueError(
+                    "worker result exceeds control status buffer: "
+                    f"{len(payload)} bytes"
+                )
+        else:
+            payload = pickle.dumps(
+                {
+                    "kind": "error",
+                    "rank": self.rank,
+                    "error_type": type(error).__name__,
+                    "message": str(error),
+                    "traceback": traceback.format_exc(),
+                }
+            )
         if len(payload) > CONTROL_STATUS_SIZE - 4:
             payload = pickle.dumps(
                 {
+                    "kind": "error",
                     "rank": self.rank,
                     "error_type": type(error).__name__,
                     "message": str(error)[:4096],
@@ -560,10 +586,11 @@ class ModelRunner:
             status_buffer[0:4] = (0).to_bytes(4, "little")
             command_event.set()
 
-    def wait_for_workers(self):
+    def wait_for_workers(self, *, expect_results: bool = False):
         if self.world_size <= 1 or self.rank != 0:
-            return
+            return [] if expect_results else None
         worker_errors = []
+        worker_results = []
         for worker_rank, (
             _command_event,
             ack_event,
@@ -585,7 +612,29 @@ class ModelRunner:
                 self.worker_control_failed = True
                 raise
             if worker_status is not None:
-                worker_errors.append(worker_status)
+                if worker_status.get("rank") != worker_rank:
+                    self.worker_control_failed = True
+                    raise RuntimeError(
+                        f"tensor-parallel worker rank {worker_rank} returned "
+                        "a mismatched status identity"
+                    )
+                kind = worker_status.get("kind", "error")
+                if kind == "result" and expect_results:
+                    if "value" not in worker_status:
+                        self.worker_control_failed = True
+                        raise RuntimeError(
+                            f"tensor-parallel worker rank {worker_rank} "
+                            "returned a result without a value"
+                        )
+                    worker_results.append(worker_status["value"])
+                elif kind == "error":
+                    worker_errors.append(worker_status)
+                else:
+                    self.worker_control_failed = True
+                    raise RuntimeError(
+                        f"tensor-parallel worker rank {worker_rank} returned "
+                        "an unexpected control result"
+                    )
         if worker_errors:
             self.worker_control_failed = True
             details = "\n".join(
@@ -597,6 +646,7 @@ class ModelRunner:
             raise RuntimeError(
                 "tensor-parallel worker command failed:\n" + details
             )
+        return worker_results if expect_results else None
 
     def call(self, method_name, *args):
         method = getattr(self, method_name, None)
@@ -613,6 +663,31 @@ class ModelRunner:
             finally:
                 self.wait_for_workers()
         return method(*args)
+
+    def call_rank_results(self, method_name, *args) -> list[object]:
+        """Run a command on every rank and collect small control-plane results."""
+
+        method = getattr(self, method_name, None)
+        if method is None or not callable(method):
+            raise AttributeError(f"unknown ModelRunner method: {method_name}")
+        if self.world_size <= 1:
+            return [method(*args)]
+        if self.rank != 0:
+            raise RuntimeError("only tensor-parallel rank 0 collects rank results")
+        if self.worker_control_failed:
+            raise RuntimeError("tensor-parallel worker control channel has failed")
+        self.write_shm(CONTROL_RESULT_COMMAND, method_name, *args)
+        try:
+            local_result = method(*args)
+            local_payload = pickle.dumps(local_result)
+            if len(local_payload) > CONTROL_STATUS_SIZE - 4:
+                raise ValueError(
+                    "rank-0 result exceeds control status buffer: "
+                    f"{len(local_payload)} bytes"
+                )
+        finally:
+            worker_results = self.wait_for_workers(expect_results=True)
+        return [local_result, *worker_results]
 
     def _synchronize_kv_block_count(self, local_num_blocks: int) -> int:
         counts = torch.tensor(

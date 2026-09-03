@@ -369,6 +369,66 @@ class TPControlTest(unittest.TestCase):
 
         self.assertIsNone(runner.read_worker_status(1, status_buffer))
 
+    def test_worker_result_status_round_trip(self):
+        status_buffer = bytearray(CONTROL_STATUS_SIZE)
+        worker = make_runner(1, (FakeEvent(), FakeEvent(), status_buffer))
+        worker.write_worker_status(None, result={"phase": "ready"})
+        rank_zero = make_runner(
+            0,
+            [(FakeEvent(), FakeEvent(ready=True), status_buffer)],
+        )
+
+        results = rank_zero.wait_for_workers(expect_results=True)
+
+        self.assertEqual(results, [{"phase": "ready"}])
+
+    def test_worker_result_is_rejected_by_plain_call_protocol(self):
+        status_buffer = bytearray(CONTROL_STATUS_SIZE)
+        worker = make_runner(1, (FakeEvent(), FakeEvent(), status_buffer))
+        worker.write_worker_status(None, result={"phase": "ready"})
+        rank_zero = make_runner(
+            0,
+            [(FakeEvent(), FakeEvent(ready=True), status_buffer)],
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "unexpected control result"):
+            rank_zero.wait_for_workers()
+
+        self.assertTrue(rank_zero.worker_control_failed)
+
+    def test_worker_result_must_fit_status_buffer(self):
+        status_buffer = bytearray(CONTROL_STATUS_SIZE)
+        worker = make_runner(1, (FakeEvent(), FakeEvent(), status_buffer))
+
+        with self.assertRaisesRegex(ValueError, "exceeds control status buffer"):
+            worker.write_worker_status(None, result=b"x" * CONTROL_STATUS_SIZE)
+
+    def test_call_rank_results_collects_rank_order(self):
+        runner = make_runner(
+            0,
+            [(FakeEvent(), FakeEvent(ready=True), bytearray(CONTROL_STATUS_SIZE))],
+        )
+        runner.worker_control_failed = False
+        calls = []
+        runner.rank_status = lambda value: {"rank": 0, "value": value}
+        runner.write_shm = lambda method_name, *args: calls.append(
+            (method_name, args)
+        )
+        runner.wait_for_workers = lambda **kwargs: [
+            {"rank": 1, "value": 7}
+        ]
+
+        results = runner.call_rank_results("rank_status", 7)
+
+        self.assertEqual(
+            calls,
+            [(model_runner_module.CONTROL_RESULT_COMMAND, ("rank_status", 7))],
+        )
+        self.assertEqual(
+            results,
+            [{"rank": 0, "value": 7}, {"rank": 1, "value": 7}],
+        )
+
     def test_worker_error_status_is_reported_to_rank_zero(self):
         status_buffer = bytearray(CONTROL_STATUS_SIZE)
         worker = make_runner(1, (FakeEvent(), FakeEvent(), status_buffer))

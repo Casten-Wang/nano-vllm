@@ -25,6 +25,45 @@ def _find_free_port() -> int:
         return int(sock.getsockname()[1])
 
 
+def _validate_rank_results(
+    results: list[object],
+    tensor_parallel_size: int,
+    value_name: str,
+    *,
+    expected_value: int | None = None,
+) -> dict[int, int]:
+    """Validate one small completion record from every tensor-parallel rank."""
+
+    by_rank = {}
+    for result in results:
+        if not isinstance(result, dict):
+            raise RuntimeError("tensor-parallel rank result must be a dictionary")
+        rank = result.get("rank")
+        value = result.get(value_name)
+        if (
+            not isinstance(rank, int)
+            or isinstance(rank, bool)
+            or not 0 <= rank < tensor_parallel_size
+        ):
+            raise RuntimeError("tensor-parallel rank result has an invalid rank")
+        if rank in by_rank:
+            raise RuntimeError("tensor-parallel rank result is duplicated")
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise RuntimeError(
+                f"tensor-parallel rank result has invalid {value_name}"
+            )
+        if expected_value is not None and value != expected_value:
+            raise RuntimeError(
+                f"tensor-parallel rank {rank} reported {value_name}={value}; "
+                f"expected {expected_value}"
+            )
+        by_rank[rank] = value
+    expected_ranks = set(range(tensor_parallel_size))
+    if set(by_rank) != expected_ranks:
+        raise RuntimeError("tensor-parallel rank results are incomplete")
+    return by_rank
+
+
 class LLMEngine:
 
     def __init__(self, model, **kwargs):
@@ -179,7 +218,7 @@ class LLMEngine:
             raise TypeError("first_token_id must be an integer")
         seq, session = self.scheduler.remote_prefills[transfer_id]
         try:
-            self.model_runner.call(
+            rank_results = self.model_runner.call_rank_results(
                 "receive_sequence_cache_from_endpoint",
                 seq,
                 transfer_id,
@@ -187,8 +226,14 @@ class LLMEngine:
                 timeout_s,
                 max_payload_bytes,
             )
+            received = _validate_rank_results(
+                rank_results,
+                self.config.tensor_parallel_size,
+                "cached_tokens",
+                expected_value=seq.num_prompt_tokens,
+            )
             now = perf_counter()
-            for rank in range(self.config.tensor_parallel_size):
+            for rank in received:
                 session.acknowledge(rank, now=now)
             self.scheduler.commit_remote_prefill(
                 transfer_id,
@@ -227,12 +272,17 @@ class LLMEngine:
             or seq.num_scheduled_tokens != 0
         ):
             raise ValueError("remote prefill source is not ready for handoff")
-        self.model_runner.call(
+        rank_results = self.model_runner.call_rank_results(
             "send_sequence_cache_to_endpoint",
             seq,
             transfer_id,
             endpoints,
             timeout_s,
+        )
+        _validate_rank_results(
+            rank_results,
+            self.config.tensor_parallel_size,
+            "sent_bytes",
         )
         first_token_id = seq.completion_token_ids[0]
         self.scheduler.complete_remote_prefill_source(seq)

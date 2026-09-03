@@ -26,7 +26,22 @@ def make_engine(*, tensor_parallel_size=1):
     engine = object.__new__(LLMEngine)
     engine.config = config
     engine.scheduler = Scheduler(config)
-    engine.model_runner = SimpleNamespace(call=Mock())
+    def rank_results(method_name, seq, *_args):
+        value_name = (
+            "cached_tokens"
+            if method_name == "receive_sequence_cache_from_endpoint"
+            else "sent_bytes"
+        )
+        value = seq.num_prompt_tokens if value_name == "cached_tokens" else 1
+        return [
+            {"rank": rank, value_name: value}
+            for rank in range(tensor_parallel_size)
+        ]
+
+    engine.model_runner = SimpleNamespace(
+        call=Mock(),
+        call_rank_results=Mock(side_effect=rank_results),
+    )
     return engine
 
 
@@ -76,7 +91,7 @@ def test_engine_commits_remote_prefill_only_after_all_rank_receive():
     assert seq.status is SequenceStatus.RUNNING
     assert seq.completion_token_ids == [9]
     assert not engine.scheduler.remote_prefills
-    engine.model_runner.call.assert_called_once()
+    engine.model_runner.call_rank_results.assert_called_once()
 
 
 def test_engine_receive_failure_releases_destination_and_requeues_prefill():
@@ -87,7 +102,9 @@ def test_engine_receive_failure_releases_destination_and_requeues_prefill():
         transfer_id="request/attempt-1",
         timeout_s=10.0,
     )
-    engine.model_runner.call.side_effect = RuntimeError("checksum mismatch")
+    engine.model_runner.call_rank_results.side_effect = RuntimeError(
+        "checksum mismatch"
+    )
 
     with pytest.raises(RuntimeError, match="checksum mismatch"):
         engine.receive_remote_prefill(
@@ -130,6 +147,33 @@ def test_engine_receive_timeout_during_ack_releases_destination():
     assert session.failure_reason == "cache transfer timed out"
 
 
+def test_engine_rejects_inconsistent_rank_receive_results():
+    engine = make_engine(tensor_parallel_size=2)
+    seq_id = engine.add_remote_prefill_request(
+        [1, 2, 3, 4],
+        SamplingParams(max_tokens=4),
+        transfer_id="request/attempt-1",
+    )
+    engine.model_runner.call_rank_results.side_effect = None
+    engine.model_runner.call_rank_results.return_value = [
+        {"rank": 0, "cached_tokens": 4},
+        {"rank": 1, "cached_tokens": 3},
+    ]
+
+    with pytest.raises(RuntimeError, match="expected 4"):
+        engine.receive_remote_prefill(
+            "request/attempt-1",
+            9,
+            [("127.0.0.1", 20001), ("127.0.0.1", 20002)],
+        )
+
+    seq = engine.scheduler.waiting[0]
+    assert seq.seq_id == seq_id
+    assert seq.block_table == []
+    assert seq.state_slot is None
+    assert not engine.scheduler.remote_prefills
+
+
 def test_engine_releases_prefill_source_only_after_receiver_ack():
     engine = make_engine()
     seq = Sequence([1, 2, 3, 4], SamplingParams(max_tokens=4))
@@ -148,7 +192,7 @@ def test_engine_releases_prefill_source_only_after_receiver_ack():
     assert seq.state_slot is None
     assert not engine.scheduler.running
     assert engine.scheduler.block_manager.num_used_blocks == 0
-    engine.model_runner.call.assert_called_once()
+    engine.model_runner.call_rank_results.assert_called_once()
 
 
 def test_engine_keeps_prefill_source_when_receiver_rejects_payload():
@@ -157,7 +201,9 @@ def test_engine_keeps_prefill_source_when_receiver_rejects_payload():
     engine.scheduler.add(seq)
     result = engine.scheduler.schedule()
     engine.scheduler.postprocess_mixed(result, [9])
-    engine.model_runner.call.side_effect = RuntimeError("receiver rejected")
+    engine.model_runner.call_rank_results.side_effect = RuntimeError(
+        "receiver rejected"
+    )
 
     with pytest.raises(RuntimeError, match="receiver rejected"):
         engine.send_remote_prefill(
