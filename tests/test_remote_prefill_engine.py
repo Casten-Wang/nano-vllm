@@ -13,6 +13,7 @@ from nanovllm.sampling_params import SamplingParams
 def make_engine(*, tensor_parallel_size=1):
     config = SimpleNamespace(
         max_model_len=32,
+        model_config=SimpleNamespace(vocab_size=32),
         tensor_parallel_size=tensor_parallel_size,
         max_num_seqs=2,
         max_num_batched_tokens=16,
@@ -203,6 +204,59 @@ def test_local_request_returns_id_and_can_be_cancelled():
     assert engine.abort_request(seq_id)
     assert engine.scheduler.is_finished()
     assert not engine.abort_request(seq_id)
+
+
+@pytest.mark.parametrize(
+    ("prompt", "error", "message"),
+    [
+        ([1, True], TypeError, "prompt token at index 1 must be an integer"),
+        ([1, -1], ValueError, "outside the vocabulary range.*-1"),
+        ([1, 32], ValueError, "outside the vocabulary range.*32"),
+    ],
+)
+def test_local_request_rejects_invalid_token_ids_before_scheduling(
+    prompt,
+    error,
+    message,
+):
+    engine = make_engine()
+
+    with pytest.raises(error, match=message):
+        engine.add_request(prompt, SamplingParams(max_tokens=2))
+
+    assert engine.scheduler.is_finished()
+
+
+@pytest.mark.parametrize(
+    ("first_token_id", "error"),
+    [
+        (True, TypeError),
+        (-1, ValueError),
+        (32, ValueError),
+    ],
+)
+def test_remote_prefill_rejects_invalid_first_token_before_receive(
+    first_token_id,
+    error,
+):
+    engine = make_engine()
+    engine.add_remote_prefill_request(
+        [1, 2, 3],
+        SamplingParams(max_tokens=2),
+        transfer_id="request/attempt-1",
+    )
+    engine.model_runner.call_rank_results.reset_mock()
+
+    with pytest.raises(error, match="first_token_id"):
+        engine.start_remote_prefill_receive(
+            "request/attempt-1",
+            first_token_id,
+            [("127.0.0.1", 8000)],
+        )
+
+    assert "request/attempt-1" in engine.scheduler.remote_prefills
+    assert "request/attempt-1" not in engine._remote_prefill_receive_tokens
+    engine.model_runner.call_rank_results.assert_not_called()
 
 
 def test_idle_remote_prefill_step_polls_without_running_model():

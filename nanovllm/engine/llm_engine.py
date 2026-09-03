@@ -246,6 +246,7 @@ class LLMEngine:
             raise TypeError("sampling_params must be a SamplingParams instance")
         if not prompt:
             raise ValueError("prompt must contain at least one token")
+        self._validate_token_ids(prompt, value_name="prompt")
         if len(prompt) > self.config.max_model_len:
             raise ValueError(
                 f"prompt length {len(prompt)} exceeds max_model_len "
@@ -260,6 +261,26 @@ class LLMEngine:
         seq = Sequence(prompt, sampling_params)
         seq.arrival_time = perf_counter()
         return seq
+
+    def _validate_token_ids(
+        self,
+        token_ids: list[int],
+        *,
+        value_name: str,
+    ) -> None:
+        """Reject invalid ids before they enter scheduler or transfer state."""
+
+        vocab_size = int(self.config.model_config.vocab_size)
+        for index, token_id in enumerate(token_ids):
+            if not isinstance(token_id, int) or isinstance(token_id, bool):
+                raise TypeError(
+                    f"{value_name} token at index {index} must be an integer"
+                )
+            if not 0 <= token_id < vocab_size:
+                raise ValueError(
+                    f"{value_name} token at index {index} is outside the "
+                    f"vocabulary range [0, {vocab_size}): {token_id}"
+                )
 
     def add_request(self, prompt: str | list[int], sampling_params: SamplingParams):
         seq = self._create_sequence(prompt, sampling_params)
@@ -342,8 +363,10 @@ class LLMEngine:
     ) -> int:
         """Receive every TP rank, then atomically admit the request to decode."""
 
-        if not isinstance(first_token_id, int) or isinstance(first_token_id, bool):
-            raise TypeError("first_token_id must be an integer")
+        self._validate_token_ids(
+            [first_token_id],
+            value_name="first_token_id",
+        )
         if transfer_id in getattr(self, "_remote_prefill_receive_tokens", {}):
             raise ValueError("cache receive id is already active")
         seq, session = self.scheduler.remote_prefills[transfer_id]
@@ -442,8 +465,10 @@ class LLMEngine:
     ) -> int:
         """Start CPU-side rank receives while decode scheduling continues."""
 
-        if not isinstance(first_token_id, int) or isinstance(first_token_id, bool):
-            raise TypeError("first_token_id must be an integer")
+        self._validate_token_ids(
+            [first_token_id],
+            value_name="first_token_id",
+        )
         if transfer_id not in self.scheduler.remote_prefills:
             raise ValueError("cache transfer id is not reserved")
         receive_tokens = getattr(self, "_remote_prefill_receive_tokens", None)
