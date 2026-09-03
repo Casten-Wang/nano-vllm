@@ -887,13 +887,39 @@ def write_mixed_case(root):
 
 
 def write_pressure_case(root):
-    for policy, token_progress, max_progress, reclaimed, elapsed_samples in (
-        ("fcfs", 1536, 1024, 6, (9.8, 10.0, 10.2)),
-        ("min_recompute", 256, 256, 1, (7.8, 8.0, 8.2)),
-    ):
+    cases = (
+        ("fcfs", "fcfs", False, 1536, 1024, 6, (9.8, 10.0, 10.2)),
+        (
+            "min_recompute",
+            "min_recompute",
+            False,
+            256,
+            256,
+            1,
+            (7.8, 8.0, 8.2),
+        ),
+        (
+            "min_recompute_reserved",
+            "min_recompute",
+            True,
+            0,
+            0,
+            0,
+            (7.7, 7.9, 8.1),
+        ),
+    )
+    for (
+        case_name,
+        policy,
+        reservation,
+        token_progress,
+        max_progress,
+        reclaimed,
+        elapsed_samples,
+    ) in cases:
         for repeat, elapsed in enumerate(elapsed_samples, start=1):
             write(
-                root / f"pressure/tp4/{policy}/r{repeat}.json",
+                root / f"pressure/tp4/{case_name}/r{repeat}.json",
                 {
                     "commit": "abc",
                     "checkpoint_manifest": {"digest": "weights"},
@@ -908,6 +934,7 @@ def write_pressure_case(root):
                     "num_kvcache_blocks_override": MODULE.PRESSURE_KV_BLOCKS,
                     "num_kvcache_blocks": MODULE.PRESSURE_KV_BLOCKS,
                     "enable_dynamic_chunked_prefill": True,
+                    "enable_decode_kv_reservation": reservation,
                     "preemption_policy": policy,
                     "injected": True,
                     "expected_requests": 4,
@@ -917,10 +944,15 @@ def write_pressure_case(root):
                     "peak_torch_allocated_mib": 12_000.0,
                     "generated_token_ids": {"digest": "pressure-tokens"},
                     "metrics": {
-                        "preemption_count": 2 if policy == "fcfs" else 1,
+                        "preemption_count": (
+                            2 if policy == "fcfs" else (0 if reservation else 1)
+                        ),
                         "preempted_token_progress": token_progress,
                         "max_preempted_token_progress": max_progress,
                         "reclaimed_kv_blocks": reclaimed,
+                        "prefill_stopped_by_decode_kv_reservation": (
+                            2 if reservation else 0
+                        ),
                         "avg_ttft_s": 1.0,
                         "p50_ttft_s": 0.8,
                         "p95_ttft_s": 1.8 if policy == "fcfs" else 1.5,
@@ -2143,6 +2175,10 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     pressure = report["kv_pressure"]["by_tp"]["tp4"]
     assert pressure["fcfs"]["valid"]
     assert pressure["min_recompute"]["valid"]
+    assert pressure["min_recompute_reserved"]["valid"]
+    assert pressure["min_recompute_reserved"][
+        "decode_kv_reservation_observed"
+    ]
     assert pressure["fcfs"]["preemption_count"] == 2
     assert pressure["min_recompute"]["preempted_token_progress"] == 256
     comparison = report["kv_pressure"]["comparisons"]["tp4"]
@@ -2150,6 +2186,13 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     assert comparison["recomputed_token_reduction"] == 1280
     assert comparison["elapsed_speedup"] == 1.25
     assert comparison["tail_latency_non_regressing"]
+    reservation = comparison["decode_kv_reservation"]
+    assert reservation["valid"]
+    assert reservation["output_parity"]
+    assert reservation["implementation_parity"]
+    assert reservation["checkpoint_parity"]
+    assert reservation["recomputed_token_reduction"] == 256
+    assert reservation["reservation_stop_count"] == 2
     assert comparison["candidate_latency_vs_fcfs"]["p95_ttft_s"] == (
         1.5 / 1.8
     )
@@ -2164,6 +2207,23 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     ]
     candidate_pressure["generated_token_ids"]["digest"] = "pressure-tokens"
     write(candidate_pressure_path, candidate_pressure)
+    reserved_pressure_path = (
+        tmp_path / "pressure/tp4/min_recompute_reserved/r1.json"
+    )
+    reserved_pressure = json.loads(reserved_pressure_path.read_text())
+    reserved_pressure["metrics"][
+        "prefill_stopped_by_decode_kv_reservation"
+    ] = 0
+    write(reserved_pressure_path, reserved_pressure)
+    reservation_failure = MODULE.summarize(tmp_path, run_id)
+    assert not reservation_failure["evidence"]["kv_pressure_evidence"]
+    assert not reservation_failure["kv_pressure"]["comparisons"]["tp4"][
+        "decode_kv_reservation"
+    ]["valid"]
+    reserved_pressure["metrics"][
+        "prefill_stopped_by_decode_kv_reservation"
+    ] = 2
+    write(reserved_pressure_path, reserved_pressure)
     memory = report["memory"]["by_tp"]["tp4"]
     assert memory["int8_kv_reduction_ratio"] == 0.49609375
     assert memory["minimum_budget_margin_bytes"] == 5_000

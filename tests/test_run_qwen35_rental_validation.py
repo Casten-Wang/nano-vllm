@@ -72,6 +72,9 @@ def test_commands_are_fail_fast_and_cover_complete_validation_suite():
         "pressure-min_recompute-tp4-r1",
         "pressure-min_recompute-tp4-r2",
         "pressure-min_recompute-tp4-r3",
+        "pressure-min_recompute_reserved-tp4-r1",
+        "pressure-min_recompute_reserved-tp4-r2",
+        "pressure-min_recompute_reserved-tp4-r3",
         "kernels-long-prefill-tp4",
         "attention-short-tp4",
         "attention-long-tp4",
@@ -98,6 +101,9 @@ def test_commands_are_fail_fast_and_cover_complete_validation_suite():
         "pressure-min_recompute-tp8-r1",
         "pressure-min_recompute-tp8-r2",
         "pressure-min_recompute-tp8-r3",
+        "pressure-min_recompute_reserved-tp8-r1",
+        "pressure-min_recompute_reserved-tp8-r2",
+        "pressure-min_recompute_reserved-tp8-r3",
         "kernels-long-prefill-tp8",
         "attention-short-tp8",
         "attention-long-tp8",
@@ -154,6 +160,11 @@ def test_commands_are_fail_fast_and_cover_complete_validation_suite():
     assert pressure[pressure.index("--injected-input-lens") + 1] == "512,512"
     assert pressure[pressure.index("--output-len") + 1] == "16"
     assert pressure[pressure.index("--preemption-policy") + 1] == "min_recompute"
+    reserved_pressure = commands["pressure-min_recompute_reserved-tp4-r1"]
+    assert "--enable-decode-kv-reservation" in reserved_pressure
+    assert reserved_pressure[
+        reserved_pressure.index("--preemption-policy") + 1
+    ] == "min_recompute"
     long_prefill = commands["kernels-long-prefill-tp4"]
     assert "--prefill-only" in long_prefill
     assert long_prefill[long_prefill.index("--prefill-tokens") + 1] == "8192"

@@ -376,11 +376,20 @@ def commands(args: argparse.Namespace) -> list[tuple[str, list[str]]]:
                         ],
                     )
                 )
-        for policy in ("fcfs", "min_recompute"):
+        for pressure_name, policy, decode_reservation in (
+            ("fcfs", "fcfs", False),
+            ("min_recompute", "min_recompute", False),
+            ("min_recompute_reserved", "min_recompute", True),
+        ):
             for repeat in range(1, args.repeats + 1):
+                reservation_args = (
+                    ["--enable-decode-kv-reservation"]
+                    if decode_reservation
+                    else []
+                )
                 result.append(
                     (
-                        f"pressure-{policy}-tp{tp_size}-r{repeat}",
+                        f"pressure-{pressure_name}-tp{tp_size}-r{repeat}",
                         [
                             sys.executable,
                             str(ONLINE_MIXED_SCRIPT),
@@ -427,6 +436,7 @@ def commands(args: argparse.Namespace) -> list[tuple[str, list[str]]]:
                             str(PRESSURE_KV_BLOCKS),
                             "--preemption-policy",
                             policy,
+                            *reservation_args,
                             "--enable-dynamic-chunked-prefill",
                             "--require-paths",
                             "mixed_eager",
@@ -435,7 +445,7 @@ def commands(args: argparse.Namespace) -> list[tuple[str, list[str]]]:
                                 root
                                 / "pressure"
                                 / f"tp{tp_size}"
-                                / policy
+                                / pressure_name
                                 / f"r{repeat}.json"
                             ),
                         ],

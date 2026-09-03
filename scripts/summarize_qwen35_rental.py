@@ -1494,6 +1494,7 @@ def summarize_kv_pressure_case(
     *,
     expected_tp_size: int,
     expected_policy: str,
+    expected_decode_reservation: bool = False,
 ) -> dict:
     metrics = result.get("metrics", {})
     expected_requests = PRESSURE_INITIAL_SEQUENCES + PRESSURE_INJECTED_SEQUENCES
@@ -1508,6 +1509,8 @@ def summarize_kv_pressure_case(
         and result.get("num_kvcache_blocks") == PRESSURE_KV_BLOCKS
         and result.get("enable_dynamic_chunked_prefill") is True
         and result.get("preemption_policy") == expected_policy
+        and result.get("enable_decode_kv_reservation")
+        is expected_decode_reservation
         and result.get("cuda_available") is True
     )
     preemption_observed = (
@@ -1515,6 +1518,14 @@ def summarize_kv_pressure_case(
         and metrics.get("preempted_token_progress", 0) > 0
         and metrics.get("max_preempted_token_progress", 0) > 0
         and metrics.get("reclaimed_kv_blocks", 0) > 0
+    )
+    reservation_stops = metrics.get(
+        "prefill_stopped_by_decode_kv_reservation", 0
+    )
+    reservation_observed = (
+        isinstance(reservation_stops, int)
+        and not isinstance(reservation_stops, bool)
+        and reservation_stops > 0
     )
     completion_valid = (
         result.get("injected") is True
@@ -1541,12 +1552,15 @@ def summarize_kv_pressure_case(
     return {
         "valid": (
             configuration_valid
-            and preemption_observed
+            and (preemption_observed or reservation_observed)
             and completion_valid
             and latency_metrics_valid
         ),
         "configuration_valid": configuration_valid,
         "preemption_observed": preemption_observed,
+        "decode_kv_reservation_enabled": expected_decode_reservation,
+        "decode_kv_reservation_observed": reservation_observed,
+        "prefill_stopped_by_decode_kv_reservation": reservation_stops,
         "completion_valid": completion_valid,
         "latency_metrics_valid": latency_metrics_valid,
         "preemption_count": metrics.get("preemption_count"),
@@ -1584,6 +1598,7 @@ def summarize_kv_pressure_repeats(
     *,
     expected_tp_size: int,
     expected_policy: str,
+    expected_decode_reservation: bool = False,
 ) -> dict:
     if not results:
         raise ValueError("KV-pressure benchmark has no repeat results")
@@ -1592,6 +1607,7 @@ def summarize_kv_pressure_repeats(
             result,
             expected_tp_size=expected_tp_size,
             expected_policy=expected_policy,
+            expected_decode_reservation=expected_decode_reservation,
         )
         for result in results
     ]
@@ -1601,6 +1617,7 @@ def summarize_kv_pressure_repeats(
         "max_preempted_token_progress",
         "reclaimed_kv_blocks",
         "step_count",
+        "prefill_stopped_by_decode_kv_reservation",
     )
     counters_stable = all(
         len({row[name] for row in rows}) == 1 for name in stable_names
@@ -1664,6 +1681,10 @@ def summarize_kv_pressure_repeats(
         ),
         "preemption_observed": all(
             row["preemption_observed"] for row in rows
+        ),
+        "decode_kv_reservation_enabled": expected_decode_reservation,
+        "decode_kv_reservation_observed": all(
+            row["decode_kv_reservation_observed"] for row in rows
         ),
         "completion_valid": all(row["completion_valid"] for row in rows),
         "latency_metrics_valid": all(
@@ -2933,19 +2954,32 @@ def summarize(run_dir: Path, run_id: str) -> dict:
         cuda_measurements = cuda_measurements and result["cuda_available"]
     for (tp_name, policy), results in sorted(pressure_results.items()):
         tp_size = int(tp_name.removeprefix("tp"))
+        expected_policy = (
+            "min_recompute"
+            if policy == "min_recompute_reserved"
+            else policy
+        )
         kv_pressure.setdefault(tp_name, {})[policy] = (
             summarize_kv_pressure_repeats(
                 results,
                 expected_tp_size=tp_size,
-                expected_policy=policy,
+                expected_policy=expected_policy,
+                expected_decode_reservation=(
+                    policy == "min_recompute_reserved"
+                ),
             )
         )
     kv_pressure_comparisons = {}
     for tp_name, by_policy in kv_pressure.items():
-        if set(by_policy) != {"fcfs", "min_recompute"}:
+        if set(by_policy) != {
+            "fcfs",
+            "min_recompute",
+            "min_recompute_reserved",
+        }:
             continue
         baseline = by_policy["fcfs"]
         candidate = by_policy["min_recompute"]
+        reserved = by_policy["min_recompute_reserved"]
         output_parity = (
             baseline["generated_token_ids_digest"] is not None
             and baseline["generated_token_ids_digest"]
@@ -2953,6 +2987,25 @@ def summarize(run_dir: Path, run_id: str) -> dict:
         )
         baseline_progress = baseline["preempted_token_progress"]
         candidate_progress = candidate["preempted_token_progress"]
+        reserved_progress = reserved["preempted_token_progress"]
+        reservation_output_parity = (
+            candidate["generated_token_ids_digest"] is not None
+            and candidate["generated_token_ids_digest"]
+            == reserved["generated_token_ids_digest"]
+        )
+        reservation_implementation_parity = (
+            candidate["commit"] is not None
+            and candidate["commit"] == reserved["commit"]
+        )
+        reservation_checkpoint_parity = (
+            candidate["checkpoint_digest"] is not None
+            and candidate["checkpoint_digest"]
+            == reserved["checkpoint_digest"]
+        )
+        reservation_progress_valid = all(
+            isinstance(value, int) and not isinstance(value, bool)
+            for value in (candidate_progress, reserved_progress)
+        )
         latency_ratios = {
             name: (
                 candidate[name] / baseline[name]
@@ -3001,6 +3054,42 @@ def summarize(run_dir: Path, run_id: str) -> dict:
                     "p99_request_latency_s",
                 )
             ),
+            "decode_kv_reservation": {
+                "valid": (
+                    candidate["valid"]
+                    and reserved["valid"]
+                    and reserved["decode_kv_reservation_observed"]
+                    and reservation_output_parity
+                    and reservation_implementation_parity
+                    and reservation_checkpoint_parity
+                    and reservation_progress_valid
+                    and reserved_progress <= candidate_progress
+                ),
+                "output_parity": reservation_output_parity,
+                "implementation_parity": reservation_implementation_parity,
+                "checkpoint_parity": reservation_checkpoint_parity,
+                "recomputed_token_reduction": (
+                    candidate_progress - reserved_progress
+                    if reservation_progress_valid
+                    else None
+                ),
+                "reservation_stop_count": reserved[
+                    "prefill_stopped_by_decode_kv_reservation"
+                ],
+                "elapsed_ratio": (
+                    reserved["total_time_s"] / candidate["total_time_s"]
+                    if candidate["total_time_s"]
+                    and reserved["total_time_s"]
+                    else None
+                ),
+                "peak_memory_delta_mib": (
+                    reserved["peak_torch_allocated_mib"]
+                    - candidate["peak_torch_allocated_mib"]
+                    if candidate["peak_torch_allocated_mib"] is not None
+                    and reserved["peak_torch_allocated_mib"] is not None
+                    else None
+                ),
+            },
         }
 
     fairness_results = {}
@@ -3254,9 +3343,14 @@ def summarize(run_dir: Path, run_id: str) -> dict:
         "kv_pressure_evidence": (
             set(kv_pressure) == expected_tp_names
             and all(
-                set(by_policy) == {"fcfs", "min_recompute"}
+                set(by_policy)
+                == {"fcfs", "min_recompute", "min_recompute_reserved"}
                 and all(item["valid"] for item in by_policy.values())
                 and kv_pressure_comparisons.get(tp_name, {}).get("valid") is True
+                and kv_pressure_comparisons.get(tp_name, {})
+                .get("decode_kv_reservation", {})
+                .get("valid")
+                is True
                 for tp_name, by_policy in kv_pressure.items()
             )
         ),
