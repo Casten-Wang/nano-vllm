@@ -154,7 +154,10 @@ class ModelRunner:
         torch.set_default_device("cuda")
         self.model = create_model(model_spec.architecture, hf_config)
         load_model(self.model, config.model)
-        self.sampler = Sampler()
+        self.sampler = Sampler(
+            config.sampling_chunk_size,
+            config.tp_top_k_reduction_max_width,
+        )
         self.sampler.reserve_runtime_buffers(int(config.model_config.vocab_size))
         self.reserve_runtime_buffers()
         self.sampling_inputs = (

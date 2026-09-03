@@ -585,6 +585,81 @@ class SamplerTest(unittest.TestCase):
 
         self.assertEqual(sampler.storage_stats()["noise_buffer_bytes"], 0)
 
+    def test_full_top_p_sampling_is_bounded_by_row_chunks(self):
+        sampler = Sampler(max_sampling_rows=2)
+        logits = torch.randn(5, 11)
+        temperatures = torch.ones(5)
+        top_ks = torch.full((5,), -1, dtype=torch.int32)
+        top_ps = torch.full((5,), 0.9)
+        metadata = build_sampling_metadata(
+            temperatures.tolist(),
+            top_ks.tolist(),
+            top_ps.tolist(),
+            vocab_size=logits.size(1),
+        )
+        original_sort = torch.sort
+        observed_shapes = []
+
+        def record_sort(value, *args, **kwargs):
+            observed_shapes.append(tuple(value.shape))
+            return original_sort(value, *args, **kwargs)
+
+        with patch.object(torch, "sort", side_effect=record_sort):
+            tokens = sampler(logits, temperatures, top_ks, top_ps, metadata)
+
+        self.assertEqual(tuple(tokens.shape), (5,))
+        self.assertEqual(observed_shapes, [(2, 11), (2, 11), (1, 11)])
+
+    def test_mixed_sampling_chunks_only_non_greedy_rows(self):
+        sampler = Sampler(max_sampling_rows=2)
+        logits = torch.randn(5, 11)
+        temperatures = torch.tensor([0.0, 1.0, 0.7, 0.0, 0.8])
+        top_ks = torch.full((5,), -1, dtype=torch.int32)
+        top_ps = torch.tensor([1.0, 0.9, 0.8, 1.0, 0.95])
+        metadata = build_sampling_metadata(
+            temperatures.tolist(),
+            top_ks.tolist(),
+            top_ps.tolist(),
+            vocab_size=logits.size(1),
+        )
+        original_sort = torch.sort
+        observed_shapes = []
+
+        def record_sort(value, *args, **kwargs):
+            observed_shapes.append(tuple(value.shape))
+            return original_sort(value, *args, **kwargs)
+
+        with patch.object(torch, "sort", side_effect=record_sort):
+            tokens = sampler(logits, temperatures, top_ks, top_ps, metadata)
+
+        self.assertEqual(tuple(tokens.shape), (5,))
+        self.assertEqual(observed_shapes, [(2, 11), (1, 11)])
+
+    def test_large_top_k_is_also_bounded_by_row_chunks(self):
+        sampler = Sampler(max_sampling_rows=2, max_compact_top_k=2)
+        logits = torch.randn(5, 11)
+        temperatures = torch.ones(5)
+        top_ks = torch.full((5,), 3, dtype=torch.int32)
+        top_ps = torch.ones(5)
+        metadata = build_sampling_metadata(
+            temperatures.tolist(),
+            top_ks.tolist(),
+            top_ps.tolist(),
+            vocab_size=logits.size(1),
+        )
+        original_topk = torch.topk
+        observed_shapes = []
+
+        def record_topk(value, *args, **kwargs):
+            observed_shapes.append(tuple(value.shape))
+            return original_topk(value, *args, **kwargs)
+
+        with patch.object(torch, "topk", side_effect=record_topk):
+            tokens = sampler(logits, temperatures, top_ks, top_ps, metadata)
+
+        self.assertEqual(tuple(tokens.shape), (5,))
+        self.assertEqual(observed_shapes, [(2, 11), (2, 11), (1, 11)])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -14,6 +14,9 @@ class SamplingBatchMetadata:
     any_top_k_enabled: bool
     any_top_p_enabled: bool
     max_top_k: int
+    sample_temperatures: tuple[float, ...]
+    sample_top_ks: tuple[int, ...]
+    sample_top_ps: tuple[float, ...]
 
 
 def build_sampling_metadata(
@@ -33,19 +36,24 @@ def build_sampling_metadata(
     if any(not isfinite(value) or not 0.0 < value <= 1.0 for value in top_ps):
         raise ValueError("top_p must be finite and in (0, 1]")
     sampled = [
-        (top_k, top_p)
+        (temperature, top_k, top_p)
         for temperature, top_k, top_p in zip(temperatures, top_ks, top_ps)
         if temperature > 1e-10
     ]
-    enabled_top_ks = [top_k for top_k, _ in sampled if 0 < top_k < vocab_size]
+    enabled_top_ks = [
+        top_k for _, top_k, _ in sampled if 0 < top_k < vocab_size
+    ]
     return SamplingBatchMetadata(
         batch_size=len(temperatures),
         sample_count=len(sampled),
         vocab_size=vocab_size,
         all_top_k_enabled=bool(sampled) and len(enabled_top_ks) == len(sampled),
         any_top_k_enabled=bool(enabled_top_ks),
-        any_top_p_enabled=any(top_p < 1.0 for _, top_p in sampled),
+        any_top_p_enabled=any(top_p < 1.0 for _, _, top_p in sampled),
         max_top_k=max(enabled_top_ks, default=0),
+        sample_temperatures=tuple(value for value, _, _ in sampled),
+        sample_top_ks=tuple(value for _, value, _ in sampled),
+        sample_top_ps=tuple(value for _, _, value in sampled),
     )
 
 
@@ -372,8 +380,18 @@ def sample_top_k_compact(
 
 class Sampler(nn.Module):
 
-    def __init__(self):
+    def __init__(
+        self,
+        max_sampling_rows: int = 32,
+        max_compact_top_k: int = 256,
+    ):
         super().__init__()
+        if max_sampling_rows <= 0:
+            raise ValueError("max_sampling_rows must be positive")
+        if max_compact_top_k <= 0:
+            raise ValueError("max_compact_top_k must be positive")
+        self.max_sampling_rows = max_sampling_rows
+        self.max_compact_top_k = max_compact_top_k
         self.register_buffer(
             "_rank_buffer",
             torch.empty(0, dtype=torch.long),
@@ -397,6 +415,88 @@ class Sampler(nn.Module):
             ),
             "noise_buffer_bytes": 0,
         }
+
+    def _sample_full(
+        self,
+        logits: torch.Tensor,
+        temperatures: torch.Tensor,
+        top_ks: torch.Tensor,
+        top_ps: torch.Tensor,
+        metadata: SamplingBatchMetadata | None,
+    ) -> torch.Tensor:
+        sample_logits = logits.float()
+        if sample_logits.requires_grad:
+            sample_logits = sample_logits.div(temperatures.unsqueeze(dim=1))
+        else:
+            sample_logits.div_(temperatures.unsqueeze(dim=1))
+        any_top_k_enabled = (
+            metadata.any_top_k_enabled
+            if metadata is not None
+            else bool(((top_ks > 0) & (top_ks < logits.size(1))).any())
+        )
+        any_top_p_enabled = (
+            metadata.any_top_p_enabled
+            if metadata is not None
+            else bool((top_ps < 1.0).any())
+        )
+        max_top_k = (
+            metadata.max_top_k
+            if metadata is not None
+            else int(top_ks[(top_ks > 0) & (top_ks < logits.size(1))].max().item())
+            if any_top_k_enabled
+            else 0
+        )
+        sample_logits = apply_top_k_top_p(
+            sample_logits,
+            top_ks,
+            top_ps,
+            metadata,
+            (
+                self._ranks(
+                    logits.size(1) if any_top_p_enabled else max_top_k,
+                    logits.device,
+                )
+                if any_top_p_enabled or any_top_k_enabled
+                else None
+            ),
+            inplace=not sample_logits.requires_grad,
+        )
+        probs = torch.softmax(sample_logits, dim=-1)
+        return probs.div_(
+            sample_logits.exponential_(1).clamp_min_(1e-10)
+        ).argmax(dim=-1)
+
+    def _sample_full_chunked(
+        self,
+        logits: torch.Tensor,
+        temperatures: torch.Tensor,
+        top_ks: torch.Tensor,
+        top_ps: torch.Tensor,
+        metadata: SamplingBatchMetadata,
+    ) -> torch.Tensor:
+        if logits.size(0) <= self.max_sampling_rows:
+            return self._sample_full(
+                logits, temperatures, top_ks, top_ps, metadata
+            )
+        chunks = []
+        for start in range(0, logits.size(0), self.max_sampling_rows):
+            end = min(start + self.max_sampling_rows, logits.size(0))
+            chunk_metadata = build_sampling_metadata(
+                list(metadata.sample_temperatures[start:end]),
+                list(metadata.sample_top_ks[start:end]),
+                list(metadata.sample_top_ps[start:end]),
+                metadata.vocab_size,
+            )
+            chunks.append(
+                self._sample_full(
+                    logits[start:end],
+                    temperatures[start:end],
+                    top_ks[start:end],
+                    top_ps[start:end],
+                    chunk_metadata,
+                )
+            )
+        return torch.cat(chunks)
 
     @torch.inference_mode()
     def sample_top_k_candidates(
@@ -506,7 +606,7 @@ class Sampler(nn.Module):
                 if any_top_k_enabled
                 else 0
             )
-        if all_top_k_enabled:
+        if all_top_k_enabled and max_top_k <= self.max_compact_top_k:
             sample_tokens = sample_top_k_compact(
                 sample_source,
                 sample_temperatures,
@@ -523,35 +623,23 @@ class Sampler(nn.Module):
             greedy_tokens[sample_mask] = sample_tokens
             return greedy_tokens
 
-        sample_logits = sample_source.float()
-        if sample_logits.requires_grad:
-            sample_logits = sample_logits.div(
-                sample_temperatures.unsqueeze(dim=1)
+        sample_tokens = (
+            self._sample_full_chunked(
+                sample_source,
+                sample_temperatures,
+                sample_top_ks,
+                sample_top_ps,
+                metadata,
             )
-        else:
-            # The promoted logits are private to this sampling call (or the
-            # model logits are dead after sampling when already FP32). Reuse
-            # that storage for temperature scaling and the filtered logits.
-            sample_logits.div_(sample_temperatures.unsqueeze(dim=1))
-        sample_logits = apply_top_k_top_p(
-            sample_logits,
-            sample_top_ks,
-            sample_top_ps,
-            metadata,
-            (
-                self._ranks(
-                    logits.size(1) if any_top_p_enabled else max_top_k,
-                    logits.device,
-                )
-                if any_top_p_enabled or any_top_k_enabled
-                else None
-            ),
-            inplace=not sample_logits.requires_grad,
+            if metadata is not None
+            else self._sample_full(
+                sample_source,
+                sample_temperatures,
+                sample_top_ks,
+                sample_top_ps,
+                None,
+            )
         )
-        probs = torch.softmax(sample_logits, dim=-1)
-        sample_tokens = probs.div_(
-            sample_logits.exponential_(1).clamp_min_(1e-10)
-        ).argmax(dim=-1)
         if all_sampling:
             return sample_tokens
         greedy_tokens = logits.argmax(dim=-1)

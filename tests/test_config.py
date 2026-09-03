@@ -374,3 +374,8 @@ def test_generation_config_resolves_all_eos_tokens(tmp_path):
 
 def test_generation_config_falls_back_to_tokenizer_eos(tmp_path):
     assert config_module.resolve_eos_token_ids(str(tmp_path), 7) == (7,)
+
+
+def test_sampling_chunk_size_must_be_positive(monkeypatch, tmp_path):
+    with pytest.raises(ValueError, match="sampling_chunk_size must be positive"):
+        make_config(monkeypatch, tmp_path, sampling_chunk_size=0)

@@ -68,6 +68,7 @@ class Config:
     qwen35_moe_decode_backend: str = "sorted"
     qwen35_moe_decode_chunk_size: int = 8
     tp_top_k_reduction_max_width: int = 256
+    sampling_chunk_size: int = 32
     weight_quant_backend: str = "auto"
     max_remote_prefill_transfers: int = 2
     max_remote_prefill_staging_bytes: int | None = None
@@ -126,6 +127,12 @@ class Config:
             or self.tp_top_k_reduction_max_width <= 0
         ):
             raise ValueError("tp_top_k_reduction_max_width must be positive")
+        if (
+            not isinstance(self.sampling_chunk_size, int)
+            or isinstance(self.sampling_chunk_size, bool)
+            or self.sampling_chunk_size <= 0
+        ):
+            raise ValueError("sampling_chunk_size must be positive")
         if self.weight_quant_backend not in ("auto", "reference", "resident", "triton"):
             raise ValueError(
                 "weight_quant_backend must be 'auto', 'reference', 'resident', "
