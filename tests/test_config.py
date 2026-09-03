@@ -61,6 +61,20 @@ def test_runtime_model_length_is_forwarded_as_allocation_bound(
     assert text_config.nanovllm_max_model_len == 4096
 
 
+def test_runtime_batch_token_bound_is_forwarded_for_buffer_reservations(
+    monkeypatch,
+    tmp_path,
+):
+    config, text_config = make_config(
+        monkeypatch,
+        tmp_path,
+        max_num_batched_tokens=2048,
+    )
+
+    assert config.max_num_batched_tokens == 2048
+    assert text_config.nanovllm_max_num_batched_tokens == 2048
+
+
 def test_invalid_qwen35_moe_decode_backend_is_rejected(monkeypatch, tmp_path):
     with pytest.raises(ValueError, match="qwen35_moe_decode_backend"):
         make_config(

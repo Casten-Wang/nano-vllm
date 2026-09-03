@@ -5,6 +5,7 @@ import types
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
 import torch
 from torch import nn
 
@@ -242,6 +243,32 @@ def test_attention_layers_can_share_key_buffer_pool():
         "allocation_count": 1,
         "reuse_count": 1,
     }
+
+
+@torch.no_grad()
+def test_key_buffer_pool_reuses_capacity_reserved_for_prefill():
+    layer = make_attention()
+    pool = attention.Qwen35KeyBufferPool()
+    elements = 8 * layer.num_kv_heads * layer.head_dim
+    pool.reserve(elements, dtype=torch.float32, device=torch.device("cpu"))
+    storage_pointer = pool.storage.data_ptr()
+    layer.key_buffer_pool = pool
+
+    layer(torch.arange(5), torch.randn(5, 8))
+
+    assert pool.storage.data_ptr() == storage_pointer
+    assert pool.storage_stats() == {
+        "storage_bytes": elements * 4,
+        "allocation_count": 1,
+        "reuse_count": 1,
+    }
+
+
+def test_key_buffer_pool_rejects_empty_reservation():
+    pool = attention.Qwen35KeyBufferPool()
+
+    with pytest.raises(ValueError, match="reservation must be positive"):
+        pool.reserve(0, dtype=torch.float32, device=torch.device("cpu"))
 
 
 def test_attention_autograd_does_not_use_inference_key_buffer():

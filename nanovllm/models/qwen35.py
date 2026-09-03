@@ -70,6 +70,9 @@ class Qwen35DecoderLayer(nn.Module):
 class Qwen35Model(nn.Module):
     def __init__(self, config) -> None:
         super().__init__()
+        self.max_num_batched_tokens = int(
+            getattr(config, "nanovllm_max_num_batched_tokens", 0)
+        )
         self.embed_tokens = VocabParallelEmbedding(
             int(config.vocab_size), int(config.hidden_size)
         )
@@ -102,10 +105,31 @@ class Qwen35Model(nn.Module):
         )
 
     def reserve_runtime_buffers(self, max_decode_tokens: int) -> None:
-        """Reserve batched-MoE scratch before the KV cache consumes VRAM."""
+        """Reserve predictable model scratch before the KV cache consumes VRAM."""
 
         if max_decode_tokens <= 0:
             raise ValueError("max_decode_tokens must be positive")
+        attention = next(
+            (
+                layer.self_attn
+                for layer in self.layers
+                if isinstance(getattr(layer, "self_attn", None), Qwen35Attention)
+            ),
+            None,
+        )
+        if attention is not None:
+            max_key_tokens = (
+                self.max_num_batched_tokens
+                if self.max_num_batched_tokens > 0
+                else max_decode_tokens
+            )
+            self.full_attention_key_buffer_pool.reserve(
+                elements=(
+                    max_key_tokens * attention.num_kv_heads * attention.head_dim
+                ),
+                dtype=self.embed_tokens.weight.dtype,
+                device=self.embed_tokens.weight.device,
+            )
         block = next(
             (
                 layer.mlp

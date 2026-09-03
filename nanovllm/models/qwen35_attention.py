@@ -23,25 +23,47 @@ class Qwen35KeyBufferPool:
         self.allocation_count = 0
         self.reuse_count = 0
 
+    def reserve(
+        self,
+        elements: int,
+        *,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> None:
+        """Allocate the largest expected key scratch before KV-cache sizing."""
+
+        if elements <= 0:
+            raise ValueError("key buffer reservation must be positive")
+        self._ensure_capacity(elements, dtype=dtype, device=device)
+
+    def _ensure_capacity(
+        self,
+        elements: int,
+        *,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> None:
+        if (
+            self.storage is None
+            or self.storage.device != device
+            or self.storage.dtype != dtype
+            or self.storage.numel() < elements
+        ):
+            self.storage = torch.empty(elements, dtype=dtype, device=device)
+            self.allocation_count += 1
+
     def copy(self, key: torch.Tensor) -> torch.Tensor:
         if torch.is_grad_enabled():
             raise RuntimeError("Qwen3.6-compatible key buffer is inference-only")
         required = key.numel()
-        if (
-            self.storage is None
-            or self.storage.device != key.device
-            or self.storage.dtype != key.dtype
-            or self.storage.numel() < required
-        ):
-            self.storage = torch.empty(
-                required,
-                dtype=key.dtype,
-                device=key.device,
-            )
-            self.allocation_count += 1
-        else:
+        allocation_count = self.allocation_count
+        self._ensure_capacity(required, dtype=key.dtype, device=key.device)
+        if self.allocation_count == allocation_count:
             self.reuse_count += 1
-        output = self.storage[:required].view_as(key)
+        storage = self.storage
+        if storage is None:
+            raise RuntimeError("key buffer allocation did not produce storage")
+        output = storage[:required].view_as(key)
         output.copy_(key)
         return output
 

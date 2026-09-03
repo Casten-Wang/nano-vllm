@@ -28,6 +28,8 @@ class FakeHead(FakeEmbedding):
 class FakeMixer(nn.Module):
     def __init__(self, config, layer_idx=None):
         super().__init__()
+        self.num_kv_heads = 1
+        self.head_dim = 2
 
     def forward(self, *args):
         return torch.zeros_like(args[-1])
@@ -151,6 +153,7 @@ def tiny_outer_config():
         ),
         rms_norm_eps=1e-6,
         tie_word_embeddings=False,
+        nanovllm_max_num_batched_tokens=11,
     )
     return SimpleNamespace(text_config=text_config)
 
@@ -201,6 +204,13 @@ def test_text_model_reserves_batched_moe_buffers_for_max_decode_chunk():
 
     model.model.reserve_runtime_buffers(max_decode_tokens=8)
 
+    assert model.model.full_attention_key_buffer_pool.reservations == [
+        {
+            "elements": 11 * 1 * 2,
+            "dtype": torch.float32,
+            "device": torch.device("cpu"),
+        }
+    ]
     assert model.model.moe_decode_weight_buffer_pool.reservations == [
         {
             "weight_elements": 3 * 2 * 6 * 4,

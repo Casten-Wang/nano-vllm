@@ -227,3 +227,6 @@ class Config:
         # actually schedule. Keep the checkpoint's architectural limit intact
         # while exposing the smaller runtime allocation bound.
         self.model_config.nanovllm_max_model_len = self.max_model_len
+        self.model_config.nanovllm_max_num_batched_tokens = (
+            self.max_num_batched_tokens
+        )
