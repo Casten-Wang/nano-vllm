@@ -42,9 +42,16 @@ MOE_DISPATCH = load_source_module(
     "qwen35_moe_dispatch_benchmark",
     "nanovllm/models/moe_dispatch.py",
 )
-KV_QUANT = load_source_module(
-    "qwen35_kv_quant_benchmark",
-    "nanovllm/layers/kv_cache_quant.py",
+_HELP_ONLY = __name__ == "__main__" and any(
+    argument in {"-h", "--help"} for argument in sys.argv[1:]
+)
+KV_QUANT = (
+    None
+    if _HELP_ONLY
+    else load_source_module(
+        "qwen35_kv_quant_benchmark",
+        "nanovllm/layers/kv_cache_quant.py",
+    )
 )
 SAMPLER = load_source_module(
     "qwen35_sampler_benchmark",
@@ -62,9 +69,13 @@ ROTARY = load_source_module(
     "qwen35_rotary_benchmark",
     "nanovllm/layers/rotary_embedding.py",
 )
-INT8_ATTENTION = load_source_module(
-    "qwen35_int8_attention_benchmark",
-    "nanovllm/layers/int8_fused_attention.py",
+INT8_ATTENTION = (
+    None
+    if _HELP_ONLY
+    else load_source_module(
+        "qwen35_int8_attention_benchmark",
+        "nanovllm/layers/int8_fused_attention.py",
+    )
 )
 FP8 = load_source_module(
     "qwen35_fp8_benchmark",

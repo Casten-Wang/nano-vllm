@@ -16,7 +16,6 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from nanovllm.benchmark_metadata import collect_benchmark_metadata
-from nanovllm.layers.gptq_w4a16 import gptq_w4a16_linear
 from nanovllm.models.qwen35_gptq import dequantize_gptq_int4
 
 
@@ -58,6 +57,8 @@ def main() -> None:
     args = parser.parse_args()
     if not torch.cuda.is_available():
         parser.error("CUDA is required")
+    from nanovllm.layers.gptq_w4a16 import gptq_w4a16_linear
+
     if (
         min(
             args.tokens,

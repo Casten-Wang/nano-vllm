@@ -5,7 +5,11 @@ from types import SimpleNamespace
 import sys
 import types
 
+import pytest
 import torch
+
+
+pytest.importorskip("triton", reason="attention kernel benchmark requires Triton")
 
 
 ROOT = Path(__file__).parents[1]

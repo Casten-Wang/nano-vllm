@@ -2,7 +2,11 @@ from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 import torch
+
+
+pytest.importorskip("triton", reason="Qwen3.5 kernel benchmark requires Triton")
 
 
 ROOT = Path(__file__).parents[1]

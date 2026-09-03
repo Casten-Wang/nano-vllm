@@ -217,6 +217,10 @@ class Qwen35GPTQExperts(nn.Module):
         expert_id: int,
     ) -> torch.Tensor:
         if self.backend == "triton":
+            if not inputs.is_cuda:
+                raise ValueError(
+                    "the Triton W4A16 backend requires CUDA tensors"
+                )
             from nanovllm.layers.gptq_w4a16 import gptq_w4a16_linear
 
             return gptq_w4a16_linear(
