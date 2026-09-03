@@ -280,6 +280,17 @@ def validate_memory_capacity(
         parameter_bytes = audit.get("local_parameter_bytes")
         if not isinstance(parameter_bytes, int) or parameter_bytes <= 0:
             raise ValueError(f"checkpoint audit has no TP={tp_size} parameter size")
+        runtime_model_bytes = audit.get(
+            "local_parameter_and_resident_runtime_bytes",
+            parameter_bytes,
+        )
+        if (
+            not isinstance(runtime_model_bytes, int)
+            or runtime_model_bytes < parameter_bytes
+        ):
+            raise ValueError(
+                f"checkpoint audit has invalid TP={tp_size} runtime model size"
+            )
         state_sizes = audit.get("state_bytes_per_sequence", {})
         if not all(
             isinstance(state_sizes.get(dtype), int)
@@ -409,7 +420,13 @@ def validate_memory_capacity(
                 pd_transfer_bytes_per_sequence_by_dtype.items()
             )
         }
-        required_bytes = parameter_bytes + state_bytes + rotary_bytes + kv_bytes + headroom_bytes
+        required_bytes = (
+            runtime_model_bytes
+            + state_bytes
+            + rotary_bytes
+            + kv_bytes
+            + headroom_bytes
+        )
         memory = memory_by_device[:tp_size]
         available_budgets = [
             max(
@@ -420,7 +437,9 @@ def validate_memory_capacity(
             for item in memory
         ]
         minimum_available_budget = min(available_budgets)
-        fixed_bytes = parameter_bytes + state_bytes + rotary_bytes + headroom_bytes
+        fixed_bytes = (
+            runtime_model_bytes + state_bytes + rotary_bytes + headroom_bytes
+        )
         limiting_rank = min(
             range(tp_size), key=available_budgets.__getitem__
         )
@@ -474,6 +493,9 @@ def validate_memory_capacity(
         ]
         results[f"tp{tp_size}"] = {
             "local_parameter_bytes": parameter_bytes,
+            "runtime_model_bytes": runtime_model_bytes,
+            "resident_runtime_overhead_bytes": runtime_model_bytes
+            - parameter_bytes,
             "max_state_bytes_per_rank": state_bytes,
             "state_bytes_per_rank_by_dtype": state_bytes_by_dtype,
             "rotary_cache_bytes_per_rank": rotary_bytes,

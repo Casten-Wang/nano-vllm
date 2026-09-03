@@ -493,6 +493,61 @@ def test_official_qwen35_gptq_tp1_capacity_rejects_512_slots_on_32gib():
     assert auto_capacity["effective_concurrent_sequences_at_workload_length"] == 46
 
 
+def test_memory_preflight_accounts_for_resident_fp8_runtime_storage():
+    report = {
+        "results": {
+            "tp1": {
+                "local_parameter_bytes": 600,
+                "local_parameter_and_resident_runtime_bytes": 800,
+                "model_max_position_embeddings": 16,
+                "rotary_cache_bytes_per_position": 0,
+                "kv_bytes_per_token_by_dtype": {"auto": 1},
+                "state_bytes_per_sequence": {"float32": 0, "model": 0},
+            }
+        }
+    }
+
+    result = MODULE.validate_memory_capacity(
+        report,
+        (1,),
+        [{"free": 1_200, "total": 1_200}],
+        0,
+        1,
+        1,
+        10,
+        1.0,
+    )["results"]["tp1"]
+
+    assert result["local_parameter_bytes"] == 600
+    assert result["runtime_model_bytes"] == 800
+    assert result["resident_runtime_overhead_bytes"] == 200
+    assert result["required_free_bytes_per_rank"] == 1_056
+    assert result["workload_budget_margin_bytes_by_rank"] == [144]
+
+
+def test_memory_preflight_rejects_invalid_resident_runtime_storage():
+    report = {
+        "results": {
+            "tp1": {
+                "local_parameter_bytes": 600,
+                "local_parameter_and_resident_runtime_bytes": 599,
+            }
+        }
+    }
+
+    with pytest.raises(ValueError, match="runtime model size"):
+        MODULE.validate_memory_capacity(
+            report,
+            (1,),
+            [{"free": 1_000, "total": 1_000}],
+            0,
+            1,
+            1,
+            10,
+            1.0,
+        )
+
+
 def test_case_command_is_eager_and_fully_identified():
     case = MODULE.BenchmarkCase(8, "model", "int8")
     command = MODULE.command_for_case(args(), case, repeat=2)

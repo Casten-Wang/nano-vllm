@@ -746,6 +746,48 @@ def project_native_fp8_parameter_storage(
     }
 
 
+def resident_fp8_runtime_storage(model, model_dtype_bytes: int) -> dict[str, int]:
+    """Account for resident expert parameters, scales, and shared workspaces."""
+
+    resident_stats = []
+    workspace_elements_by_pool: dict[int, int] = {}
+    for module in model.modules():
+        storage_stats = getattr(module, "resident_fp8_storage_stats", None)
+        if storage_stats is None:
+            continue
+        item = storage_stats()
+        if not item["total_bytes"]:
+            continue
+        resident_stats.append(item)
+        pool = getattr(module, "resident_weight_buffer_pool", None)
+        if pool is None:
+            raise ValueError("resident FP8 expert has no shared dequant workspace")
+        expert_count = int(module.gate_up_proj.shape[0])
+        if expert_count <= 0:
+            raise ValueError("resident FP8 expert count must be positive")
+        workspace_elements = max(
+            module.gate_up_proj.numel() // expert_count,
+            module.down_proj.numel() // expert_count,
+        )
+        pool_id = id(pool)
+        workspace_elements_by_pool[pool_id] = max(
+            workspace_elements_by_pool.get(pool_id, 0),
+            workspace_elements,
+        )
+    weight_bytes = sum(item["weight_bytes"] for item in resident_stats)
+    scale_bytes = sum(item["scale_bytes"] for item in resident_stats)
+    workspace_bytes = sum(workspace_elements_by_pool.values()) * model_dtype_bytes
+    return {
+        "layer_count": len(resident_stats),
+        "weight_bytes": weight_bytes,
+        "scale_bytes": scale_bytes,
+        "total_bytes": weight_bytes + scale_bytes,
+        "dequant_workspace_pool_count": len(workspace_elements_by_pool),
+        "dequant_workspace_bytes": workspace_bytes,
+        "total_runtime_bytes": weight_bytes + scale_bytes + workspace_bytes,
+    }
+
+
 def parse_tp_sizes(value: str) -> tuple[int, ...]:
     sizes = tuple(int(item.strip()) for item in value.split(",") if item.strip())
     if not sizes or any(size <= 0 for size in sizes):
@@ -906,26 +948,19 @@ def main() -> None:
                     )
                     result["checkpoint_loading"] = None
                 if quantization.format == "fp8_block":
-                    resident_stats = []
-                    for module in model.modules():
-                        storage_stats = getattr(
-                            module, "resident_fp8_storage_stats", None
-                        )
-                        if storage_stats is None:
-                            continue
-                        item = storage_stats()
-                        if item["total_bytes"]:
-                            resident_stats.append(item)
                     result["fp8_runtime_backend"] = args.fp8_runtime_backend
-                    result["resident_fp8_expert_storage"] = {
-                        "layer_count": len(resident_stats),
-                        "weight_bytes": sum(item["weight_bytes"] for item in resident_stats),
-                        "scale_bytes": sum(item["scale_bytes"] for item in resident_stats),
-                        "total_bytes": sum(item["total_bytes"] for item in resident_stats),
-                    }
+                    result["resident_fp8_expert_storage"] = (
+                        resident_fp8_runtime_storage(model, model_dtype_bytes)
+                    )
                     result["local_parameter_and_resident_scale_bytes"] = (
                         result["local_parameter_bytes"]
                         + result["resident_fp8_expert_storage"]["scale_bytes"]
+                    )
+                    result["local_parameter_and_resident_runtime_bytes"] = (
+                        result["local_parameter_and_resident_scale_bytes"]
+                        + result["resident_fp8_expert_storage"][
+                            "dequant_workspace_bytes"
+                        ]
                     )
                     result["fp8_loader_coverage"] = audit_fp8_loader_coverage(
                         model,
