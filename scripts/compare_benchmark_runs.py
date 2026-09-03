@@ -25,12 +25,18 @@ ENVIRONMENT_FIELDS = (
     "device",
     "device_capability",
     "cuda_device_count",
+    "cuda_devices",
     "torch_version",
     "cuda_version",
+    "nccl_version",
     "transformers_version",
     "triton_version",
     "flash_attn_version",
     "nvidia_smi_gpus",
+    "nvidia_smi_topology",
+    "cuda_visible_devices",
+    "cuda_device_order",
+    "nccl_environment",
 )
 
 OPTIMIZATION_FIELDS = (

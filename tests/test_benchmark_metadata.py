@@ -3,6 +3,7 @@ import json
 import os
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -183,15 +184,84 @@ class BenchmarkMetadataTest(unittest.TestCase):
             "python_version",
             "torch_version",
             "cuda_version",
+            "cuda_devices",
+            "nccl_version",
             "transformers_version",
             "triton_version",
             "flash_attn_version",
             "nvidia_smi_gpus",
+            "nvidia_smi_topology",
+            "cuda_visible_devices",
+            "cuda_device_order",
+            "nccl_environment",
         ):
             self.assertIn(field, result)
         self.assertFalse(result["cuda_available"])
         self.assertEqual(result["cuda_device_count"], 0)
+        self.assertEqual(result["cuda_devices"], [])
         self.assertIsNone(result["device_capability"])
+        self.assertIsNone(result["nccl_version"])
+
+    def test_metadata_records_every_gpu_topology_and_collective_runtime(self):
+        class FakeVersion:
+            cuda = "12.8"
+
+        class FakeNccl:
+            @staticmethod
+            def version():
+                return (2, 27, 3)
+
+        class FakeCuda:
+            nccl = FakeNccl()
+
+            @staticmethod
+            def is_available():
+                return True
+
+            @staticmethod
+            def device_count():
+                return 2
+
+            @staticmethod
+            def get_device_name(index=0):
+                return f"GPU-{index}"
+
+            @staticmethod
+            def get_device_capability(index=0):
+                return (9, index)
+
+        class FakeTorch:
+            __version__ = "test"
+            version = FakeVersion()
+            cuda = FakeCuda()
+
+        with (
+            patch.object(module, "_nvidia_smi_query", return_value=["gpu-row"]),
+            patch.object(module, "_nvidia_smi_topology", return_value="topology"),
+            patch.dict(
+                os.environ,
+                {
+                    "CUDA_VISIBLE_DEVICES": "3,1",
+                    "CUDA_DEVICE_ORDER": "PCI_BUS_ID",
+                    "NCCL_ALGO": "Ring",
+                },
+                clear=False,
+            ),
+        ):
+            result = module.collect_benchmark_metadata(FakeTorch)
+
+        self.assertEqual(
+            result["cuda_devices"],
+            [
+                {"index": 0, "name": "GPU-0", "capability": [9, 0]},
+                {"index": 1, "name": "GPU-1", "capability": [9, 1]},
+            ],
+        )
+        self.assertEqual(result["nccl_version"], [2, 27, 3])
+        self.assertEqual(result["nvidia_smi_topology"], "topology")
+        self.assertEqual(result["cuda_visible_devices"], "3,1")
+        self.assertEqual(result["cuda_device_order"], "PCI_BUS_ID")
+        self.assertEqual(result["nccl_environment"]["NCCL_ALGO"], "Ring")
 
     def test_execution_validation_requires_observed_paths(self):
         result = module.validate_execution_stats(

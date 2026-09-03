@@ -46,8 +46,13 @@ def result(
         "device": device,
         "device_capability": [9, 0],
         "cuda_device_count": 8,
+        "cuda_devices": [
+            {"index": rank, "name": device, "capability": [9, 0]}
+            for rank in range(8)
+        ],
         "torch_version": torch_version,
         "cuda_version": "12.8",
+        "nccl_version": [2, 27, 3],
         "transformers_version": "4.56.0",
         "triton_version": "3.4.0",
         "flash_attn_version": "2.8.3",
@@ -55,6 +60,10 @@ def result(
             f"{rank}, NVIDIA H100 80GB HBM3, 570.00, 81559"
             for rank in range(8)
         ],
+        "nvidia_smi_topology": "GPU0 GPU1 NV18",
+        "cuda_visible_devices": "0,1,2,3,4,5,6,7",
+        "cuda_device_order": "PCI_BUS_ID",
+        "nccl_environment": {"NCCL_ALGO": "Ring"},
         "tensor_parallel_size": 4,
         "recurrent_state_dtype": "float32",
         "qwen35_moe_decode_backend": "sorted",

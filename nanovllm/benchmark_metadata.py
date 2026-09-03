@@ -202,6 +202,26 @@ def _nvidia_smi_query() -> list[str]:
     return [line.strip() for line in output.splitlines() if line.strip()]
 
 
+def _nvidia_smi_topology() -> str | None:
+    try:
+        output = subprocess.check_output(
+            ["nvidia-smi", "topo", "-m"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+    except Exception:
+        return None
+    return output or None
+
+
+def _cuda_collective_version(torch_module) -> list[int] | int | str | None:
+    try:
+        version = torch_module.cuda.nccl.version()
+    except Exception:
+        return None
+    return _json_safe(version)
+
+
 def kv_cache_storage_metadata(model_runner) -> dict:
     """Return the actual allocated KV data/scale storage for one runner."""
 
@@ -258,6 +278,7 @@ def collect_benchmark_metadata(torch_module=None) -> dict:
     device = None
     device_capability = None
     device_count = 0
+    cuda_devices = []
     cuda_version = None
     torch_version = None
     if torch_module is not None:
@@ -267,6 +288,16 @@ def collect_benchmark_metadata(torch_module=None) -> dict:
             device = torch_module.cuda.get_device_name()
             device_capability = list(torch_module.cuda.get_device_capability())
             device_count = torch_module.cuda.device_count()
+            cuda_devices = [
+                {
+                    "index": index,
+                    "name": torch_module.cuda.get_device_name(index),
+                    "capability": list(
+                        torch_module.cuda.get_device_capability(index)
+                    ),
+                }
+                for index in range(device_count)
+            ]
 
     return {
         "commit": git_value(["rev-parse", "HEAD"]),
@@ -279,13 +310,32 @@ def collect_benchmark_metadata(torch_module=None) -> dict:
         "device": device,
         "device_capability": device_capability,
         "cuda_device_count": device_count,
+        "cuda_devices": cuda_devices,
         "cuda_available": cuda_available,
         "torch_version": torch_version,
         "cuda_version": cuda_version,
+        "nccl_version": (
+            _cuda_collective_version(torch_module)
+            if cuda_available
+            else None
+        ),
         "transformers_version": _module_version("transformers"),
         "triton_version": _module_version("triton"),
         "flash_attn_version": _module_version("flash_attn"),
         "nvidia_smi_gpus": _nvidia_smi_query(),
+        "nvidia_smi_topology": _nvidia_smi_topology(),
+        "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
+        "cuda_device_order": os.environ.get("CUDA_DEVICE_ORDER"),
+        "nccl_environment": {
+            name: os.environ[name]
+            for name in (
+                "NCCL_ALGO",
+                "NCCL_PROTO",
+                "NCCL_P2P_DISABLE",
+                "NCCL_IB_DISABLE",
+            )
+            if name in os.environ
+        },
     }
 
 
