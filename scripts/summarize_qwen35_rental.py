@@ -45,6 +45,7 @@ BUFFER_REUSE_MAX_ABS_ERROR = 0.05
 MIXED_MOE_MIN_SPEEDUP = 1.0
 MIXED_MOE_MAX_PEAK_EXTRA_MIB = 64.0
 MIXED_MOE_MAX_ABS_ERROR = 0.05
+PD_INSTALL_MAX_LATENCY_RATIO = 1.25
 KVCACHE_BLOCK_SIZE = 256
 OFFICIAL_CHECKPOINT_REPO = "Qwen/Qwen3.5-35B-A3B"
 OFFICIAL_SKIPPED_WEIGHT_GROUPS = {"model.visual": 333, "mtp": 785}
@@ -1588,9 +1589,32 @@ def summarize_pd_transfer(
     profile = result.get("profile", {})
     workload = result.get("workload", {})
     measurements = result.get("results", {})
+    cuda_install = result.get("cuda_install", {})
     samples = measurements.get("latency_ms_samples", [])
     repeats = workload.get("repeats")
     components = workload.get("components_bytes")
+    reference_install = cuda_install.get("reference_full_payload_staging", {})
+    candidate_install = cuda_install.get("candidate_direct_block_install", {})
+    reference_install_samples = reference_install.get("latency_ms_samples", [])
+    candidate_install_samples = candidate_install.get("latency_ms_samples", [])
+    install_valid = (
+        cuda_install.get("enabled") is True
+        and cuda_install.get("valid") is True
+        and cuda_install.get("measured_on_cuda") is True
+        and cuda_install.get("avoids_full_payload_device_conversion") is True
+        and isinstance(repeats, int)
+        and len(reference_install_samples) == repeats
+        and len(candidate_install_samples) == repeats
+        and all(
+            isinstance(value, (int, float))
+            and math.isfinite(value)
+            and value > 0
+            for value in (*reference_install_samples, *candidate_install_samples)
+        )
+        and cuda_install.get("peak_device_bytes_reduction", 0) > 0
+        and 0 < cuda_install.get("latency_ratio_vs_reference", math.inf)
+        <= PD_INSTALL_MAX_LATENCY_RATIO
+    )
     valid = (
         result.get("schema_version") == 1
         and result.get("scope")
@@ -1621,6 +1645,7 @@ def summarize_pd_transfer(
         and workload.get("receiver_ack_bytes") == 1
         and workload.get("payload_frame_bytes_sent", 0)
         > expected_components["total"]
+        and install_valid
     )
     return {
         "valid": valid,
@@ -1632,6 +1657,16 @@ def summarize_pd_transfer(
         "effective_payload_gib_s_p50": measurements.get(
             "effective_payload_gib_s_p50"
         ),
+        "cuda_install": {
+            "valid": install_valid,
+            "peak_device_bytes_reduction": cuda_install.get(
+                "peak_device_bytes_reduction"
+            ),
+            "latency_ratio_vs_reference": cuda_install.get(
+                "latency_ratio_vs_reference"
+            ),
+            "max_latency_ratio": PD_INSTALL_MAX_LATENCY_RATIO,
+        },
         "limitations": result.get("limitations", []),
     }
 

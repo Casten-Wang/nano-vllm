@@ -36,6 +36,16 @@ def test_cache_transfer_benchmark_records_raw_samples_and_limitations():
     assert result["workload"]["payload_frame_bytes_sent"] > 6144
     assert result["workload"]["receiver_ack_bytes"] == 1
     assert result["workload"]["framing_overhead_bytes"] > 0
+    if torch.cuda.is_available():
+        assert result["cuda_install"]["enabled"]
+        assert result["cuda_install"]["valid"]
+        assert result["cuda_install"]["measured_on_cuda"]
+    else:
+        assert result["cuda_install"] == {
+            "enabled": False,
+            "valid": True,
+            "reason": "CUDA is unavailable",
+        }
     assert any("not cross-node" in item for item in result["limitations"])
 
 

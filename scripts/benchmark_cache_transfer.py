@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from nanovllm.engine.cache_transfer import RankCacheTransfer
+from nanovllm.engine.cache_transfer import RankCacheTransfer, import_rank_cache
 from nanovllm.engine.cache_transfer_wire import (
     RankCacheReceiver,
     send_rank_cache_to_endpoint,
@@ -67,9 +67,20 @@ def make_payload(
         raise ValueError("INT8 KV benchmark requires scale bytes")
     if kv_dtype is not torch.int8 and scale_bytes:
         raise ValueError("floating-point KV benchmark cannot include scales")
-    kv_flat = _allocate_bytes(kv_bytes, kv_dtype, multiple=2)
-    kv_blocks = kv_flat.reshape(2, 1, 1, 1, 1, -1)
-    kv_scales = _allocate_bytes(scale_bytes, torch.float16) if scale_bytes else None
+    if scale_bytes:
+        scale_flat = _allocate_bytes(scale_bytes, torch.float16, multiple=2)
+        kv_flat = _allocate_bytes(
+            kv_bytes,
+            kv_dtype,
+            multiple=scale_flat.numel(),
+        )
+        head_dim = kv_flat.numel() // scale_flat.numel()
+        kv_blocks = kv_flat.reshape(2, 1, 1, 1, -1, head_dim)
+        kv_scales = scale_flat.reshape(*kv_blocks.shape[:-1])
+    else:
+        kv_flat = _allocate_bytes(kv_bytes, kv_dtype, multiple=2)
+        kv_blocks = kv_flat.reshape(2, 1, 1, 1, 1, -1)
+        kv_scales = None
     recurrent = (
         (_allocate_bytes(recurrent_bytes, torch.float32),)
         if recurrent_bytes
@@ -207,6 +218,118 @@ def transfer_once(payload: RankCacheTransfer, timeout_s: float) -> tuple[float, 
     return elapsed_ms, wire_bytes
 
 
+def benchmark_cuda_install(
+    payload: RankCacheTransfer,
+    *,
+    warmup: int,
+    repeats: int,
+) -> dict:
+    """Compare full-payload staging with bounded direct cache installation."""
+
+    if not torch.cuda.is_available():
+        return {
+            "enabled": False,
+            "valid": True,
+            "reason": "CUDA is unavailable",
+        }
+    device = torch.device("cuda")
+    destination_kv = torch.empty_like(payload.kv_blocks, device=device)
+    destination_scales = (
+        torch.empty_like(payload.kv_scales, device=device)
+        if payload.kv_scales is not None
+        else None
+    )
+    destination_recurrent = tuple(
+        torch.empty_like(tensor, device=device)
+        for tensor in payload.recurrent_states
+    )
+    destination_convolution = tuple(
+        torch.empty_like(tensor, device=device)
+        for tensor in payload.convolution_states
+    )
+    index = torch.tensor([0], dtype=torch.int64, device=device)
+
+    def reference() -> None:
+        destination_kv.index_copy_(
+            2,
+            index,
+            payload.kv_blocks.to(device),
+        )
+        if destination_scales is not None:
+            assert payload.kv_scales is not None
+            destination_scales.index_copy_(
+                2,
+                index,
+                payload.kv_scales.to(device),
+            )
+        for source, destination in zip(
+            (*payload.recurrent_states, *payload.convolution_states),
+            (*destination_recurrent, *destination_convolution),
+        ):
+            destination.copy_(source.to(device))
+
+    def candidate() -> None:
+        import_rank_cache(
+            payload,
+            destination_kv,
+            destination_scales,
+            [0],
+            transfer_id=payload.transfer_id,
+            tensor_parallel_rank=payload.tensor_parallel_rank,
+            tensor_parallel_size=payload.tensor_parallel_size,
+            block_size=payload.block_size,
+            recurrent_states=destination_recurrent,
+            convolution_states=destination_convolution,
+        )
+
+    def measure(operation) -> dict:
+        for _ in range(warmup):
+            operation()
+        torch.cuda.synchronize()
+        latency = []
+        peaks = []
+        for _ in range(repeats):
+            torch.cuda.reset_peak_memory_stats(device)
+            baseline = torch.cuda.memory_allocated(device)
+            start = torch.cuda.Event(enable_timing=True)
+            end = torch.cuda.Event(enable_timing=True)
+            start.record()
+            operation()
+            end.record()
+            torch.cuda.synchronize()
+            latency.append(start.elapsed_time(end))
+            peaks.append(torch.cuda.max_memory_allocated(device) - baseline)
+        return {
+            "latency_ms_samples": latency,
+            "latency_ms_p50": median(latency),
+            "peak_extra_device_bytes_samples": peaks,
+            "peak_extra_device_bytes_max": max(peaks),
+        }
+
+    reference_result = measure(reference)
+    candidate_result = measure(candidate)
+    torch.testing.assert_close(destination_kv.cpu(), payload.kv_blocks)
+    if destination_scales is not None:
+        assert payload.kv_scales is not None
+        torch.testing.assert_close(destination_scales.cpu(), payload.kv_scales)
+    return {
+        "enabled": True,
+        "valid": True,
+        "measured_on_cuda": True,
+        "avoids_full_payload_device_conversion": True,
+        "reference_full_payload_staging": reference_result,
+        "candidate_direct_block_install": candidate_result,
+        "peak_device_bytes_reduction": (
+            reference_result["peak_extra_device_bytes_max"]
+            - candidate_result["peak_extra_device_bytes_max"]
+        ),
+        "latency_ratio_vs_reference": (
+            candidate_result["latency_ms_p50"]
+            / reference_result["latency_ms_p50"]
+        ),
+    }
+
+
 def run_benchmark(
     payload: RankCacheTransfer,
     *,
@@ -257,6 +380,11 @@ def run_benchmark(
             "process_peak_rss_before_bytes": peak_before,
             "process_peak_rss_after_bytes": _peak_rss_bytes(),
         },
+        "cuda_install": benchmark_cuda_install(
+            payload,
+            warmup=warmup,
+            repeats=repeats,
+        ),
         "limitations": [
             "loopback TCP is not cross-node network evidence",
             "source tensors are already on CPU, so GPU-to-host staging is excluded",

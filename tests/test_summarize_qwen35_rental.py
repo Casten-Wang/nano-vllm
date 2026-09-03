@@ -1416,6 +1416,20 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
                     "latency_ms_p95": 1.0,
                     "effective_payload_gib_s_p50": 1.0,
                 },
+                "cuda_install": {
+                    "enabled": True,
+                    "valid": True,
+                    "measured_on_cuda": True,
+                    "avoids_full_payload_device_conversion": True,
+                    "reference_full_payload_staging": {
+                        "latency_ms_samples": [1.0] * 10,
+                    },
+                    "candidate_direct_block_install": {
+                        "latency_ms_samples": [1.1] * 10,
+                    },
+                    "peak_device_bytes_reduction": components["total"],
+                    "latency_ratio_vs_reference": 1.1,
+                },
                 "limitations": ["loopback TCP is not cross-node network evidence"],
             },
         )
@@ -1486,8 +1500,21 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     assert report["evidence"]["pd_export_memory_evidence"]
     assert report["pd_export"]["by_tp"]["tp4"]["int8-model"]["valid"]
     assert report["pd_transfer"]["by_tp"]["tp4"]["int8-model"]["valid"]
+    install = report["pd_transfer"]["by_tp"]["tp4"]["int8-model"][
+        "cuda_install"
+    ]
+    assert install["valid"]
+    assert install["peak_device_bytes_reduction"] == 5_000
+    assert install["latency_ratio_vs_reference"] == 1.1
     transfer_path = tmp_path / "pd_transfer/tp4/int8-model.json"
     transfer_result = json.loads(transfer_path.read_text())
+    transfer_result["cuda_install"]["latency_ratio_vs_reference"] = 1.3
+    write(transfer_path, transfer_result)
+    slow_install_report = MODULE.summarize(tmp_path, run_id)
+    assert not slow_install_report["evidence"]["pd_transfer_baseline_valid"]
+    assert not slow_install_report["valid"]
+    transfer_result["cuda_install"]["latency_ratio_vs_reference"] = 1.1
+    write(transfer_path, transfer_result)
     transfer_result["workload"]["components_bytes"]["kv"] += 1
     write(transfer_path, transfer_result)
     invalid_transfer_report = MODULE.summarize(tmp_path, run_id)
