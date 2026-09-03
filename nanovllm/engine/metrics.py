@@ -299,6 +299,16 @@ class EngineMetrics:
         self.remote_prefill_send_poll_calls += 1
         self.remote_prefill_send_requests_polled += request_count
 
+    def record_remote_prefill_send_staging_released(self, staged_bytes: int) -> None:
+        """Account for host staging released before the receiver ACK arrives."""
+
+        if (
+            staged_bytes < 0
+            or staged_bytes > self.active_remote_prefill_send_staged_bytes
+        ):
+            raise ValueError("remote prefill released staged bytes are invalid")
+        self.active_remote_prefill_send_staged_bytes -= staged_bytes
+
     def record_remote_prefill_send_finished(
         self,
         elapsed: float,

@@ -134,7 +134,7 @@ def _validate_rank_send_polls(
         for transfer_id, status in sends.items():
             if (
                 not isinstance(status, dict)
-                or not set(status).issubset({"state", "error"})
+                or not set(status).issubset({"state", "error", "staged_bytes"})
             ):
                 raise RuntimeError("cache send batch status must be a dictionary")
             by_transfer[transfer_id].append({"rank": rank, **status})
@@ -1030,12 +1030,14 @@ class LLMEngine:
             raise ValueError("cache send id is not active")
         states = {}
         failures = []
+        retained_staged_bytes = 0
         try:
             for result in rank_results:
                 if not isinstance(result, dict):
                     raise RuntimeError("cache send poll result must be a dictionary")
                 rank = result.get("rank")
                 state = result.get("state")
+                staged_bytes = result.get("staged_bytes")
                 if (
                     not isinstance(rank, int)
                     or isinstance(rank, bool)
@@ -1045,11 +1047,34 @@ class LLMEngine:
                     raise RuntimeError("cache send poll result has an invalid rank")
                 if state not in {"sending", "ready", "failed"}:
                     raise RuntimeError("cache send poll result has an invalid state")
+                if (
+                    not isinstance(staged_bytes, int)
+                    or isinstance(staged_bytes, bool)
+                    or staged_bytes < 0
+                    or (state in {"ready", "failed"} and staged_bytes != 0)
+                ):
+                    raise RuntimeError(
+                        "cache send poll result has invalid staged bytes"
+                    )
                 states[rank] = state
+                retained_staged_bytes += staged_bytes
                 if state == "failed":
                     failures.append(f"rank {rank}: {result.get('error', 'unknown error')}")
             if set(states) != set(range(self.config.tensor_parallel_size)):
                 raise RuntimeError("cache send poll results are incomplete")
+            previous_staged_bytes = self._remote_prefill_send_staged_bytes[
+                transfer_id
+            ]
+            if retained_staged_bytes > previous_staged_bytes:
+                raise RuntimeError("cache send staged bytes increased while active")
+            released_staged_bytes = previous_staged_bytes - retained_staged_bytes
+            if released_staged_bytes:
+                self.metrics.record_remote_prefill_send_staging_released(
+                    released_staged_bytes
+                )
+                self._remote_prefill_send_staged_bytes[
+                    transfer_id
+                ] = retained_staged_bytes
             if failures:
                 raise RuntimeError("; ".join(failures))
             if any(state == "sending" for state in states.values()):

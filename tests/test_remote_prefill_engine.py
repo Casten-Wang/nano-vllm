@@ -30,7 +30,7 @@ def make_engine(*, tensor_parallel_size=1):
     engine.config = config
     engine.scheduler = Scheduler(config)
     async_state = {"value": "receiving", "error": None}
-    send_state = {"value": "sending", "error": None}
+    send_state = {"value": "sending", "error": None, "staged_bytes": None}
 
     def rank_results(method_name, *args):
         if method_name == "start_sequence_cache_receive":
@@ -99,6 +99,11 @@ def make_engine(*, tensor_parallel_size=1):
                 {
                     "rank": rank,
                     "state": send_state["value"],
+                    "staged_bytes": (
+                        send_state["staged_bytes"]
+                        if send_state["staged_bytes"] is not None
+                        else 100 + rank if send_state["value"] == "sending" else 0
+                    ),
                     **(
                         {"error": send_state["error"]}
                         if send_state["error"] is not None
@@ -115,6 +120,13 @@ def make_engine(*, tensor_parallel_size=1):
                     "sends": {
                         transfer_id: {
                             "state": send_state["value"],
+                            "staged_bytes": (
+                                send_state["staged_bytes"]
+                                if send_state["staged_bytes"] is not None
+                                else 100 + rank
+                                if send_state["value"] == "sending"
+                                else 0
+                            ),
                             **(
                                 {"error": send_state["error"]}
                                 if send_state["error"] is not None
@@ -569,6 +581,28 @@ def test_async_send_pauses_decode_until_every_rank_acknowledges():
     assert metrics["peak_remote_prefill_send_staged_bytes"] == 201
     assert metrics["active_remote_prefill_send_staged_bytes"] == 0
     assert metrics["remote_prefill_sent_bytes"] == 2
+
+
+def test_async_send_releases_staging_budget_before_receiver_acknowledges():
+    engine = make_engine(tensor_parallel_size=2)
+    seq = _prepare_remote_prefill_source(engine, 1)
+    engine.start_remote_prefill_send(
+        seq.seq_id,
+        "request/attempt-1",
+        [("127.0.0.1", 20001), ("127.0.0.1", 20002)],
+    )
+    engine._test_send_state["staged_bytes"] = 0
+
+    assert engine.poll_remote_prefill_send("request/attempt-1") is None
+    assert engine._remote_prefill_send_staged_bytes["request/attempt-1"] == 0
+    assert engine.remote_prefill_capacity_snapshot()["staging_bytes_used"] == 0
+    assert (
+        engine.metrics.to_dict()["active_remote_prefill_send_staged_bytes"] == 0
+    )
+    assert seq.status is SequenceStatus.TRANSFERRING
+
+    engine._test_send_state["value"] = "ready"
+    assert engine.poll_remote_prefill_send("request/attempt-1") == seq.seq_id
 
 
 def test_async_send_failure_restores_source_at_original_running_position():

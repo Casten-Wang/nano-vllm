@@ -225,10 +225,12 @@ class EngineMetricsTest(unittest.TestCase):
         metrics.record_remote_prefill_send_started(100)
         metrics.record_remote_prefill_send_started(60)
 
+        metrics.record_remote_prefill_send_staging_released(40)
+
         metrics.record_remote_prefill_send_finished(
             0.2,
             outcome="committed",
-            staged_bytes=100,
+            staged_bytes=60,
             sent_bytes=120,
         )
         metrics.record_remote_prefill_send_finished(

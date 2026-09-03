@@ -1343,7 +1343,11 @@ class ModelRunner:
         if send is None:
             raise ValueError("cache send id is not active")
         state, error = send.poll()
-        result = {"rank": self.rank, "state": state}
+        result = {
+            "rank": self.rank,
+            "state": state,
+            "staged_bytes": send.staged_bytes,
+        }
         if error is not None:
             result["error"] = error
         return result

@@ -425,6 +425,7 @@ class PendingRankCacheSend:
         self._host = host
         self._port = port
         self._payload = payload
+        self._staged_bytes = payload.nbytes
         self._deadline = monotonic() + timeout_s
         self._lock = Lock()
         self._connection: socket.socket | None = None
@@ -464,7 +465,15 @@ class PendingRankCacheSend:
             connection.settimeout(
                 max(self._deadline - monotonic(), 0.001)
             )
-            sent_bytes = send_rank_cache_transfer(connection, self._payload)
+            with self._lock:
+                payload = self._payload
+            if payload is None:
+                return
+            sent_bytes = send_rank_cache_transfer(connection, payload)
+            payload = None
+            with self._lock:
+                self._payload = None
+                self._staged_bytes = 0
             acknowledgement = _recv_bytes(connection, 1)
             if acknowledgement != _TRANSFER_ACK:
                 raise RuntimeError("cache transfer receiver rejected the payload")
@@ -477,6 +486,7 @@ class PendingRankCacheSend:
                 if not self._terminal:
                     self._error = exc
                     self._payload = None
+                    self._staged_bytes = 0
         finally:
             if connection is not None:
                 connection.close()
@@ -496,8 +506,16 @@ class PendingRankCacheSend:
                     "cache transfer send deadline expired"
                 )
                 self._payload = None
+                self._staged_bytes = 0
                 return "failed", str(self._error)
             return "sending", None
+
+    @property
+    def staged_bytes(self) -> int:
+        """Return host payload bytes still retained by the sender."""
+
+        with self._lock:
+            return self._staged_bytes
 
     def result(self) -> int:
         with self._lock:
@@ -517,6 +535,7 @@ class PendingRankCacheSend:
             connection = self._connection
             self._connection = None
             self._payload = None
+            self._staged_bytes = 0
         if connection is not None:
             connection.close()
 

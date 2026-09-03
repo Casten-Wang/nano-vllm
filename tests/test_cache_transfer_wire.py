@@ -500,14 +500,16 @@ def test_model_runner_async_send_waits_for_receiver_ack():
     assert source.poll_sequence_cache_send(payload.transfer_id) == {
         "rank": 0,
         "state": "sending",
+        "staged_bytes": 0,
     }
+    assert source._pending_cache_sends[payload.transfer_id].staged_bytes == 0
 
     receiver.finish(accepted=True)
     send_poll = source.poll_sequence_cache_send(payload.transfer_id)
     while send_poll["state"] == "sending" and monotonic() < deadline:
         sleep(0.001)
         send_poll = source.poll_sequence_cache_send(payload.transfer_id)
-    assert send_poll == {"rank": 0, "state": "ready"}
+    assert send_poll == {"rank": 0, "state": "ready", "staged_bytes": 0}
     result = source.finish_sequence_cache_send(payload.transfer_id)
     assert result["rank"] == 0
     assert result["sent_bytes"] > 0
@@ -518,15 +520,21 @@ def test_model_runner_batches_send_states_in_one_result():
     runner = object.__new__(ModelRunner)
     runner.rank = 2
     runner._pending_cache_sends = {
-        "ready": SimpleNamespace(poll=lambda: ("ready", None)),
-        "failed": SimpleNamespace(poll=lambda: ("failed", "receiver rejected")),
+        "ready": SimpleNamespace(poll=lambda: ("ready", None), staged_bytes=0),
+        "failed": SimpleNamespace(
+            poll=lambda: ("failed", "receiver rejected"), staged_bytes=0
+        ),
     }
 
     assert runner.poll_sequence_cache_sends(["ready", "failed"]) == {
         "rank": 2,
         "sends": {
-            "ready": {"state": "ready"},
-            "failed": {"state": "failed", "error": "receiver rejected"},
+            "ready": {"state": "ready", "staged_bytes": 0},
+            "failed": {
+                "state": "failed",
+                "staged_bytes": 0,
+                "error": "receiver rejected",
+            },
         },
     }
 
