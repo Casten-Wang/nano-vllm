@@ -43,12 +43,87 @@ def test_block_fp8_dequantization_handles_partial_edge_blocks():
     torch.testing.assert_close(result, expected)
 
 
+def test_block_fp8_dequantization_does_not_expand_a_full_scale_tensor(monkeypatch):
+    weight = torch.ones((5, 7), dtype=torch.float8_e4m3fn)
+    scale = torch.arange(1, 7, dtype=torch.float32).reshape(2, 3)
+    allocations = []
+    repeat_interleave = torch.repeat_interleave
+
+    def record_repeat_interleave(input, repeats, *args, **kwargs):
+        result = repeat_interleave(input, repeats, *args, **kwargs)
+        allocations.append(result.numel())
+        return result
+
+    monkeypatch.setattr(torch, "repeat_interleave", record_repeat_interleave)
+    result = dequantize_fp8_block_weight(
+        weight,
+        scale,
+        (3, 3),
+        output_dtype=torch.float32,
+    )
+
+    expected_scale = torch.tensor(
+        [
+            [1, 1, 1, 2, 2, 2, 3],
+            [1, 1, 1, 2, 2, 2, 3],
+            [1, 1, 1, 2, 2, 2, 3],
+            [4, 4, 4, 5, 5, 5, 6],
+            [4, 4, 4, 5, 5, 5, 6],
+        ],
+        dtype=torch.float32,
+    )
+    torch.testing.assert_close(result, expected_scale)
+    assert allocations
+    assert max(allocations) <= 9
+    assert max(allocations) < weight.numel()
+
+
+def test_block_fp8_dequantization_broadcasts_exact_blocks_without_expansion(
+    monkeypatch,
+):
+    weight = torch.ones((4, 6), dtype=torch.float8_e4m3fn)
+    scale = torch.tensor([[2.0, 3.0], [4.0, 5.0]])
+
+    def reject_repeat_interleave(*_args, **_kwargs):
+        raise AssertionError("exact block grids must not expand scales")
+
+    monkeypatch.setattr(torch, "repeat_interleave", reject_repeat_interleave)
+    result = dequantize_fp8_block_weight(
+        weight,
+        scale,
+        (2, 3),
+        output_dtype=torch.float32,
+    )
+
+    expected = torch.tensor(
+        [
+            [2, 2, 2, 3, 3, 3],
+            [2, 2, 2, 3, 3, 3],
+            [4, 4, 4, 5, 5, 5],
+            [4, 4, 4, 5, 5, 5],
+        ],
+        dtype=torch.float32,
+    )
+    torch.testing.assert_close(result, expected)
+
+
 def test_block_fp8_dequantization_rejects_wrong_scale_grid():
     with pytest.raises(ValueError, match="scale shape"):
         dequantize_fp8_block_weight(
             torch.ones(3, 3, dtype=torch.float8_e4m3fn),
             torch.ones(1, 1),
             (2, 2),
+            output_dtype=torch.float32,
+        )
+
+
+@pytest.mark.parametrize("block_size", [(0, 2), (2, 0), (-1, 2)])
+def test_block_fp8_dequantization_rejects_nonpositive_blocks(block_size):
+    with pytest.raises(ValueError, match="positive"):
+        dequantize_fp8_block_weight(
+            torch.ones(3, 3, dtype=torch.float8_e4m3fn),
+            torch.ones(2, 2),
+            block_size,
             output_dtype=torch.float32,
         )
 

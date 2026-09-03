@@ -39,6 +39,8 @@ def dequantize_fp8_block_weight(
     if weight.ndim != 2 or scale.ndim != 2:
         raise ValueError("block-FP8 weight and scale must both be rank 2")
     block_rows, block_columns = block_size
+    if block_rows <= 0 or block_columns <= 0:
+        raise ValueError("block-FP8 block dimensions must both be positive")
     expected_scale_shape = (
         ceil(weight.shape[0] / block_rows),
         ceil(weight.shape[1] / block_columns),
@@ -48,9 +50,31 @@ def dequantize_fp8_block_weight(
             f"invalid block-FP8 scale shape: {tuple(scale.shape)}; "
             f"expected {expected_scale_shape}"
         )
-    expanded_scale = scale.repeat_interleave(block_rows, 0).repeat_interleave(
-        block_columns,
-        1,
-    )
-    expanded_scale = expanded_scale[: weight.shape[0], : weight.shape[1]]
-    return weight.to(output_dtype).mul_(expanded_scale.to(output_dtype))
+    output = weight.to(output_dtype)
+    scale = scale.to(output_dtype)
+    rows, columns = weight.shape
+    if rows % block_rows == 0 and columns % block_columns == 0:
+        # Keep the compact scale grid and broadcast it over a block view.  The
+        # previous repeat_interleave implementation materialized another full
+        # [rows, columns] tensor, temporarily adding one model-dtype copy of
+        # every FP8 weight during CPU checkpoint loading.
+        blocked_output = output.view(
+            rows // block_rows,
+            block_rows,
+            columns // block_columns,
+            block_columns,
+        )
+        blocked_output.mul_(scale[:, None, :, None])
+        return output
+
+    # Partial edge blocks cannot be represented by one regular block view.
+    # Expand only one row of the scale grid at a time, bounding the temporary
+    # to `columns` elements instead of `rows * columns` elements.
+    for block_row, row_start in enumerate(range(0, rows, block_rows)):
+        row_end = min(row_start + block_rows, rows)
+        row_scale = torch.repeat_interleave(
+            scale[block_row],
+            block_columns,
+        )[:columns]
+        output[row_start:row_end].mul_(row_scale)
+    return output
