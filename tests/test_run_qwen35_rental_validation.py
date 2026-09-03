@@ -301,6 +301,27 @@ def test_optional_fp8_checkpoint_adds_reference_execution_matrix():
     )
 
 
+def test_optional_fp8_checkpoint_can_validate_resident_storage_backend():
+    arguments = args()
+    arguments.fp8_model = "/models/qwen35-fp8"
+    arguments.fp8_runtime_backend = "resident"
+
+    commands = dict(MODULE.commands(arguments))
+
+    audit = commands["official-fp8-checkpoint-audit"]
+    assert audit[audit.index("--fp8-runtime-backend") + 1] == "resident"
+    for name in (
+        "fp8-preflight",
+        "fp8-performance-matrix",
+        "fp8-quality-matrix",
+    ):
+        command = commands[name]
+        assert command[command.index("--weight-quant-backend") + 1] == "resident"
+    assert MODULE.manifest_plan(arguments, list(commands.items()))[
+        "fp8_runtime_backend"
+    ] == "resident"
+
+
 def test_fp8_execution_identity_is_part_of_resume_manifest(tmp_path):
     arguments = args()
     arguments.fp8_model = str(tmp_path / "qwen35-fp8")

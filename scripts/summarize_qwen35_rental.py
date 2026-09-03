@@ -307,6 +307,7 @@ def summarize_optional_fp8_audit(run_dir: Path, run_id: str | None = None) -> di
     )
     performance_runs = performance.get("runs", [])
     quality_cases = quality.get("cases", [])
+    runtime_backend = audit.get("fp8_runtime_backend", "reference")
     tp_names = {
         f"tp{row.get('tensor_parallel_size')}" for row in performance_runs
     }
@@ -330,8 +331,8 @@ def summarize_optional_fp8_audit(run_dir: Path, run_id: str | None = None) -> di
         and performance.get("all_generation_valid") is True
         and performance.get("all_repeat_output_digests_match") is True
         and all(
-            row.get("requested_weight_quant_backend") == "reference"
-            and row.get("weight_quant_backend") == "reference"
+            row.get("requested_weight_quant_backend") == runtime_backend
+            and row.get("weight_quant_backend") == runtime_backend
             and row.get("quantization_format") == "fp8_block"
             and row.get("enforce_eager") is True
             for row in performance_runs
@@ -344,8 +345,8 @@ def summarize_optional_fp8_audit(run_dir: Path, run_id: str | None = None) -> di
         and quality.get("quality_gates", {}).get("all_passed") is True
         and quality.get("cross_tp", {}).get("all_passed") is True
         and all(
-            row.get("requested_weight_quant_backend") == "reference"
-            and row.get("weight_quant_backend") == "reference"
+            row.get("requested_weight_quant_backend") == runtime_backend
+            and row.get("weight_quant_backend") == runtime_backend
             and row.get("qwen35_moe_decode_backend") == "sorted"
             for row in quality_cases
         )
@@ -377,12 +378,17 @@ def summarize_optional_fp8_audit(run_dir: Path, run_id: str | None = None) -> di
             "valid": execution_valid,
             "executable": performance_valid,
             "execution_validated": execution_valid,
-            "runtime_backend": "reference_dequantization_to_model_dtype",
+            "runtime_backend": runtime_backend,
             "native_fp8": False,
             "scope": (
-                "official FP8 checkpoint dequantized to model dtype at load; "
-                "this validates checkpoint execution and quality, not native "
-                "FP8 kernels or FP8 runtime memory savings"
+                "official FP8 checkpoint execution with "
+                + (
+                    "resident expert FP8 storage and on-demand model-dtype "
+                    "dequantization"
+                    if runtime_backend == "resident"
+                    else "model-dtype dequantization at load"
+                )
+                + "; this does not validate native FP8 kernels"
             ),
             "local_checkpoint_matches_official": local_checkpoint_valid,
             "memory_preflight_valid": memory_valid,

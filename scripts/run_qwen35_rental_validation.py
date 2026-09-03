@@ -133,6 +133,7 @@ def source_tree_paths() -> list[Path]:
 def commands(args: argparse.Namespace) -> list[tuple[str, list[str]]]:
     tp_sizes = ",".join(str(size) for size in args.tp_sizes)
     root = Path(args.result_dir) / args.run_id
+    fp8_runtime_backend = getattr(args, "fp8_runtime_backend", "reference")
     common_matrix = [
         "--model",
         args.model,
@@ -740,6 +741,8 @@ def commands(args: argparse.Namespace) -> list[tuple[str, list[str]]]:
                     args.fp8_revision,
                     "--tp-sizes",
                     tp_sizes,
+                    "--fp8-runtime-backend",
+                    fp8_runtime_backend,
                     "--output",
                     str(root / "fp8" / "official_checkpoint_header_audit.json"),
                 ],
@@ -774,7 +777,7 @@ def commands(args: argparse.Namespace) -> list[tuple[str, list[str]]]:
                         "--result-dir",
                         str(fp8_root / "preflight"),
                         "--weight-quant-backend",
-                        "reference",
+                        fp8_runtime_backend,
                         "--preflight-only",
                         "--verify-checkpoint-shards",
                     ],
@@ -805,7 +808,7 @@ def commands(args: argparse.Namespace) -> list[tuple[str, list[str]]]:
                         "--result-dir",
                         str(fp8_root / "performance"),
                         "--weight-quant-backend",
-                        "reference",
+                        fp8_runtime_backend,
                         "--no-checkpoint-audit",
                         "--no-memory-preflight",
                     ],
@@ -824,7 +827,7 @@ def commands(args: argparse.Namespace) -> list[tuple[str, list[str]]]:
                         "--result-dir",
                         str(fp8_root / "quality"),
                         "--weight-quant-backend",
-                        "reference",
+                        fp8_runtime_backend,
                         "--qwen35-moe-decode-backend",
                         "sorted",
                         "--no-checkpoint-audit",
@@ -908,6 +911,9 @@ def manifest_plan(
             args.fp8_revision
             if args.fp8_audit_model is not None or args.fp8_model is not None
             else None
+        ),
+        "fp8_runtime_backend": getattr(
+            args, "fp8_runtime_backend", "reference"
         ),
         "source_tree_sha256": source_tree_sha256(),
         "stages": [
@@ -1154,6 +1160,9 @@ def prepare_manifest(
             "fp8_audit_model": manifest.get("fp8_audit_model"),
             "fp8_model": manifest.get("fp8_model"),
             "fp8_revision": manifest.get("fp8_revision"),
+            "fp8_runtime_backend": manifest.get(
+                "fp8_runtime_backend", "reference"
+            ),
             "source_tree_sha256": manifest.get("source_tree_sha256"),
             "stages": manifest.get("stages"),
         } != plan:
@@ -1223,6 +1232,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--fp8-revision",
         default=OFFICIAL_FP8_CHECKPOINT_REVISION,
+    )
+    parser.add_argument(
+        "--fp8-runtime-backend",
+        choices=("reference", "resident"),
+        default="reference",
+        help="FP8 execution layout used by audit, performance, and quality stages.",
     )
     parser.add_argument("--tp-sizes", type=parse_tp_sizes, default=(4, 8))
     parser.add_argument("--num-seqs", type=int, default=64)

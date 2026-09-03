@@ -359,7 +359,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-num-batched-tokens", type=int, default=16384)
     parser.add_argument(
         "--weight-quant-backend",
-        choices=("auto", "reference", "triton"),
+        choices=("auto", "reference", "resident", "triton"),
         default="auto",
     )
     parser.add_argument(
