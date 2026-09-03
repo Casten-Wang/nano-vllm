@@ -314,6 +314,7 @@ class ModelRunner:
         self.worker_control_failed = False
         self._pending_cache_receives = {}
         self._pending_cache_sends = {}
+        self._pending_heterogeneous_cache_receives = {}
         self._pending_heterogeneous_cache_sends = {}
         self._cache_send_staging_pool = None
         self._cache_receive_staging_pool = None
@@ -408,6 +409,14 @@ class ModelRunner:
         for receive in pending_receives.values():
             receive.finish(accepted=False)
         pending_receives.clear()
+        heterogeneous_receives = getattr(
+            self,
+            "_pending_heterogeneous_cache_receives",
+            {},
+        )
+        for pending in heterogeneous_receives.values():
+            pending["receiver"].finish(accepted=False)
+        heterogeneous_receives.clear()
         pending_sends = getattr(self, "_pending_cache_sends", {})
         for send in pending_sends.values():
             send.finish()
@@ -1624,6 +1633,32 @@ class ModelRunner:
     ):
         """Build tensor routes shared by preflight and peer data movement."""
 
+        return self._build_heterogeneous_cache_transfer_plan_for_blocks(
+            num_blocks,
+            source_tp_size=self.world_size,
+            destination_tp_size=destination_tp_size,
+        )
+
+    def build_heterogeneous_cache_receive_plan_for_blocks(
+        self,
+        num_blocks: int,
+        source_tp_size: int,
+    ):
+        """Rebuild source routes independently on a destination worker."""
+
+        return self._build_heterogeneous_cache_transfer_plan_for_blocks(
+            num_blocks,
+            source_tp_size=source_tp_size,
+            destination_tp_size=self.world_size,
+        )
+
+    def _build_heterogeneous_cache_transfer_plan_for_blocks(
+        self,
+        num_blocks: int,
+        *,
+        source_tp_size: int,
+        destination_tp_size: int,
+    ):
         model_spec = self.config.model_spec
         model_config = self.config.model_config
         if model_config is None:
@@ -1640,7 +1675,7 @@ class ModelRunner:
         )
         return build_qwen35_cache_transfer_plan_from_spec(
             model_spec,
-            src_tp_size=self.world_size,
+            src_tp_size=source_tp_size,
             dst_tp_size=destination_tp_size,
             num_blocks=num_blocks,
             block_size=self.block_size,
@@ -1682,6 +1717,122 @@ class ModelRunner:
             "received_bytes": payload.nbytes,
             "peer_count": len(fragments),
         }
+
+    def start_heterogeneous_sequence_cache_receive(
+        self,
+        transfer_id: str,
+        bind_endpoints: list[tuple[str, int]],
+        source_tp_size: int,
+        expected_cached_tokens: int,
+        timeout_s: float = 30.0,
+        max_payload_bytes: int = 16 * 1024**3,
+    ) -> dict:
+        """Start all source-peer receives for this destination rank."""
+
+        from nanovllm.engine.cache_transfer_wire import (
+            PendingPeerCacheReceiveGroup,
+        )
+
+        pending = getattr(self, "_pending_heterogeneous_cache_receives", None)
+        if pending is None:
+            pending = self._pending_heterogeneous_cache_receives = {}
+        if transfer_id in pending or transfer_id in getattr(
+            self,
+            "_pending_cache_receives",
+            {},
+        ):
+            raise ValueError("cache receive id is already active")
+        if (
+            not isinstance(expected_cached_tokens, int)
+            or isinstance(expected_cached_tokens, bool)
+            or expected_cached_tokens <= 0
+        ):
+            raise ValueError("expected cached tokens must be a positive integer")
+        num_blocks = (
+            expected_cached_tokens + self.block_size - 1
+        ) // self.block_size
+        plan = self.build_heterogeneous_cache_receive_plan_for_blocks(
+            num_blocks,
+            source_tp_size,
+        )
+        expected_peer_bytes = {
+            src_rank: byte_count
+            for src_rank, dst_rank, byte_count in plan.profile.peer_bytes
+            if dst_rank == self.rank
+        }
+        host, port = self._rank_cache_endpoint(bind_endpoints)
+        receiver = PendingPeerCacheReceiveGroup(
+            host,
+            port,
+            transfer_id=transfer_id,
+            dst_rank=self.rank,
+            dst_tp_size=self.world_size,
+            expected_peer_bytes=expected_peer_bytes,
+            timeout_s=timeout_s,
+            max_payload_bytes=max_payload_bytes,
+        )
+        pending[transfer_id] = {"receiver": receiver, "plan": plan}
+        try:
+            receiver.start()
+        except BaseException:
+            pending.pop(transfer_id, None)
+            receiver.finish(accepted=False)
+            raise
+        return {
+            "rank": self.rank,
+            "started": 1,
+            "expected_bytes": plan.profile.destination_bytes[self.rank],
+            "peer_count": len(expected_peer_bytes),
+        }
+
+    def poll_heterogeneous_sequence_cache_receive(self, transfer_id: str) -> dict:
+        """Return aggregate source-peer progress for this destination rank."""
+
+        pending = getattr(self, "_pending_heterogeneous_cache_receives", {})
+        state = pending.get(transfer_id)
+        if state is None:
+            raise ValueError("heterogeneous cache receive is not active")
+        phase, error = state["receiver"].poll()
+        result = {"rank": self.rank, "state": phase}
+        if error is not None:
+            result["error"] = error
+        return result
+
+    def install_heterogeneous_sequence_cache_receive(
+        self,
+        seq: Sequence,
+        transfer_id: str,
+    ) -> dict:
+        """Assemble, install, then ACK every source peer."""
+
+        pending = getattr(self, "_pending_heterogeneous_cache_receives", {})
+        state = pending.get(transfer_id)
+        if state is None:
+            raise ValueError("heterogeneous cache receive is not active")
+        receiver = state["receiver"]
+        try:
+            result = self.import_heterogeneous_sequence_cache(
+                seq,
+                receiver.fragments(),
+                state["plan"],
+                transfer_id=transfer_id,
+            )
+        except BaseException:
+            receiver.finish(accepted=False)
+            pending.pop(transfer_id, None)
+            raise
+        receiver.finish(accepted=True)
+        pending.pop(transfer_id, None)
+        return result
+
+    def abort_heterogeneous_sequence_cache_receive(self, transfer_id: str) -> dict:
+        """NACK all connected peers and release pending receive state."""
+
+        pending = getattr(self, "_pending_heterogeneous_cache_receives", {})
+        state = pending.pop(transfer_id, None)
+        if state is not None:
+            state["receiver"].finish(accepted=False)
+        return {"rank": self.rank, "aborted": 1}
 
     def prepare_heterogeneous_sequence_cache_send(
         self,

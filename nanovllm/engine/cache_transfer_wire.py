@@ -812,6 +812,7 @@ class PendingPeerCacheReceiveGroup:
         dst_tp_size: int,
         expected_peer_bytes: dict[int, int],
         timeout_s: float = 30.0,
+        max_payload_bytes: int = DEFAULT_MAX_PAYLOAD_BYTES,
     ) -> None:
         if not isinstance(host, str) or not host:
             raise ValueError("peer cache receiver host must not be empty")
@@ -848,11 +849,19 @@ class PendingPeerCacheReceiveGroup:
             raise ValueError("peer cache receiver expected peers are invalid")
         if timeout_s <= 0:
             raise ValueError("peer cache receiver timeout must be positive")
+        if (
+            not isinstance(max_payload_bytes, int)
+            or isinstance(max_payload_bytes, bool)
+            or max_payload_bytes <= 0
+            or max(expected_peer_bytes.values()) > max_payload_bytes
+        ):
+            raise ValueError("peer cache receiver payload limit is invalid")
         self._transfer_id = transfer_id
         self._dst_rank = dst_rank
         self._dst_tp_size = dst_tp_size
         self._expected_peer_bytes = dict(expected_peer_bytes)
         self._timeout_s = timeout_s
+        self._max_payload_bytes = max_payload_bytes
         self._deadline = monotonic() + timeout_s
         self._lock = Lock()
         self._fragments: dict[int, PeerCacheFragment] = {}
@@ -916,7 +925,7 @@ class PendingPeerCacheReceiveGroup:
             connection.settimeout(max(self._deadline - monotonic(), 0.001))
             fragment = receive_peer_cache_fragment(
                 connection,
-                max_payload_bytes=max(self._expected_peer_bytes.values()),
+                max_payload_bytes=self._max_payload_bytes,
                 expected_transfer_id=self._transfer_id,
                 expected_dst_rank=self._dst_rank,
             )

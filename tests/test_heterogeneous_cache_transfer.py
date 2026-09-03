@@ -846,3 +846,96 @@ def test_multi_peer_receiver_times_out_when_a_source_is_missing():
         sleep(0.005)
     assert "deadline expired" in error
     receiver.finish(accepted=False)
+
+
+def test_model_runner_installs_before_acknowledging_peer_receivers():
+    plan = make_plan(with_scales=False)
+    runner = object.__new__(ModelRunner)
+    runner.rank = 0
+    runner.world_size = 8
+    runner.block_size = 4
+    runner._pending_cache_receives = {}
+    runner._pending_heterogeneous_cache_receives = {}
+    runner._rank_cache_endpoint = Mock(return_value=("127.0.0.1", 23456))
+    runner.build_heterogeneous_cache_receive_plan_for_blocks = Mock(
+        return_value=plan
+    )
+    receiver = Mock()
+    receiver.poll.return_value = ("ready", None)
+    fragments = (Mock(),)
+    receiver.fragments.return_value = fragments
+    installed = {
+        "rank": 0,
+        "cached_tokens": 7,
+        "received_bytes": plan.profile.destination_bytes[0],
+        "peer_count": 1,
+    }
+    runner.import_heterogeneous_sequence_cache = Mock(return_value=installed)
+    endpoints = [("127.0.0.1", 23456 + rank) for rank in range(8)]
+
+    with patch(
+        "nanovllm.engine.cache_transfer_wire.PendingPeerCacheReceiveGroup",
+        return_value=receiver,
+    ) as receiver_type:
+        started = runner.start_heterogeneous_sequence_cache_receive(
+            "transfer-1",
+            endpoints,
+            4,
+            7,
+        )
+
+    assert started == {
+        "rank": 0,
+        "started": 1,
+        "expected_bytes": plan.profile.destination_bytes[0],
+        "peer_count": plan.profile.destination_peer_counts[0],
+    }
+    receiver_type.assert_called_once_with(
+        "127.0.0.1",
+        23456,
+        transfer_id="transfer-1",
+        dst_rank=0,
+        dst_tp_size=8,
+        expected_peer_bytes={
+            src_rank: byte_count
+            for src_rank, dst_rank, byte_count in plan.profile.peer_bytes
+            if dst_rank == 0
+        },
+        timeout_s=30.0,
+        max_payload_bytes=16 * 1024**3,
+    )
+    receiver.start.assert_called_once_with()
+    assert runner.poll_heterogeneous_sequence_cache_receive("transfer-1") == {
+        "rank": 0,
+        "state": "ready",
+    }
+    result = runner.install_heterogeneous_sequence_cache_receive(
+        SimpleNamespace(),
+        "transfer-1",
+    )
+    assert result == installed
+    runner.import_heterogeneous_sequence_cache.assert_called_once()
+    receiver.finish.assert_called_once_with(accepted=True)
+    assert not runner._pending_heterogeneous_cache_receives
+
+
+def test_model_runner_nacks_peer_receivers_when_install_fails():
+    runner = object.__new__(ModelRunner)
+    runner.rank = 0
+    receiver = Mock()
+    receiver.fragments.return_value = (Mock(),)
+    runner._pending_heterogeneous_cache_receives = {
+        "transfer-1": {"receiver": receiver, "plan": Mock()}
+    }
+    runner.import_heterogeneous_sequence_cache = Mock(
+        side_effect=RuntimeError("install failed")
+    )
+
+    with pytest.raises(RuntimeError, match="install failed"):
+        runner.install_heterogeneous_sequence_cache_receive(
+            SimpleNamespace(),
+            "transfer-1",
+        )
+
+    receiver.finish.assert_called_once_with(accepted=False)
+    assert not runner._pending_heterogeneous_cache_receives
