@@ -162,7 +162,14 @@ class Qwen3_5MoeForCausalLM(nn.Module):
     ) -> torch.Tensor:
         return self.model(input_ids, positions)
 
-    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def compute_logits(
+        self,
+        hidden_states: torch.Tensor,
+        *,
+        greedy: bool = False,
+    ) -> torch.Tensor:
+        if greedy:
+            return self.lm_head(hidden_states, greedy=True)
         return self.lm_head(hidden_states)
 
 

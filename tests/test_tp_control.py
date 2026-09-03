@@ -823,6 +823,9 @@ class HybridStateContextTest(unittest.TestCase):
                         "total_bytes": 48,
                         "allocation_count": 2,
                         "reuse_count": 6,
+                        "greedy_reduction_count": 7,
+                        "greedy_candidate_bytes": 64,
+                        "greedy_full_gather_avoided_bytes": 4096,
                     },
                 ),
             ]
@@ -850,6 +853,9 @@ class HybridStateContextTest(unittest.TestCase):
         self.assertEqual(stats["tp_logits_gathered_buffer_bytes"], 28)
         self.assertEqual(stats["tp_logits_buffer_allocation_count"], 2)
         self.assertEqual(stats["tp_logits_buffer_reuse_count"], 6)
+        self.assertEqual(stats["tp_greedy_reduction_count"], 7)
+        self.assertEqual(stats["tp_greedy_candidate_bytes"], 64)
+        self.assertEqual(stats["tp_greedy_full_gather_avoided_bytes"], 4096)
         self.assertEqual(stats["total_bytes_local_rank"], 152)
 
     def test_multi_rank_kv_cache_stats_are_gathered(self):

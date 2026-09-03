@@ -103,6 +103,9 @@ def test_lm_head_gathers_tp_logits_into_one_vocab_buffer():
         "total_bytes": 24 * hidden.element_size(),
         "allocation_count": 2,
         "reuse_count": 0,
+        "greedy_reduction_count": 0,
+        "greedy_candidate_bytes": 0,
+        "greedy_full_gather_avoided_bytes": 0,
     }
 
 
@@ -155,6 +158,91 @@ def test_lm_head_does_not_reuse_tp_logits_storage_with_autograd():
         head(torch.randn(2, 2))
 
     assert head.tp_logits_storage_stats()["total_bytes"] == 0
+
+
+def test_lm_head_tp_greedy_reduces_only_rank_local_candidates():
+    head = make_lm_head()
+    head.weight.data.copy_(
+        torch.tensor(
+            [[1.0, 0.0], [2.0, 0.0], [3.0, 0.0], [4.0, 0.0]]
+        )
+    )
+    hidden = torch.tensor([[1.0, 0.0], [2.0, 0.0]])
+    context = SimpleNamespace(is_mixed=False, is_prefill=False)
+    observed = {}
+
+    def gather(local, gather_list, dst):
+        observed["shape"] = tuple(local.shape)
+        gather_list[0].copy_(local)
+        # Row 0 ties the local maximum, so the lower global token id must win.
+        # Row 1 has a larger remote value and must select remote token 6.
+        gather_list[1].copy_(
+            torch.tensor([[4.0, 7.0], [9.0, 6.0]])
+        )
+
+    with (
+        torch.inference_mode(),
+        patch.object(embed_head, "get_context", return_value=context),
+        patch.object(embed_head.dist, "gather", side_effect=gather),
+    ):
+        tokens = head(hidden, greedy=True)
+
+    torch.testing.assert_close(tokens, torch.tensor([3, 6]))
+    assert observed["shape"] == (2, 2)
+    stats = head.tp_logits_storage_stats()
+    assert stats["total_bytes"] == 0
+    assert stats["greedy_reduction_count"] == 1
+    assert stats["greedy_candidate_bytes"] == 16
+    assert stats["greedy_full_gather_avoided_bytes"] == 32
+
+
+def test_nonzero_lm_head_rank_participates_in_greedy_reduction():
+    head = make_lm_head(rank=1)
+    context = SimpleNamespace(is_mixed=False, is_prefill=False)
+    observed = {}
+
+    def gather(local, gather_list, dst):
+        observed.update(
+            local=local.clone(),
+            gather_list=gather_list,
+            dst=dst,
+        )
+
+    with (
+        torch.inference_mode(),
+        patch.object(embed_head, "get_context", return_value=context),
+        patch.object(embed_head.dist, "gather", side_effect=gather),
+    ):
+        tokens = head(torch.randn(3, 2), greedy=True)
+
+    assert tokens is None
+    assert observed["local"].shape == (3, 2)
+    assert torch.all(observed["local"][:, 1] >= 4)
+    assert observed["gather_list"] is None
+    assert observed["dst"] == 0
+
+
+def test_single_rank_lm_head_greedy_returns_direct_argmax():
+    head = make_lm_head(world_size=1)
+    head.weight.data.copy_(
+        torch.tensor(
+            [[1.0, 0.0], [0.0, 1.0], [2.0, 1.0], [-1.0, 3.0],
+             [0.0, 0.0], [1.0, 1.0], [0.5, 0.5], [-2.0, -2.0]]
+        )
+    )
+    context = SimpleNamespace(is_mixed=False, is_prefill=False)
+    with (
+        torch.inference_mode(),
+        patch.object(embed_head, "get_context", return_value=context),
+        patch.object(
+            embed_head.dist,
+            "gather",
+            side_effect=AssertionError("single-rank greedy must not gather"),
+        ),
+    ):
+        tokens = head(torch.tensor([[1.0, 0.0], [0.0, 1.0]]), greedy=True)
+
+    torch.testing.assert_close(tokens, torch.tensor([2, 3]))
 
 
 def test_nonzero_lm_head_rank_does_not_allocate_gather_output():

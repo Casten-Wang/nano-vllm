@@ -77,6 +77,9 @@ class ParallelLMHead(VocabParallelEmbedding):
         )
         self.tp_logits_allocation_count = 0
         self.tp_logits_reuse_count = 0
+        self.tp_greedy_reduction_count = 0
+        self.tp_greedy_candidate_bytes = 0
+        self.tp_greedy_full_gather_avoided_bytes = 0
 
     def _tp_logits_buffer(
         self,
@@ -116,9 +119,14 @@ class ParallelLMHead(VocabParallelEmbedding):
             "total_bytes": local_bytes + gathered_bytes,
             "allocation_count": self.tp_logits_allocation_count,
             "reuse_count": self.tp_logits_reuse_count,
+            "greedy_reduction_count": self.tp_greedy_reduction_count,
+            "greedy_candidate_bytes": self.tp_greedy_candidate_bytes,
+            "greedy_full_gather_avoided_bytes": (
+                self.tp_greedy_full_gather_avoided_bytes
+            ),
         }
 
-    def forward(self, x: torch.Tensor):
+    def forward(self, x: torch.Tensor, *, greedy: bool = False):
         context = get_context()
         if context.is_mixed:
             last_indices = getattr(context, "logits_indices", None)
@@ -142,6 +150,52 @@ class ParallelLMHead(VocabParallelEmbedding):
                 last_indices = context.cu_seqlens_q[1:] - 1
             x = x[last_indices].contiguous()
         logits = F.linear(x, self.weight)
+        if greedy:
+            self.tp_greedy_reduction_count += 1
+            local_values, local_ids = logits.max(dim=-1)
+            global_ids = local_ids + self.vocab_start_idx
+            if self.tp_size == 1:
+                return global_ids
+            # Float32 exactly represents every supported token id and lets one
+            # small collective carry both the score and global vocabulary id.
+            local_candidates = torch.stack(
+                (local_values.float(), global_ids.float()),
+                dim=-1,
+            )
+            peer_count = self.tp_size - 1
+            self.tp_greedy_candidate_bytes += (
+                local_candidates.numel()
+                * local_candidates.element_size()
+                * peer_count
+            )
+            self.tp_greedy_full_gather_avoided_bytes += (
+                logits.numel() * logits.element_size() * peer_count
+            )
+            if self.tp_rank == 0:
+                gathered_candidates = torch.empty(
+                    self.tp_size,
+                    logits.shape[0],
+                    2,
+                    dtype=torch.float32,
+                    device=logits.device,
+                )
+                candidate_list = list(gathered_candidates.unbind(dim=0))
+            else:
+                gathered_candidates = None
+                candidate_list = None
+            dist.gather(local_candidates, candidate_list, 0)
+            if gathered_candidates is None:
+                return None
+            winning_ranks = gathered_candidates[:, :, 0].argmax(dim=0)
+            batch_indices = torch.arange(
+                logits.shape[0],
+                device=logits.device,
+            )
+            return gathered_candidates[
+                winning_ranks,
+                batch_indices,
+                1,
+            ].to(torch.int64)
         if self.tp_size > 1:
             # Gather vocabulary-major shards into one allocation. Transposing
             # the result exposes the expected [batch, vocabulary] layout as a

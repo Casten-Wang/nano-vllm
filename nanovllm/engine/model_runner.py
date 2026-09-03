@@ -406,6 +406,16 @@ class ModelRunner:
             "tp_logits_buffer_reuse_count": sum(
                 item["reuse_count"] for item in tp_logits_stats
             ),
+            "tp_greedy_reduction_count": sum(
+                item["greedy_reduction_count"] for item in tp_logits_stats
+            ),
+            "tp_greedy_candidate_bytes": sum(
+                item["greedy_candidate_bytes"] for item in tp_logits_stats
+            ),
+            "tp_greedy_full_gather_avoided_bytes": sum(
+                item["greedy_full_gather_avoided_bytes"]
+                for item in tp_logits_stats
+            ),
             "total_bytes_local_rank": (
                 partitioned_total
                 + dequant_total
@@ -1819,8 +1829,31 @@ class ModelRunner:
         )
         return temperatures, top_ks, top_ps, metadata
 
+    def _prepare_sampling_path(self, seqs: list[Sequence]):
+        greedy = all(seq.temperature <= 1e-10 for seq in seqs)
+        sample_args = (
+            self.prepare_sample(seqs)
+            if self.rank == 0 and not greedy
+            else None
+        )
+        return greedy, sample_args
+
+    def _finish_sampling(self, model_output, *, greedy: bool, sample_args):
+        if self.rank != 0:
+            return None
+        if greedy:
+            return model_output.tolist()
+        return self.sampler(model_output, *sample_args).tolist()
+
     @torch.inference_mode()
-    def run_model(self, input_ids: torch.Tensor, positions: torch.Tensor, is_prefill: bool):
+    def run_model(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        is_prefill: bool,
+        *,
+        greedy: bool = False,
+    ):
         context = get_context()
         use_graph = self.should_use_cudagraph(input_ids, is_prefill)
         graph_bucket = None
@@ -1866,7 +1899,10 @@ class ModelRunner:
         if not use_graph:
             previous_trace = activate(self.shape_trace)
             try:
-                return self.model.compute_logits(self.model(input_ids, positions))
+                return self.model.compute_logits(
+                    self.model(input_ids, positions),
+                    greedy=greedy,
+                )
             finally:
                 restore(previous_trace)
 
@@ -1885,13 +1921,25 @@ class ModelRunner:
             graph_vars["state_slots"].fill_(self.recurrent_graph_padding_slot)
             graph_vars["state_slots"][:bs] = context.state_slots
         graph.replay()
-        return self.model.compute_logits(graph_vars["outputs"][:bs])
+        return self.model.compute_logits(
+            graph_vars["outputs"][:bs],
+            greedy=greedy,
+        )
 
     def run(self, seqs: list[Sequence], is_prefill: bool) -> list[int]:
         input_ids, positions = self.prepare_prefill(seqs) if is_prefill else self.prepare_decode(seqs)
-        sample_args = self.prepare_sample(seqs) if self.rank == 0 else None
-        logits = self.run_model(input_ids, positions, is_prefill)
-        token_ids = self.sampler(logits, *sample_args).tolist() if self.rank == 0 else None
+        greedy, sample_args = self._prepare_sampling_path(seqs)
+        model_output = self.run_model(
+            input_ids,
+            positions,
+            is_prefill,
+            greedy=greedy,
+        )
+        token_ids = self._finish_sampling(
+            model_output,
+            greedy=greedy,
+            sample_args=sample_args,
+        )
         reset_context()
         return token_ids
 
@@ -1922,7 +1970,7 @@ class ModelRunner:
             state_access_path=state_access_path,
         )
         seqs = decode_seqs + prefill_seqs
-        sample_args = self.prepare_sample(seqs) if self.rank == 0 else None
+        greedy, sample_args = self._prepare_sampling_path(seqs)
         self.shape_trace.record_model_step(
             input_ids=input_ids,
             positions=positions,
@@ -1934,10 +1982,17 @@ class ModelRunner:
         )
         previous_trace = activate(self.shape_trace)
         try:
-            logits = self.model.compute_logits(self.model(input_ids, positions))
+            model_output = self.model.compute_logits(
+                self.model(input_ids, positions),
+                greedy=greedy,
+            )
         finally:
             restore(previous_trace)
-        token_ids = self.sampler(logits, *sample_args).tolist() if self.rank == 0 else None
+        token_ids = self._finish_sampling(
+            model_output,
+            greedy=greedy,
+            sample_args=sample_args,
+        )
         reset_context()
         return token_ids
 

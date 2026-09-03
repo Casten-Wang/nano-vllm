@@ -216,5 +216,9 @@ class Qwen3ForCausalLM(nn.Module):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
+        *,
+        greedy: bool = False,
     ) -> torch.Tensor:
+        if greedy:
+            return self.lm_head(hidden_states, greedy=True)
         return self.lm_head(hidden_states)
