@@ -871,6 +871,53 @@ def test_min_recompute_tie_preserves_older_request():
     assert not scheduler.running
 
 
+def test_min_recompute_can_reclaim_partial_waiting_prefill():
+    scheduler = make_scheduler(
+        max_tokens=8,
+        max_seqs=2,
+        block_size=4,
+        num_blocks=3,
+        preemption_policy="min_recompute",
+    )
+    current = Sequence([1] * 5)
+    scheduler.block_manager.allocate(current, 0, num_blocks=2)
+    current.status = SequenceStatus.RUNNING
+    current.is_prefill = False
+    current.num_cached_tokens = 5
+    scheduler.running.append(current)
+
+    partial = Sequence([2] * 8)
+    scheduler.block_manager.allocate(partial, 0, num_blocks=1)
+    partial.num_cached_tokens = 4
+    scheduler.waiting.append(partial)
+
+    result = scheduler.schedule()
+
+    assert result.decode_seqs == [current]
+    assert result.prefill_seqs == []
+    assert current in scheduler.running
+    assert len(current.block_table) == 3
+    assert list(scheduler.waiting) == [partial]
+    assert partial.block_table == []
+    assert partial.num_cached_tokens == 0
+    assert scheduler.preemption_count == 1
+    assert scheduler.preempted_token_progress == 4
+
+
+def test_fcfs_preemption_considers_newer_partial_waiting_prefill():
+    scheduler = make_scheduler(preemption_policy="fcfs")
+    current = Sequence([1] * 8)
+    partial = Sequence([2] * 8)
+    scheduler.block_manager.allocate(partial, 0, num_blocks=1)
+    partial.num_cached_tokens = 4
+    scheduler.waiting.append(partial)
+
+    victim = scheduler.select_preemption_victim(current)
+
+    assert victim is partial
+    assert not scheduler.waiting
+
+
 def test_min_recompute_reduces_progress_loss_for_heterogeneous_prompts():
     def run(policy):
         scheduler = make_scheduler(

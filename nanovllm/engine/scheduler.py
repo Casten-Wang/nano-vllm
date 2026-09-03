@@ -539,21 +539,31 @@ class Scheduler:
     def select_preemption_victim(self, current: Sequence) -> Sequence:
         """Remove and return the request to evict under the configured policy."""
 
+        active_waiting = [seq for seq in self.waiting if seq.block_table]
         if self.preemption_policy == "fcfs":
-            return self.running.pop() if self.running else current
-        if self.preemption_policy != "min_recompute":
-            raise RuntimeError(f"unsupported preemption policy: {self.preemption_policy}")
-        candidates = [current, *self.running]
-        victim = min(
-            candidates,
-            key=lambda seq: (
-                seq.num_cached_tokens,
-                len(seq.block_table),
-                -seq.seq_id,
-            ),
-        )
-        if victim is not current:
+            victim = max(
+                (current, *self.running, *active_waiting),
+                key=lambda seq: seq.seq_id,
+            )
+        elif self.preemption_policy == "min_recompute":
+            victim = min(
+                (current, *self.running, *active_waiting),
+                key=lambda seq: (
+                    seq.num_cached_tokens,
+                    len(seq.block_table),
+                    -seq.seq_id,
+                ),
+            )
+        else:
+            raise RuntimeError(
+                f"unsupported preemption policy: {self.preemption_policy}"
+            )
+        if victim is current:
+            return victim
+        if victim in self.running:
             self.running.remove(victim)
+        else:
+            self.waiting.remove(victim)
         return victim
 
     def schedule_prefill_with_budget(self, token_budget: int, seq_budget: int) -> list[Sequence]:
