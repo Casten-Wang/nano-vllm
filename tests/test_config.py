@@ -21,6 +21,7 @@ def make_config(monkeypatch, tmp_path, **kwargs):
         config_module,
         "resolve_model_spec",
         lambda _config: SimpleNamespace(
+            architecture="Qwen3_5MoeForConditionalGeneration",
             text_config=text_config,
             quantization=BF16_QUANTIZATION_SPEC,
         ),
@@ -120,6 +121,7 @@ def test_gptq_auto_selects_triton_backend(monkeypatch, tmp_path):
         config_module,
         "resolve_model_spec",
         lambda _config: SimpleNamespace(
+            architecture="Qwen3_5MoeForConditionalGeneration",
             text_config=text_config,
             quantization=QuantizationSpec(format="gptq_int4", weight_bits=4),
         ),
@@ -131,7 +133,7 @@ def test_gptq_auto_selects_triton_backend(monkeypatch, tmp_path):
     assert text_config.nanovllm_weight_quant_backend == "triton"
 
 
-def test_fp8_checkpoint_is_rejected_before_runtime_setup(monkeypatch, tmp_path):
+def test_fp8_checkpoint_selects_reference_dequantization_backend(monkeypatch, tmp_path):
     text_config = SimpleNamespace(max_position_embeddings=32768)
     monkeypatch.setattr(
         config_module.AutoConfig,
@@ -142,12 +144,70 @@ def test_fp8_checkpoint_is_rejected_before_runtime_setup(monkeypatch, tmp_path):
         config_module,
         "resolve_model_spec",
         lambda _config: SimpleNamespace(
+            architecture="Qwen3_5MoeForConditionalGeneration",
             text_config=text_config,
-            quantization=QuantizationSpec(format="fp8_block", weight_bits=8),
+            quantization=QuantizationSpec(
+                format="fp8_block",
+                weight_bits=8,
+                weight_block_size=(128, 128),
+            ),
         ),
     )
 
-    with pytest.raises(NotImplementedError, match="recognized but not executable"):
+    config = config_module.Config(str(tmp_path))
+
+    assert config.weight_quant_backend == "reference"
+    assert text_config.nanovllm_weight_quant_backend == "reference"
+    assert text_config.nanovllm_quantization_spec.weight_block_size == (128, 128)
+
+
+def test_fp8_checkpoint_rejects_unimplemented_native_backend(monkeypatch, tmp_path):
+    text_config = SimpleNamespace(max_position_embeddings=32768)
+    monkeypatch.setattr(
+        config_module.AutoConfig,
+        "from_pretrained",
+        lambda _model: SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        config_module,
+        "resolve_model_spec",
+        lambda _config: SimpleNamespace(
+            architecture="Qwen3_5MoeForConditionalGeneration",
+            text_config=text_config,
+            quantization=QuantizationSpec(
+                format="fp8_block",
+                weight_bits=8,
+                weight_block_size=(128, 128),
+            ),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="currently require.*reference"):
+        config_module.Config(str(tmp_path), weight_quant_backend="triton")
+
+
+def test_fp8_reference_loader_is_scoped_to_qwen35(monkeypatch, tmp_path):
+    text_config = SimpleNamespace(max_position_embeddings=32768)
+    monkeypatch.setattr(
+        config_module.AutoConfig,
+        "from_pretrained",
+        lambda _model: SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        config_module,
+        "resolve_model_spec",
+        lambda _config: SimpleNamespace(
+            architecture="Qwen3ForCausalLM",
+            text_config=text_config,
+            quantization=QuantizationSpec(
+                format="fp8_block",
+                weight_bits=8,
+                weight_block_size=(128, 128),
+            ),
+        ),
+    )
+
+    with pytest.raises(NotImplementedError, match="only for Qwen3.5 MoE"):
         config_module.Config(str(tmp_path))
 
 

@@ -3,9 +3,9 @@ from pathlib import Path
 import json
 from types import SimpleNamespace
 import types
-from unittest.mock import patch
 
 import torch
+from safetensors.torch import save_file
 
 
 ROOT = Path(__file__).parents[1]
@@ -132,3 +132,86 @@ def test_mapping_audit_classifies_intentionally_skipped_weights(tmp_path):
     assert result["valid"]
     assert result["skipped_tensor_count"] == 3
     assert result["skipped_tensor_groups"] == {"model.visual": 1, "mtp": 2}
+
+
+def test_mapping_audit_validates_fp8_scale_and_expert_resolution(tmp_path):
+    class Model(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.experts = torch.nn.Module()
+            parameter = torch.nn.Parameter(torch.empty(2, 8, 4, device="meta"))
+            parameter.weight_loader = lambda _param, _source, _shard: None
+            parameter.required_checkpoint_shards = frozenset(
+                (expert_id, projection)
+                for expert_id in range(2)
+                for projection in ("gate", "up")
+            )
+            self.experts.register_parameter("gate_up_proj", parameter)
+            self.checkpoint_quantization_spec = SimpleNamespace(
+                format="fp8_block",
+                weight_block_size=(2, 2),
+            )
+
+        @staticmethod
+        def resolve_checkpoint_parameter(name):
+            prefix = "experts."
+            if not name.startswith(prefix) or not name.endswith("_proj.weight"):
+                return None
+            expert_id = int(name.split(".")[1])
+            projection = name.split(".")[2].removesuffix("_proj")
+            return "experts.gate_up_proj", (expert_id, projection)
+
+    tensors = {}
+    for expert_id in range(2):
+        for projection in ("gate", "up"):
+            name = f"experts.{expert_id}.{projection}_proj.weight"
+            tensors[name] = torch.ones(4, 4, dtype=torch.float8_e4m3fn)
+            tensors[f"{name}_scale_inv"] = torch.ones(2, 2)
+    save_file(tensors, tmp_path / "model.safetensors")
+
+    result = MODULE.audit_checkpoint_mapping(Model(), tmp_path)
+
+    assert result["valid"]
+    assert result["source_tensor_count"] == 8
+    assert result["mapped_parameter_count"] == 1
+    assert result["incomplete_checkpoint_shards"] == []
+
+    del tensors["experts.1.up_proj.weight"]
+    del tensors["experts.1.up_proj.weight_scale_inv"]
+    save_file(tensors, tmp_path / "model.safetensors")
+
+    incomplete = MODULE.audit_checkpoint_mapping(Model(), tmp_path)
+
+    assert not incomplete["valid"]
+    assert incomplete["incomplete_checkpoint_shards"][0]["parameter"] == (
+        "experts.gate_up_proj"
+    )
+
+
+def test_mapping_audit_rejects_invalid_fp8_scale_shape(tmp_path):
+    class Model(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.linear = torch.nn.Linear(
+                4,
+                4,
+                bias=False,
+                device="meta",
+            )
+            self.checkpoint_quantization_spec = SimpleNamespace(
+                format="fp8_block",
+                weight_block_size=(2, 2),
+            )
+
+    save_file(
+        {
+            "linear.weight": torch.ones(4, 4, dtype=torch.float8_e4m3fn),
+            "linear.weight_scale_inv": torch.ones(1, 1),
+        },
+        tmp_path / "model.safetensors",
+    )
+
+    result = MODULE.audit_checkpoint_mapping(Model(), tmp_path)
+
+    assert not result["valid"]
+    assert "invalid FP8 scale shape" in result["shape_errors"][0]["error"]

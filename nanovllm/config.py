@@ -5,7 +5,11 @@ from pathlib import Path
 import torch
 from transformers import AutoConfig
 
-from nanovllm.models.model_spec import ModelSpec, resolve_model_spec
+from nanovllm.models.model_spec import (
+    ModelSpec,
+    QWEN35_MOE_ARCHITECTURES,
+    resolve_model_spec,
+)
 
 
 def resolve_eos_token_ids(
@@ -135,6 +139,20 @@ class Config:
                 raise ValueError(
                     "the current GPTQ expert backend requires "
                     "qwen35_moe_decode_backend='sorted'"
+                )
+            self.model_config.nanovllm_quantization_spec = quantization
+            self.model_config.nanovllm_weight_quant_backend = self.weight_quant_backend
+        elif quantization.format == "fp8_block":
+            if self.model_spec.architecture not in QWEN35_MOE_ARCHITECTURES:
+                raise NotImplementedError(
+                    "block-FP8 reference loading is implemented only for Qwen3.5 MoE"
+                )
+            if self.weight_quant_backend == "auto":
+                self.weight_quant_backend = "reference"
+            if self.weight_quant_backend != "reference":
+                raise ValueError(
+                    "block-FP8 checkpoints currently require "
+                    "weight_quant_backend='reference'"
                 )
             self.model_config.nanovllm_quantization_spec = quantization
             self.model_config.nanovllm_weight_quant_backend = self.weight_quant_backend

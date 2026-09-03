@@ -4,6 +4,8 @@ import torch
 from torch import nn
 from safetensors import safe_open
 
+from nanovllm.models.qwen35_fp8 import dequantize_fp8_block_weight
+
 
 def default_weight_loader(param: nn.Parameter, loaded_weight: torch.Tensor):
     param.data.copy_(loaded_weight)
@@ -33,15 +35,43 @@ def load_model(model: nn.Module, path: str):
     loaded_parameters: set[str] = set()
     loaded_packed_shards: dict[str, set[object]] = {}
     loaded_source_weights: set[str] = set()
+    quantization = getattr(model, "checkpoint_quantization_spec", None)
+    fp8_block_size = (
+        quantization.weight_block_size
+        if getattr(quantization, "format", None) == "fp8_block"
+        else None
+    )
     for file in glob(os.path.join(path, "*.safetensors")):
         with safe_open(file, "pt", "cpu") as f:
-            for source_weight_name in f.keys():
+            source_names = set(f.keys())
+            for source_weight_name in sorted(source_names):
                 if source_weight_name in loaded_source_weights:
                     raise RuntimeError(
                         "checkpoint contains duplicate weight: "
                         f"{source_weight_name}"
                     )
                 loaded_source_weights.add(source_weight_name)
+                if fp8_block_size is not None and source_weight_name.endswith(
+                    ".weight_scale_inv"
+                ):
+                    continue
+                loaded_tensor = None
+                if fp8_block_size is not None and source_weight_name.endswith(
+                    ".weight"
+                ):
+                    source_slice = f.get_slice(source_weight_name)
+                    if source_slice.get_dtype().startswith("F8_"):
+                        scale_name = f"{source_weight_name}_scale_inv"
+                        if scale_name not in source_names:
+                            raise RuntimeError(
+                                f"FP8 checkpoint weight is missing scale: {scale_name}"
+                            )
+                        loaded_tensor = dequantize_fp8_block_weight(
+                            f.get_tensor(source_weight_name),
+                            f.get_tensor(scale_name),
+                            fp8_block_size,
+                            output_dtype=torch.get_default_dtype(),
+                        )
                 weight_name = map_weight_name(source_weight_name)
                 if weight_name is None:
                     continue
@@ -75,7 +105,7 @@ def load_model(model: nn.Module, path: str):
                         "packed_safetensors_loader",
                         None,
                     )
-                    if packed_safetensors_loader is not None:
+                    if packed_safetensors_loader is not None and loaded_tensor is None:
                         packed_safetensors_loader(
                             param,
                             f.get_slice(source_weight_name),
@@ -86,7 +116,9 @@ def load_model(model: nn.Module, path: str):
                     weight_loader = getattr(param, "weight_loader")
                     weight_loader(
                         param,
-                        f.get_tensor(source_weight_name),
+                        loaded_tensor
+                        if loaded_tensor is not None
+                        else f.get_tensor(source_weight_name),
                         shard_id,
                     )
                     loaded_parameters.add(param_name)
@@ -97,7 +129,7 @@ def load_model(model: nn.Module, path: str):
                         "safetensors_loader",
                         None,
                     )
-                    if safetensors_loader is not None:
+                    if safetensors_loader is not None and loaded_tensor is None:
                         safetensors_loader(
                             param,
                             f.get_slice(source_weight_name),
@@ -105,7 +137,12 @@ def load_model(model: nn.Module, path: str):
                         loaded_parameters.add(weight_name)
                         continue
                     weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                    weight_loader(param, f.get_tensor(source_weight_name))
+                    weight_loader(
+                        param,
+                        loaded_tensor
+                        if loaded_tensor is not None
+                        else f.get_tensor(source_weight_name),
+                    )
                     loaded_parameters.add(weight_name)
     if getattr(model, "strict_weight_loading", False):
         expected_parameters = {

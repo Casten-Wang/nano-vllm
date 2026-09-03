@@ -97,6 +97,7 @@ class Qwen35Experts(nn.Module):
         num_experts: int,
         decode_backend: str = "sorted",
         decode_chunk_size: int = 8,
+        checkpoint_format: str = "bf16",
     ) -> None:
         super().__init__()
         if decode_backend not in ("sorted", "batched"):
@@ -130,6 +131,15 @@ class Qwen35Experts(nn.Module):
         self.gate_up_proj.safetensors_loader = self._load_gate_up_slice
         self.down_proj.weight_loader = self._load_down
         self.down_proj.safetensors_loader = self._load_down_slice
+        if checkpoint_format == "fp8_block":
+            self.gate_up_proj.required_checkpoint_shards = frozenset(
+                (expert_id, projection)
+                for expert_id in range(num_experts)
+                for projection in ("gate", "up")
+            )
+            self.down_proj.required_checkpoint_shards = frozenset(
+                (expert_id, "down") for expert_id in range(num_experts)
+            )
 
     @staticmethod
     def _slice_shape(loaded_weight) -> tuple[int, ...]:
@@ -140,7 +150,28 @@ class Qwen35Experts(nn.Module):
         self,
         param: nn.Parameter,
         loaded_weight: torch.Tensor,
+        loaded_shard_id: tuple[int, str] | None = None,
     ) -> None:
+        if loaded_shard_id is not None:
+            expert_id, projection = loaded_shard_id
+            if not 0 <= expert_id < self.num_experts or projection not in (
+                "gate",
+                "up",
+            ):
+                raise ValueError("invalid FP8 gate/up expert shard")
+            expected_shape = (self.intermediate_size, self.hidden_size)
+            if tuple(loaded_weight.shape) != expected_shape:
+                raise ValueError(
+                    f"invalid {projection} expert {expert_id} shape: "
+                    f"{tuple(loaded_weight.shape)}; expected {expected_shape}"
+                )
+            start = self.tp_rank * self.local_intermediate_size
+            target_start = 0 if projection == "gate" else self.local_intermediate_size
+            param.data[
+                expert_id,
+                target_start : target_start + self.local_intermediate_size,
+            ].copy_(loaded_weight[start : start + self.local_intermediate_size])
+            return
         expected_shape = (
             self.num_experts,
             2 * self.intermediate_size,
@@ -186,7 +217,23 @@ class Qwen35Experts(nn.Module):
         self,
         param: nn.Parameter,
         loaded_weight: torch.Tensor,
+        loaded_shard_id: tuple[int, str] | None = None,
     ) -> None:
+        if loaded_shard_id is not None:
+            expert_id, projection = loaded_shard_id
+            if not 0 <= expert_id < self.num_experts or projection != "down":
+                raise ValueError("invalid FP8 down expert shard")
+            expected_shape = (self.hidden_size, self.intermediate_size)
+            if tuple(loaded_weight.shape) != expected_shape:
+                raise ValueError(
+                    f"invalid down expert {expert_id} shape: "
+                    f"{tuple(loaded_weight.shape)}; expected {expected_shape}"
+                )
+            start = self.tp_rank * self.local_intermediate_size
+            param.data[expert_id].copy_(
+                loaded_weight[:, start : start + self.local_intermediate_size]
+            )
+            return
         expected_shape = (
             self.num_experts,
             self.hidden_size,
@@ -420,6 +467,7 @@ class Qwen35SparseMoeBlock(nn.Module):
                 int(config.num_experts),
                 getattr(config, "qwen35_moe_decode_backend", "sorted"),
                 int(getattr(config, "qwen35_moe_decode_chunk_size", 8)),
+                getattr(quantization, "format", "bf16"),
             )
         self.shared_expert = Qwen35SharedExpert(
             self.hidden_size,

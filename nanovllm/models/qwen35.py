@@ -110,6 +110,11 @@ class Qwen3_5MoeForCausalLM(nn.Module):
     def __init__(self, config) -> None:
         super().__init__()
         text_config = getattr(config, "text_config", None) or config
+        self.checkpoint_quantization_spec = getattr(
+            text_config,
+            "nanovllm_quantization_spec",
+            None,
+        )
         self.model = Qwen35Model(text_config)
         self.lm_head = ParallelLMHead(
             int(text_config.vocab_size), int(text_config.hidden_size)
@@ -127,9 +132,20 @@ class Qwen3_5MoeForCausalLM(nn.Module):
         return weight_name
 
     def resolve_checkpoint_parameter(self, weight_name: str):
+        from nanovllm.models.qwen35_fp8 import resolve_fp8_expert_parameter
         from nanovllm.models.qwen35_gptq import resolve_gptq_expert_parameter
 
-        resolved = resolve_gptq_expert_parameter(weight_name)
+        checkpoint_format = getattr(
+            self.checkpoint_quantization_spec,
+            "format",
+            "bf16",
+        )
+        if checkpoint_format == "gptq_int4":
+            resolved = resolve_gptq_expert_parameter(weight_name)
+        elif checkpoint_format == "fp8_block":
+            resolved = resolve_fp8_expert_parameter(weight_name)
+        else:
+            resolved = None
         if resolved is None:
             return None
         target, expert_id = resolved

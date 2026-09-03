@@ -1,0 +1,197 @@
+from importlib.util import module_from_spec, spec_from_file_location
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
+
+import pytest
+import torch
+from safetensors.torch import save_file
+from torch import nn
+
+from nanovllm.models.qwen35_fp8 import (
+    dequantize_fp8_block_weight,
+    resolve_fp8_expert_parameter,
+)
+from nanovllm.utils.loader import load_model
+
+ROOT = Path(__file__).parents[1]
+MOE_SPEC = spec_from_file_location(
+    "qwen35_fp8_moe_under_test",
+    ROOT / "nanovllm/models/qwen35_moe.py",
+)
+assert MOE_SPEC is not None and MOE_SPEC.loader is not None
+MOE_MODULE = module_from_spec(MOE_SPEC)
+MOE_SPEC.loader.exec_module(MOE_MODULE)
+Qwen35Experts = MOE_MODULE.Qwen35Experts
+
+
+def test_block_fp8_dequantization_handles_partial_edge_blocks():
+    weight = torch.tensor(
+        [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]],
+        dtype=torch.float8_e4m3fn,
+    )
+    scale = torch.tensor([[2.0, 3.0], [4.0, 5.0]])
+
+    result = dequantize_fp8_block_weight(
+        weight,
+        scale,
+        (2, 2),
+        output_dtype=torch.float32,
+    )
+
+    expected = torch.tensor([[2.0, 4.0, 9.0], [8.0, 10.0, 18.0], [28.0, 32.0, 45.0]])
+    torch.testing.assert_close(result, expected)
+
+
+def test_block_fp8_dequantization_rejects_wrong_scale_grid():
+    with pytest.raises(ValueError, match="scale shape"):
+        dequantize_fp8_block_weight(
+            torch.ones(3, 3, dtype=torch.float8_e4m3fn),
+            torch.ones(1, 1),
+            (2, 2),
+            output_dtype=torch.float32,
+        )
+
+
+def test_fp8_expert_names_map_to_stacked_parameters():
+    assert resolve_fp8_expert_parameter(
+        "model.layers.2.mlp.experts.17.up_proj.weight"
+    ) == ("model.layers.2.mlp.experts.gate_up_proj", (17, "up"))
+    assert (
+        resolve_fp8_expert_parameter("model.layers.2.self_attn.q_proj.weight") is None
+    )
+
+
+def test_fp8_expert_loader_owns_only_local_tp4_blocks():
+    with (
+        patch("torch.distributed.get_world_size", return_value=4),
+        patch("torch.distributed.get_rank", return_value=2),
+    ):
+        experts = Qwen35Experts(
+            hidden_size=4,
+            intermediate_size=512,
+            num_experts=2,
+            checkpoint_format="fp8_block",
+        )
+    gate = torch.arange(512 * 4, dtype=torch.float32).reshape(512, 4)
+    up = gate + 10_000
+    down = torch.arange(4 * 512, dtype=torch.float32).reshape(4, 512)
+
+    experts._load_gate_up(experts.gate_up_proj, gate, (1, "gate"))
+    experts._load_gate_up(experts.gate_up_proj, up, (1, "up"))
+    experts._load_down(experts.down_proj, down, (1, "down"))
+
+    torch.testing.assert_close(experts.gate_up_proj[1, :128], gate[256:384])
+    torch.testing.assert_close(experts.gate_up_proj[1, 128:], up[256:384])
+    torch.testing.assert_close(experts.down_proj[1], down[:, 256:384])
+    assert len(experts.gate_up_proj.required_checkpoint_shards) == 4
+    assert len(experts.down_proj.required_checkpoint_shards) == 2
+
+
+class TinyFP8Model(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.linear = nn.Linear(3, 3, bias=False)
+        self.checkpoint_quantization_spec = SimpleNamespace(
+            format="fp8_block",
+            weight_block_size=(2, 2),
+        )
+
+
+def write_tiny_fp8_checkpoint(path: Path, *, include_scale: bool = True):
+    tensors = {
+        "linear.weight": torch.tensor(
+            [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]],
+            dtype=torch.float8_e4m3fn,
+        )
+    }
+    if include_scale:
+        tensors["linear.weight_scale_inv"] = torch.tensor([[2.0, 3.0], [4.0, 5.0]])
+    save_file(tensors, path / "model.safetensors")
+
+
+def test_model_loader_pairs_fp8_weight_and_scale(tmp_path):
+    model = TinyFP8Model()
+    write_tiny_fp8_checkpoint(tmp_path)
+
+    load_model(model, str(tmp_path))
+
+    expected = torch.tensor([[2.0, 4.0, 9.0], [8.0, 10.0, 18.0], [28.0, 32.0, 45.0]])
+    torch.testing.assert_close(model.linear.weight, expected)
+
+
+def test_model_loader_rejects_fp8_weight_without_scale(tmp_path):
+    model = TinyFP8Model()
+    write_tiny_fp8_checkpoint(tmp_path, include_scale=False)
+
+    with pytest.raises(RuntimeError, match="missing scale"):
+        load_model(model, str(tmp_path))
+
+
+class TinyFP8ExpertsModel(nn.Module):
+    strict_weight_loading = True
+
+    def __init__(self):
+        super().__init__()
+        self.model = nn.Module()
+        layer = nn.Module()
+        layer.mlp = nn.Module()
+        with (
+            patch("torch.distributed.get_world_size", return_value=1),
+            patch("torch.distributed.get_rank", return_value=0),
+        ):
+            layer.mlp.experts = Qwen35Experts(
+                hidden_size=4,
+                intermediate_size=4,
+                num_experts=2,
+                checkpoint_format="fp8_block",
+            )
+        self.model.layers = nn.ModuleList([layer])
+        self.checkpoint_quantization_spec = SimpleNamespace(
+            format="fp8_block",
+            weight_block_size=(2, 2),
+        )
+
+    def resolve_checkpoint_parameter(self, weight_name):
+        resolved = resolve_fp8_expert_parameter(weight_name)
+        if resolved is None:
+            return None
+        target, shard_id = resolved
+        self.get_parameter(target)
+        return target, shard_id
+
+
+def test_model_loader_assembles_per_expert_fp8_weights(tmp_path):
+    model = TinyFP8ExpertsModel()
+    tensors = {}
+    expected = {}
+    for expert_id in range(2):
+        for projection in ("gate", "up", "down"):
+            name = f"model.layers.0.mlp.experts.{expert_id}.{projection}_proj.weight"
+            value = torch.full(
+                (4, 4),
+                expert_id * 10 + {"gate": 1, "up": 2, "down": 3}[projection],
+                dtype=torch.float8_e4m3fn,
+            )
+            scale = torch.full((2, 2), 2.0)
+            tensors[name] = value
+            tensors[f"{name}_scale_inv"] = scale
+            expected[(expert_id, projection)] = value.float() * 2
+    save_file(tensors, tmp_path / "model.safetensors")
+
+    load_model(model, str(tmp_path))
+
+    experts = model.model.layers[0].mlp.experts
+    for expert_id in range(2):
+        torch.testing.assert_close(
+            experts.gate_up_proj[expert_id, :4],
+            expected[(expert_id, "gate")],
+        )
+        torch.testing.assert_close(
+            experts.gate_up_proj[expert_id, 4:],
+            expected[(expert_id, "up")],
+        )
+        torch.testing.assert_close(
+            experts.down_proj[expert_id],
+            expected[(expert_id, "down")],
+        )
