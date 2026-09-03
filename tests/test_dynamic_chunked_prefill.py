@@ -779,6 +779,41 @@ def test_dynamic_scheduler_reserves_useful_prefill_chunk_after_starvation():
     assert scheduler.current_prefill_starvation_steps == 0
 
 
+def test_failed_fairness_reserve_falls_back_to_preemptible_decode():
+    scheduler = make_scheduler(
+        max_tokens=1,
+        max_seqs=2,
+        block_size=4,
+        num_blocks=2,
+        preemption_policy="min_recompute",
+        starvation_token_budget=1,
+        decode_kv_reservation=True,
+    )
+    scheduler.prefill_starvation_threshold = 1
+    scheduler.current_prefill_starvation_steps = 1
+
+    running = Sequence([1, 2, 3, 4])
+    scheduler.block_manager.allocate(running, 0)
+    running.num_cached_tokens = 4
+    running.append_token(5)
+    running.status = SequenceStatus.RUNNING
+    running.is_prefill = False
+    scheduler.running.append(running)
+
+    waiting = Sequence([10] * 8)
+    scheduler.block_manager.allocate(waiting, 0, num_blocks=1)
+    waiting.num_cached_tokens = 4
+    scheduler.waiting.append(waiting)
+
+    result = scheduler.schedule()
+
+    assert result.decode_seqs == [running]
+    assert result.prefill_seqs == []
+    assert waiting.block_table == []
+    assert scheduler.preemption_count == 1
+    assert scheduler.waiting_prefill_preemptions == 0
+
+
 def test_fairness_reserve_keeps_half_of_multi_token_budget_for_decode():
     scheduler = make_scheduler(
         max_tokens=4,

@@ -727,10 +727,13 @@ class Scheduler:
             # A fairness reserve can go unused when prefill admission fails
             # under KV pressure. Reclaim only that unused budget for older
             # runnable decode requests instead of returning a partial batch.
+            # If prefill made no progress at all, preemption is required to
+            # avoid a deadlock where boundary decode requests and the waiting
+            # partial prefill collectively own every KV block.
             decode_seqs.extend(
                 self.schedule_decode_first(
                     unused_tokens,
-                    allow_preemption=False,
+                    allow_preemption=not prefill_seqs,
                 )
             )
         if decode_seqs:
