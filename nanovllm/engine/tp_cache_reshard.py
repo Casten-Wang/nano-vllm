@@ -213,6 +213,37 @@ class TPTransferProfile:
         return profile
 
 
+@dataclass(frozen=True, slots=True)
+class Qwen35CacheTransferPlan:
+    """Executable tensor-slice routes plus their aggregate capacity ledger."""
+
+    kv_slices: tuple[TPTransferSlice, ...]
+    kv_scale_slices: tuple[TPTransferSlice, ...]
+    recurrent_slices: tuple[TPTransferSlice, ...]
+    convolution_slices: tuple[TPTransferSlice, ...]
+    profile: TPTransferProfile
+
+    def __post_init__(self) -> None:
+        if (
+            not self.kv_slices
+            or not self.recurrent_slices
+            or not self.convolution_slices
+        ):
+            raise ValueError("Qwen3.6 transfer plan is missing tensor routes")
+        routes = (
+            *self.kv_slices,
+            *self.kv_scale_slices,
+            *self.recurrent_slices,
+            *self.convolution_slices,
+        )
+        if any(not isinstance(route, TPTransferSlice) for route in routes):
+            raise ValueError("Qwen3.6 transfer plan contains an invalid route")
+        if not isinstance(self.profile, TPTransferProfile):
+            raise ValueError("Qwen3.6 transfer plan profile is invalid")
+        if len(routes) != self.profile.slice_count:
+            raise ValueError("Qwen3.6 transfer routes do not match profile")
+
+
 class TPPeerTransferSession:
     """Track destination-installed bytes for one heterogeneous-TP request."""
 
@@ -833,7 +864,7 @@ def aggregate_tp_transfer_profiles(
     )
 
 
-def profile_qwen35_cache_transfer_layout(
+def build_qwen35_cache_transfer_plan(
     *,
     src_tp_size: int,
     dst_tp_size: int,
@@ -844,8 +875,8 @@ def profile_qwen35_cache_transfer_layout(
     recurrent_bytes_per_head: int,
     convolution_group_widths: tuple[int, int, int],
     convolution_bytes_per_channel: int,
-) -> TPTransferProfile:
-    """Preflight a complete Qwen3.6 hybrid-cache transfer without tensors."""
+) -> Qwen35CacheTransferPlan:
+    """Build exact Qwen3.6 peer routes and their allocation-free profile."""
 
     _validate_tp_size(src_tp_size)
     _validate_tp_size(dst_tp_size)
@@ -887,6 +918,7 @@ def profile_qwen35_cache_transfer_layout(
             bytes_per_dim=kv_bytes_per_head,
         )
     ]
+    kv_scale_plan = kv_plan if kv_scale_bytes_per_head else ()
     if kv_scale_bytes_per_head:
         profiles.append(
             profile_tp_transfer_layout(
@@ -930,7 +962,40 @@ def profile_qwen35_cache_transfer_layout(
             bytes_per_dim=convolution_bytes_per_channel,
         )
     )
-    return aggregate_tp_transfer_profiles(profiles)
+    return Qwen35CacheTransferPlan(
+        kv_slices=kv_plan,
+        kv_scale_slices=kv_scale_plan,
+        recurrent_slices=recurrent_plan,
+        convolution_slices=convolution_plan,
+        profile=aggregate_tp_transfer_profiles(profiles),
+    )
+
+
+def profile_qwen35_cache_transfer_layout(
+    *,
+    src_tp_size: int,
+    dst_tp_size: int,
+    total_kv_heads: int,
+    kv_bytes_per_head: int,
+    kv_scale_bytes_per_head: int,
+    recurrent_heads: int,
+    recurrent_bytes_per_head: int,
+    convolution_group_widths: tuple[int, int, int],
+    convolution_bytes_per_channel: int,
+) -> TPTransferProfile:
+    """Preflight a complete Qwen3.6 hybrid-cache transfer without tensors."""
+
+    return build_qwen35_cache_transfer_plan(
+        src_tp_size=src_tp_size,
+        dst_tp_size=dst_tp_size,
+        total_kv_heads=total_kv_heads,
+        kv_bytes_per_head=kv_bytes_per_head,
+        kv_scale_bytes_per_head=kv_scale_bytes_per_head,
+        recurrent_heads=recurrent_heads,
+        recurrent_bytes_per_head=recurrent_bytes_per_head,
+        convolution_group_widths=convolution_group_widths,
+        convolution_bytes_per_channel=convolution_bytes_per_channel,
+    ).profile
 
 
 def apply_tp_transfer_plan(

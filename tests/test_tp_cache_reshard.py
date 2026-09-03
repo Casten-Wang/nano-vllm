@@ -9,11 +9,13 @@ from nanovllm.engine.cache_transfer import (
     RankCacheTransfer,
 )
 from nanovllm.engine.tp_cache_reshard import (
+    Qwen35CacheTransferPlan,
     TPPeerTransferSession,
     TPTransferProfile,
     TPTransferSlice,
     aggregate_tp_transfer_profiles,
     apply_tp_transfer_plan,
+    build_qwen35_cache_transfer_plan,
     plan_grouped_uniform_reshard,
     plan_kv_head_reshard,
     plan_uniform_reshard,
@@ -467,6 +469,47 @@ def test_layout_preflight_omits_scale_traffic_for_floating_kv_cache():
         == 32
         for rank in range(8)
     )
+
+
+@pytest.mark.parametrize("kv_scale_bytes_per_head", [0, 32])
+def test_qwen36_request_plan_exposes_exact_routes_and_capacity(
+    kv_scale_bytes_per_head,
+):
+    arguments = {
+        "src_tp_size": 4,
+        "dst_tp_size": 8,
+        "total_kv_heads": 2,
+        "kv_bytes_per_head": 1_024,
+        "kv_scale_bytes_per_head": kv_scale_bytes_per_head,
+        "recurrent_heads": 32,
+        "recurrent_bytes_per_head": 512,
+        "convolution_group_widths": (16, 16, 32),
+        "convolution_bytes_per_channel": 64,
+    }
+
+    plan = build_qwen35_cache_transfer_plan(**arguments)
+
+    assert isinstance(plan, Qwen35CacheTransferPlan)
+    assert plan.profile == profile_qwen35_cache_transfer_layout(**arguments)
+    assert bool(plan.kv_scale_slices) == bool(kv_scale_bytes_per_head)
+    if kv_scale_bytes_per_head:
+        assert plan.kv_scale_slices == plan.kv_slices
+    assert plan.profile.slice_count == sum(
+        len(routes)
+        for routes in (
+            plan.kv_slices,
+            plan.kv_scale_slices,
+            plan.recurrent_slices,
+            plan.convolution_slices,
+        )
+    )
+    assert {
+        (route.src_rank, route.dst_rank)
+        for route in plan.kv_slices
+    } <= {
+        (src_rank, dst_rank)
+        for src_rank, dst_rank, _byte_count in plan.profile.peer_bytes
+    }
 
 
 @pytest.mark.parametrize(
