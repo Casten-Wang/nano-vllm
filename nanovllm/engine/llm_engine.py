@@ -187,21 +187,22 @@ class LLMEngine:
                 timeout_s,
                 max_payload_bytes,
             )
-        except BaseException as exc:
-            self.scheduler.abort_remote_prefill(
+            now = perf_counter()
+            for rank in range(self.config.tensor_parallel_size):
+                session.acknowledge(rank, now=now)
+            self.scheduler.commit_remote_prefill(
                 transfer_id,
-                f"rank-local cache receive failed: {exc}",
-                now=perf_counter(),
+                first_token_id,
+                now=now,
             )
+        except BaseException as exc:
+            if transfer_id in self.scheduler.remote_prefills:
+                self.scheduler.abort_remote_prefill(
+                    transfer_id,
+                    f"rank-local cache receive failed: {exc}",
+                    now=perf_counter(),
+                )
             raise
-        now = perf_counter()
-        for rank in range(self.config.tensor_parallel_size):
-            session.acknowledge(rank, now=now)
-        self.scheduler.commit_remote_prefill(
-            transfer_id,
-            first_token_id,
-            now=now,
-        )
         return seq.seq_id
 
     def send_remote_prefill(

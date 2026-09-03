@@ -103,6 +103,33 @@ def test_engine_receive_failure_releases_destination_and_requeues_prefill():
     assert seq.state_slot is None
 
 
+def test_engine_receive_timeout_during_ack_releases_destination():
+    engine = make_engine(tensor_parallel_size=2)
+    seq_id = engine.add_remote_prefill_request(
+        [1, 2, 3, 4],
+        SamplingParams(max_tokens=4),
+        transfer_id="request/attempt-1",
+        timeout_s=10.0,
+    )
+    _, session = engine.scheduler.remote_prefills["request/attempt-1"]
+    session.deadline = 0.0
+
+    with pytest.raises(RuntimeError, match="terminal"):
+        engine.receive_remote_prefill(
+            "request/attempt-1",
+            9,
+            [("127.0.0.1", 20001), ("127.0.0.1", 20002)],
+        )
+
+    seq = engine.scheduler.waiting[0]
+    assert seq.seq_id == seq_id
+    assert seq.status is SequenceStatus.WAITING
+    assert seq.block_table == []
+    assert seq.state_slot is None
+    assert not engine.scheduler.remote_prefills
+    assert session.failure_reason == "cache transfer timed out"
+
+
 def test_engine_releases_prefill_source_only_after_receiver_ack():
     engine = make_engine()
     seq = Sequence([1, 2, 3, 4], SamplingParams(max_tokens=4))
