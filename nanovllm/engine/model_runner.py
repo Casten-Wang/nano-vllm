@@ -141,6 +141,44 @@ def validate_allocated_recurrent_state(
         )
 
 
+def plan_local_kv_cache_capacity(
+    *,
+    free_bytes: int,
+    total_bytes: int,
+    gpu_memory_utilization: float,
+    peak_allocated_bytes: int,
+    current_allocated_bytes: int,
+    block_bytes: int,
+) -> tuple[int, dict[str, int]]:
+    """Plan rank-local KV blocks and retain the inputs needed to audit it."""
+
+    if block_bytes <= 0:
+        raise ValueError("KV cache block bytes must be positive")
+    used_bytes = total_bytes - free_bytes
+    transient_peak_bytes = peak_allocated_bytes - current_allocated_bytes
+    if transient_peak_bytes < 0:
+        raise ValueError("peak allocated bytes cannot be below current bytes")
+    requested_memory_bytes = int(total_bytes * gpu_memory_utilization)
+    allocatable_bytes = int(
+        total_bytes * gpu_memory_utilization
+        - used_bytes
+        - transient_peak_bytes
+    )
+    local_num_blocks = allocatable_bytes // block_bytes
+    return local_num_blocks, {
+        "free_bytes_before_kv": free_bytes,
+        "total_device_bytes": total_bytes,
+        "used_bytes_before_kv": used_bytes,
+        "requested_memory_bytes": requested_memory_bytes,
+        "peak_allocated_bytes": peak_allocated_bytes,
+        "current_allocated_bytes": current_allocated_bytes,
+        "transient_peak_bytes": transient_peak_bytes,
+        "allocatable_bytes_before_sync": allocatable_bytes,
+        "block_bytes": block_bytes,
+        "local_num_blocks_before_sync": local_num_blocks,
+    }
+
+
 class ModelRunner:
 
     def __init__(
@@ -175,6 +213,7 @@ class ModelRunner:
             "supported": False,
             "buckets": [],
         }
+        self.kv_cache_capacity_stats: dict[str, int] = {}
 
         port = config.distributed_port
         if port is None:
@@ -732,6 +771,7 @@ class ModelRunner:
             "data_bytes": data_bytes,
             "scale_bytes": scale_bytes,
             "total_bytes": data_bytes + scale_bytes,
+            **getattr(self, "kv_cache_capacity_stats", {}),
         }
         if self.world_size == 1:
             return [local]
@@ -1147,7 +1187,6 @@ class ModelRunner:
         if hf_config is None or model_spec is None:
             raise RuntimeError("model configuration was not initialized")
         free, total = torch.cuda.mem_get_info()
-        used = total - free
         peak = torch.cuda.memory_stats()["allocated_bytes.all.peak"]
         current = torch.cuda.memory_stats()["allocated_bytes.all.current"]
         cache_plan = plan_cache_memory(
@@ -1159,10 +1198,23 @@ class ModelRunner:
         head_dim = getattr(hf_config, "head_dim", hf_config.hidden_size // hf_config.num_attention_heads)
         num_kv_layers = model_spec.num_kv_cache_layers
         block_bytes = cache_plan.kv_bytes_per_token * self.block_size
-        local_num_blocks = int(
-            total * config.gpu_memory_utilization - used - peak + current
-        ) // block_bytes
+        local_num_blocks, capacity_stats = plan_local_kv_cache_capacity(
+            free_bytes=free,
+            total_bytes=total,
+            gpu_memory_utilization=config.gpu_memory_utilization,
+            peak_allocated_bytes=peak,
+            current_allocated_bytes=current,
+            block_bytes=block_bytes,
+        )
         config.num_kvcache_blocks = self._synchronize_kv_block_count(local_num_blocks)
+        self.kv_cache_capacity_stats = {
+            **capacity_stats,
+            "shared_num_blocks": config.num_kvcache_blocks,
+            "unused_capacity_bytes_after_sync": (
+                capacity_stats["allocatable_bytes_before_sync"]
+                - config.num_kvcache_blocks * block_bytes
+            ),
+        }
         self.kv_cache = torch.empty(2, num_kv_layers, config.num_kvcache_blocks, self.block_size, num_kv_heads, head_dim)
         self.kv_scale = None
         layer_id = 0
@@ -1221,16 +1273,28 @@ class ModelRunner:
                 device=torch.device("cuda", torch.cuda.current_device()),
             )
         free, total = torch.cuda.mem_get_info()
-        used = total - free
         peak = torch.cuda.memory_stats()["allocated_bytes.all.peak"]
         current = torch.cuda.memory_stats()["allocated_bytes.all.current"]
         kv_data_bytes = cache_plan.kv_bytes_per_token * self.block_size
         scale_bytes = cache_plan.int8_scale_bytes_per_token * self.block_size
         block_bytes = kv_data_bytes + scale_bytes
-        local_num_blocks = int(
-            total * config.gpu_memory_utilization - used - peak + current
-        ) // block_bytes
+        local_num_blocks, capacity_stats = plan_local_kv_cache_capacity(
+            free_bytes=free,
+            total_bytes=total,
+            gpu_memory_utilization=config.gpu_memory_utilization,
+            peak_allocated_bytes=peak,
+            current_allocated_bytes=current,
+            block_bytes=block_bytes,
+        )
         config.num_kvcache_blocks = self._synchronize_kv_block_count(local_num_blocks)
+        self.kv_cache_capacity_stats = {
+            **capacity_stats,
+            "shared_num_blocks": config.num_kvcache_blocks,
+            "unused_capacity_bytes_after_sync": (
+                capacity_stats["allocatable_bytes_before_sync"]
+                - config.num_kvcache_blocks * block_bytes
+            ),
+        }
         self.kv_cache = torch.empty(
             2,
             num_layers,

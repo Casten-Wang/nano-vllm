@@ -175,6 +175,7 @@ validate_initial_cache_capacity = model_runner_module.validate_initial_cache_cap
 validate_allocated_recurrent_state = (
     model_runner_module.validate_allocated_recurrent_state
 )
+plan_local_kv_cache_capacity = model_runner_module.plan_local_kv_cache_capacity
 
 
 def make_runner(rank: int, events):
@@ -186,6 +187,37 @@ def make_runner(rank: int, events):
 
 
 class TPControlTest(unittest.TestCase):
+    def test_local_kv_capacity_records_persistent_and_transient_memory(self):
+        blocks, stats = plan_local_kv_cache_capacity(
+            free_bytes=700,
+            total_bytes=1_000,
+            gpu_memory_utilization=0.9,
+            peak_allocated_bytes=450,
+            current_allocated_bytes=300,
+            block_bytes=64,
+        )
+
+        self.assertEqual(blocks, 7)
+        self.assertEqual(stats["used_bytes_before_kv"], 300)
+        self.assertEqual(stats["requested_memory_bytes"], 900)
+        self.assertEqual(stats["transient_peak_bytes"], 150)
+        self.assertEqual(stats["allocatable_bytes_before_sync"], 450)
+        self.assertEqual(stats["local_num_blocks_before_sync"], 7)
+
+    def test_local_kv_capacity_rejects_invalid_memory_snapshot(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            "peak allocated bytes cannot be below current bytes",
+        ):
+            plan_local_kv_cache_capacity(
+                free_bytes=700,
+                total_bytes=1_000,
+                gpu_memory_utilization=0.9,
+                peak_allocated_bytes=299,
+                current_allocated_bytes=300,
+                block_bytes=64,
+            )
+
     def test_allocated_recurrent_state_must_match_capacity_plan(self):
         validate_allocated_recurrent_state(
             num_slots=3,
@@ -961,6 +993,33 @@ class HybridStateContextTest(unittest.TestCase):
         self.assertEqual(
             stats,
             [{"rank": 0, "data_bytes": 20, "scale_bytes": 8, "total_bytes": 28}],
+        )
+
+    def test_kv_cache_stats_include_capacity_inputs(self):
+        runner = object.__new__(ModelRunner)
+        runner.rank = 0
+        runner.world_size = 1
+        runner.kv_cache = FakeTensor(range(10))
+        runner.kv_scale = None
+        runner.kv_cache_capacity_stats = {
+            "block_bytes": 64,
+            "local_num_blocks_before_sync": 9,
+            "shared_num_blocks": 7,
+            "unused_capacity_bytes_after_sync": 130,
+        }
+
+        self.assertEqual(
+            runner.get_kv_cache_stats_by_rank(),
+            [{
+                "rank": 0,
+                "data_bytes": 20,
+                "scale_bytes": 0,
+                "total_bytes": 20,
+                "block_bytes": 64,
+                "local_num_blocks_before_sync": 9,
+                "shared_num_blocks": 7,
+                "unused_capacity_bytes_after_sync": 130,
+            }],
         )
 
     def test_runtime_buffer_stats_count_shared_pool_once(self):
