@@ -96,6 +96,12 @@ routing. For scheduling, begin with deterministic token/memory budgets,
 starvation bounds, and preemption-cost accounting before considering adaptive
 policies.
 
+For Qwen3.5-35B-A3B, use TP4 and TP8 as the primary multi-GPU design targets.
+Prioritize measured capacity accounting and safe tensor/workspace reuse first,
+then deterministic memory-aware scheduling, then PD disaggregation. Every
+multi-GPU result must include per-rank peak VRAM, communication cost, replicated
+state, and skewed-load behavior, not only aggregate throughput.
+
 ## Releases
 
 After the pull request is merged and the resulting `main` is verified, create

@@ -121,6 +121,13 @@
   vLLM and SGLang, plus specialized systems such as Mooncake, Dynamo, DistServe,
   TensorRT-LLM, or PyTorch where applicable. Record why a design does or does
   not fit nano-vllm rather than copying its architecture wholesale.
+- Prioritize work by dependency and validation cost: (1) memory accounting and
+  safe tensor/workspace reuse, (2) deterministic memory-aware scheduling, and
+  (3) multi-GPU prefill/decode disaggregation. Independent low-risk work may
+  continue in parallel when it does not obscure the baseline for a later stage.
+- For `Qwen3.5-35B-A3B`, evaluate all three tracks under TP4 and TP8 deployment
+  assumptions. A design is not complete until its communication, replicated
+  state, per-rank peak VRAM, and behavior under uneven request load are known.
 
 ## Git Safety
 
