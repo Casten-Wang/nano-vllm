@@ -1302,8 +1302,8 @@ def summarize_recurrent_state_access(rows: list[dict]) -> dict:
     for row in rows:
         backend = row.get("qwen35_moe_decode_backend")
         expected = {
-            "sorted": {"prefill_indexed", "decode_contiguous_view"},
-            "batched": {"prefill_indexed", "decode_graph_indexed"},
+            "sorted": {"prefill_contiguous_view", "decode_contiguous_view"},
+            "batched": {"prefill_contiguous_view", "decode_graph_indexed"},
         }.get(backend)
         if expected is None:
             raise ValueError(

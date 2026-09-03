@@ -743,6 +743,12 @@ class ModelRunner:
         if model_spec is None or not model_spec.is_hybrid:
             return None
         if step_kind == "prefill":
+            groups = getattr(context, "state_prefill_groups", ())
+            contiguous = [group[3] is not None for group in groups]
+            if contiguous and all(contiguous):
+                return "prefill_contiguous_view"
+            if any(contiguous):
+                return "prefill_mixed_state_access"
             return "prefill_indexed"
         if use_graph:
             return "decode_graph_indexed"

@@ -186,7 +186,7 @@ def required_paths(
             if case.moe_decode_backend == "batched"
             else "decode_eager"
         ),
-        "prefill_indexed",
+        "prefill_contiguous_view",
         (
             "decode_graph_indexed"
             if case.moe_decode_backend == "batched"

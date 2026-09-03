@@ -1205,9 +1205,12 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
             "repeat_output_digests_match": True,
             "execution_paths_valid": True,
             "execution_paths": {
-                "required": ["prefill_indexed", "decode_contiguous_view"],
+                "required": [
+                    "prefill_contiguous_view",
+                    "decode_contiguous_view",
+                ],
                 "observed_in_all_repeats": [
-                    "prefill_indexed",
+                    "prefill_contiguous_view",
                     "decode_contiguous_view",
                 ],
             },
@@ -1262,9 +1265,12 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
             "repeat_output_digests_match": True,
             "execution_paths_valid": True,
             "execution_paths": {
-                "required": ["prefill_indexed", "decode_graph_indexed"],
+                "required": [
+                    "prefill_contiguous_view",
+                    "decode_graph_indexed",
+                ],
                 "observed_in_all_repeats": [
-                    "prefill_indexed",
+                    "prefill_contiguous_view",
                     "decode_graph_indexed",
                 ],
             },
@@ -2169,7 +2175,7 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     performance_result = json.loads(performance_path.read_text())
     performance_result["runs"][0]["execution_paths"][
         "observed_in_all_repeats"
-    ] = ["prefill_indexed", "decode_indexed_copy"]
+    ] = ["prefill_contiguous_view", "decode_indexed_copy"]
     write(performance_path, performance_result)
     invalid_state_path_report = MODULE.summarize(tmp_path, run_id)
     state_access = invalid_state_path_report["performance"][
@@ -2180,7 +2186,7 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     assert not invalid_state_path_report["valid"]
     performance_result["runs"][0]["execution_paths"][
         "observed_in_all_repeats"
-    ] = ["prefill_indexed", "decode_contiguous_view"]
+    ] = ["prefill_contiguous_view", "decode_contiguous_view"]
     performance_result["runs"][0]["storage"]["recurrent_state_storage_by_rank"][1][
         "rotary_cache_bytes_local_rank"
     ] = 8192

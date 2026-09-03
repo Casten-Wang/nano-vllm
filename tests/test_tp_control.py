@@ -764,6 +764,52 @@ class HybridStateContextTest(unittest.TestCase):
             (None,),
         )
 
+    def test_prefill_state_access_path_reports_contiguous_groups(self):
+        runner = self.make_hybrid_runner()
+        context = SimpleNamespace(
+            state_prefill_groups=(
+                (4, (), FakeTensor(), (3, 2)),
+                (2, (), FakeTensor(), (8, 1)),
+            )
+        )
+
+        self.assertEqual(
+            runner._state_access_path(
+                context,
+                step_kind="prefill",
+                use_graph=False,
+            ),
+            "prefill_contiguous_view",
+        )
+
+    def test_prefill_state_access_path_reports_partial_and_indexed_groups(self):
+        runner = self.make_hybrid_runner()
+        context = SimpleNamespace(
+            state_prefill_groups=(
+                (4, (), FakeTensor(), (3, 2)),
+                (2, (), FakeTensor(), None),
+            )
+        )
+        self.assertEqual(
+            runner._state_access_path(
+                context,
+                step_kind="prefill",
+                use_graph=False,
+            ),
+            "prefill_mixed_state_access",
+        )
+        context.state_prefill_groups = (
+            (4, (), FakeTensor(), None),
+        )
+        self.assertEqual(
+            runner._state_access_path(
+                context,
+                step_kind="prefill",
+                use_graph=False,
+            ),
+            "prefill_indexed",
+        )
+
     def test_compressed_eager_state_span_is_reported_as_contiguous_view(self):
         runner = self.make_hybrid_runner()
         runner.config.recurrent_state_dtype = "model"
