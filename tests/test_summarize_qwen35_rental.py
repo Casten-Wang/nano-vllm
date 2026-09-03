@@ -121,7 +121,13 @@ def write_gptq_summary_inputs(root, run_id, *, backend="triton"):
     )
 
 
-def write_fp8_summary_inputs(root, run_id, *, backend="reference"):
+def write_fp8_summary_inputs(
+    root,
+    run_id,
+    *,
+    backend="reference",
+    requested_backend="reference",
+):
     fp8_run_id = f"{run_id}-fp8"
     shards = [
         {"name": "model-00001.safetensors", "size_bytes": 123, "sha256": "d" * 64}
@@ -132,6 +138,7 @@ def write_fp8_summary_inputs(root, run_id, *, backend="reference"):
             "valid": True,
             "repo": MODULE.OFFICIAL_FP8_CHECKPOINT_REPO,
             "resolved_revision": MODULE.OFFICIAL_FP8_CHECKPOINT_REVISION,
+            "fp8_runtime_backend": requested_backend,
             "config_sha256": "e" * 64,
             "index_sha256": "f" * 64,
             "shard_count": 1,
@@ -189,7 +196,7 @@ def write_fp8_summary_inputs(root, run_id, *, backend="reference"):
     rows = [
         {
             "tensor_parallel_size": tp,
-            "requested_weight_quant_backend": "reference",
+            "requested_weight_quant_backend": requested_backend,
             "weight_quant_backend": backend,
             "quantization_format": "fp8_block",
             "qwen35_moe_decode_backend": "sorted",
@@ -219,7 +226,7 @@ def write_fp8_summary_inputs(root, run_id, *, backend="reference"):
             "cases": [
                 {
                     "tensor_parallel_size": tp,
-                    "requested_weight_quant_backend": "reference",
+                    "requested_weight_quant_backend": requested_backend,
                     "weight_quant_backend": backend,
                     "qwen35_moe_decode_backend": "sorted",
                 }
@@ -318,6 +325,22 @@ def test_optional_fp8_summary_requires_reference_execution_and_quality(tmp_path)
     invalid = MODULE.summarize_optional_fp8_audit(tmp_path, "run")
     assert not invalid["valid"]
     assert not invalid["executable"]
+
+
+def test_optional_fp8_summary_accepts_resident_execution_without_native_claim(tmp_path):
+    write_fp8_summary_inputs(
+        tmp_path,
+        "run",
+        backend="resident",
+        requested_backend="resident",
+    )
+
+    report = MODULE.summarize_optional_fp8_audit(tmp_path, "run")
+
+    assert report["valid"]
+    assert report["runtime_backend"] == "resident"
+    assert not report["native_fp8"]
+    assert "on-demand" in report["scope"]
 
 
 def test_optional_gptq_summary_requires_actual_triton_execution(tmp_path):
