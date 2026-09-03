@@ -1207,7 +1207,11 @@ def mark_stage_completed(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--model", default=OFFICIAL_CHECKPOINT_REPO)
+    parser.add_argument(
+        "--model",
+        required=True,
+        help="Local Qwen3.6-35B-A3B BF16 checkpoint directory.",
+    )
     parser.add_argument(
         "--gptq-model",
         default=None,
