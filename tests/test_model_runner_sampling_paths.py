@@ -70,6 +70,17 @@ def test_all_greedy_batch_skips_full_logits_sampling_path():
     runner.sampler.assert_not_called()
 
 
+def test_large_top_k_falls_back_to_reserved_full_logits_path():
+    runner = make_runner()
+    runner.config.tp_top_k_reduction_max_width = 2
+    seqs = [SimpleNamespace(temperature=0.7, top_k=3)]
+
+    path, top_k, _ = runner._prepare_sampling_path(seqs)
+
+    assert path == "full"
+    assert top_k is None
+
+
 def test_mixed_sampling_batch_keeps_full_logits_sampler_path():
     runner = make_runner()
     logits = torch.randn(2, 8)

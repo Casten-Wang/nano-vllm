@@ -161,7 +161,18 @@ class Qwen3_5MoeForCausalLM(nn.Module):
         )
         self.model = Qwen35Model(text_config)
         self.lm_head = ParallelLMHead(
-            int(text_config.vocab_size), int(text_config.hidden_size)
+            int(text_config.vocab_size),
+            int(text_config.hidden_size),
+        )
+        self.lm_head.max_top_k_reduction_width = min(
+            int(
+                getattr(
+                    text_config,
+                    "nanovllm_tp_top_k_reduction_max_width",
+                    256,
+                )
+            ),
+            int(text_config.vocab_size) - 1,
         )
         if bool(getattr(text_config, "tie_word_embeddings", False)):
             self.lm_head.weight.data = self.model.embed_tokens.weight.data

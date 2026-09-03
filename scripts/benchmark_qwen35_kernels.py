@@ -829,18 +829,13 @@ def benchmark_sampling_input_reuse(args, device, dtype) -> dict:
 
 def benchmark_sampling_noise_reuse(args, device) -> dict:
     shape = (args.sampling_batch, args.sampling_top_k)
-    sampler = SAMPLER.Sampler()
-    candidate_noise = sampler._noise(
-        shape,
-        dtype=torch.float32,
-        device=device,
-    )
+    dead_logits = torch.empty(shape, dtype=torch.float32, device=device)
 
     def reference():
         return (torch.empty(shape, dtype=torch.float32, device=device).exponential_(1),)
 
     def candidate():
-        return (candidate_noise.exponential_(1),)
+        return (dead_logits.exponential_(1),)
 
     torch.manual_seed(args.seed)
     expected = reference()[0].clone()
@@ -863,12 +858,11 @@ def benchmark_sampling_noise_reuse(args, device) -> dict:
         ),
         "errors": [error(actual, expected)],
         "eliminated_tensor_allocations_per_sampling_step": 1,
-        "persistent_sampling_noise_mib": (
-            candidate_noise.numel() * candidate_noise.element_size()
-            / 1024
-            / 1024
+        "persistent_sampling_noise_mib": 0.0,
+        "reused_filtered_logits_mib": (
+            dead_logits.numel() * dead_logits.element_size() / 1024 / 1024
         ),
-        "candidate_reuses_noise_storage": True,
+        "candidate_reuses_filtered_logits_storage": True,
     }
     result["speedup"] = (
         result["reference"]["median_ms"] / result["candidate"]["median_ms"]

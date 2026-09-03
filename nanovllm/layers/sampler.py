@@ -330,11 +330,9 @@ def sample_top_k_candidates(
         rank_buffer,
     )
     probabilities = torch.softmax(selected_logits, dim=-1)
-    noise = (
-        torch.empty_like(probabilities)
-        if noise_buffer is None
-        else noise_buffer
-    )
+    # Filtering logits are dead after softmax. Reuse that equally shaped FP32
+    # storage for exponential noise instead of retaining a second workspace.
+    noise = selected_logits if noise_buffer is None else noise_buffer
     if noise.shape != probabilities.shape or noise.device != probabilities.device:
         raise ValueError("sampling noise buffer must match candidate probabilities")
     selected_offsets = probabilities.div_(
@@ -365,11 +363,7 @@ def sample_top_k_compact(
         rank_buffer,
     )
     probabilities = torch.softmax(selected_logits, dim=-1)
-    noise = (
-        torch.empty_like(probabilities)
-        if noise_buffer is None
-        else noise_buffer
-    )
+    noise = selected_logits if noise_buffer is None else noise_buffer
     selected_offsets = probabilities.div_(
         noise.exponential_(1).clamp_min_(1e-10)
     ).argmax(dim=-1)
@@ -385,45 +379,23 @@ class Sampler(nn.Module):
             torch.empty(0, dtype=torch.long),
             persistent=False,
         )
-        self.register_buffer(
-            "_noise_buffer",
-            torch.empty(0),
-            persistent=False,
-        )
+
+    def reserve_runtime_buffers(self, vocab_size: int) -> None:
+        if vocab_size <= 0:
+            raise ValueError("vocab_size must be positive")
+        self._ranks(vocab_size, self._rank_buffer.device)
 
     def _ranks(self, width: int, device: torch.device) -> torch.Tensor:
         if self._rank_buffer.device != device or self._rank_buffer.numel() < width:
             self._rank_buffer = torch.arange(width, device=device)
         return self._rank_buffer
 
-    def _noise(
-        self,
-        shape: tuple[int, int],
-        *,
-        dtype: torch.dtype,
-        device: torch.device,
-    ) -> torch.Tensor:
-        required = shape[0] * shape[1]
-        if (
-            self._noise_buffer.device != device
-            or self._noise_buffer.dtype != dtype
-            or self._noise_buffer.numel() < required
-        ):
-            self._noise_buffer = torch.empty(
-                required,
-                dtype=dtype,
-                device=device,
-            )
-        return self._noise_buffer[:required].view(shape)
-
     def storage_stats(self) -> dict[str, int]:
         return {
             "rank_buffer_bytes": (
                 self._rank_buffer.numel() * self._rank_buffer.element_size()
             ),
-            "noise_buffer_bytes": (
-                self._noise_buffer.numel() * self._noise_buffer.element_size()
-            ),
+            "noise_buffer_bytes": 0,
         }
 
     @torch.inference_mode()
@@ -450,11 +422,7 @@ class Sampler(nn.Module):
             top_ps,
             metadata.any_top_p_enabled,
             self._ranks(metadata.max_top_k, selected_logits.device),
-            self._noise(
-                tuple(selected_logits.shape),
-                dtype=torch.float32,
-                device=selected_logits.device,
-            ),
+            None,
         )
 
     @torch.inference_mode()
@@ -547,11 +515,7 @@ class Sampler(nn.Module):
                 max_top_k,
                 any_top_p_enabled,
                 self._ranks(max_top_k, logits.device),
-                self._noise(
-                    (sample_source.size(0), max_top_k),
-                    dtype=torch.float32,
-                    device=logits.device,
-                ),
+                None,
             )
             if all_sampling:
                 return sample_tokens
@@ -586,11 +550,7 @@ class Sampler(nn.Module):
         )
         probs = torch.softmax(sample_logits, dim=-1)
         sample_tokens = probs.div_(
-            self._noise(
-                (probs.size(0), probs.size(1)),
-                dtype=probs.dtype,
-                device=probs.device,
-            ).exponential_(1).clamp_min_(1e-10)
+            sample_logits.exponential_(1).clamp_min_(1e-10)
         ).argmax(dim=-1)
         if all_sampling:
             return sample_tokens

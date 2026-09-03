@@ -67,6 +67,7 @@ class Config:
     recurrent_state_dtype: str = "float32"
     qwen35_moe_decode_backend: str = "sorted"
     qwen35_moe_decode_chunk_size: int = 8
+    tp_top_k_reduction_max_width: int = 256
     weight_quant_backend: str = "auto"
     max_remote_prefill_transfers: int = 2
     max_remote_prefill_staging_bytes: int | None = None
@@ -119,6 +120,12 @@ class Config:
             )
         if self.qwen35_moe_decode_chunk_size <= 0:
             raise ValueError("qwen35_moe_decode_chunk_size must be positive")
+        if (
+            not isinstance(self.tp_top_k_reduction_max_width, int)
+            or isinstance(self.tp_top_k_reduction_max_width, bool)
+            or self.tp_top_k_reduction_max_width <= 0
+        ):
+            raise ValueError("tp_top_k_reduction_max_width must be positive")
         if self.weight_quant_backend not in ("auto", "reference", "resident", "triton"):
             raise ValueError(
                 "weight_quant_backend must be 'auto', 'reference', 'resident', "
@@ -194,6 +201,9 @@ class Config:
         )
         self.model_config.qwen35_moe_decode_chunk_size = (
             self.qwen35_moe_decode_chunk_size
+        )
+        self.model_config.nanovllm_tp_top_k_reduction_max_width = (
+            self.tp_top_k_reduction_max_width
         )
         if not hasattr(self.model_config, "dtype"):
             torch_dtype = getattr(self.model_config, "torch_dtype", None)

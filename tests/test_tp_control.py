@@ -896,7 +896,7 @@ class HybridStateContextTest(unittest.TestCase):
         runner.sampler = SimpleNamespace(
             storage_stats=lambda: {
                 "rank_buffer_bytes": 4,
-                "noise_buffer_bytes": 8,
+                "noise_buffer_bytes": 0,
             }
         )
 
@@ -923,7 +923,7 @@ class HybridStateContextTest(unittest.TestCase):
         self.assertEqual(stats["qwen35_key_buffer_allocation_count"], 1)
         self.assertEqual(stats["qwen35_key_buffer_reuse_count"], 9)
         self.assertEqual(stats["sampling_rank_buffer_bytes"], 4)
-        self.assertEqual(stats["sampling_noise_buffer_bytes"], 8)
+        self.assertEqual(stats["sampling_noise_buffer_bytes"], 0)
         self.assertEqual(stats["tp_logits_local_buffer_bytes"], 20)
         self.assertEqual(stats["tp_logits_gathered_buffer_bytes"], 28)
         self.assertEqual(stats["tp_logits_buffer_allocation_count"], 2)
@@ -934,7 +934,7 @@ class HybridStateContextTest(unittest.TestCase):
         self.assertEqual(stats["tp_top_k_reduction_count"], 5)
         self.assertEqual(stats["tp_top_k_candidate_bytes"], 320)
         self.assertEqual(stats["tp_top_k_full_gather_avoided_bytes"], 8192)
-        self.assertEqual(stats["total_bytes_local_rank"], 164)
+        self.assertEqual(stats["total_bytes_local_rank"], 156)
 
     def test_runtime_buffers_are_reserved_before_capacity_planning(self):
         runner = object.__new__(ModelRunner)

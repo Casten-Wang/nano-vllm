@@ -72,9 +72,16 @@ class ParallelLMHead(VocabParallelEmbedding):
         num_embeddings: int,
         embedding_dim: int,
         bias: bool = False,
+        max_top_k_reduction_width: int = 256,
     ):
         assert not bias
         super().__init__(num_embeddings, embedding_dim)
+        if max_top_k_reduction_width <= 0:
+            raise ValueError("max_top_k_reduction_width must be positive")
+        self.max_top_k_reduction_width = min(
+            max_top_k_reduction_width,
+            self.num_embeddings - 1,
+        )
         self.register_buffer(
             "_tp_local_logits_buffer",
             torch.empty(0),
@@ -129,6 +136,64 @@ class ParallelLMHead(VocabParallelEmbedding):
         self.tp_top_k_reduction_count = 0
         self.tp_top_k_candidate_bytes = 0
         self.tp_top_k_full_gather_avoided_bytes = 0
+
+    def reserve_runtime_buffers(self, max_decode_tokens: int) -> None:
+        """Reserve every bounded TP reduction workspace before KV sizing."""
+
+        if max_decode_tokens <= 0:
+            raise ValueError("max_decode_tokens must be positive")
+        reference = self.weight
+        if self.tp_size == 1:
+            return
+        self._tp_logits_buffer(
+            "_tp_greedy_local_buffer",
+            max_decode_tokens * 2,
+            reference,
+            dtype=torch.float32,
+        )
+        if self.tp_rank == 0:
+            self._tp_logits_buffer(
+                "_tp_greedy_gather_buffer",
+                self.tp_size * max_decode_tokens * 2,
+                reference,
+                dtype=torch.float32,
+            )
+        self._tp_logits_buffer(
+            "_tp_local_logits_buffer",
+            max_decode_tokens * self.num_embeddings_per_partition,
+            reference,
+        )
+        if self.tp_rank == 0:
+            self._tp_logits_buffer(
+                "_tp_gathered_logits_buffer",
+                max_decode_tokens * self.num_embeddings,
+                reference,
+            )
+        local_k = min(
+            self.max_top_k_reduction_width,
+            self.num_embeddings_per_partition,
+        )
+        local_required = max_decode_tokens * local_k
+        self._tp_logits_buffer(
+            "_tp_top_k_local_ids_buffer",
+            local_required,
+            reference,
+            dtype=self._tp_candidate_id_dtype,
+        )
+        if self.tp_rank == 0:
+            gathered_required = self.tp_size * local_required
+            for name, dtype in (
+                ("_tp_top_k_values_buffer", reference.dtype),
+                ("_tp_top_k_ids_buffer", self._tp_candidate_id_dtype),
+                ("_tp_top_k_flat_values_buffer", reference.dtype),
+                ("_tp_top_k_flat_ids_buffer", self._tp_candidate_id_dtype),
+            ):
+                self._tp_logits_buffer(
+                    name,
+                    gathered_required,
+                    reference,
+                    dtype=dtype,
+                )
 
     def _tp_logits_buffer(
         self,
@@ -211,6 +276,8 @@ class ParallelLMHead(VocabParallelEmbedding):
             raise ValueError(
                 "top_k reduction width must be in the vocabulary range"
             )
+        if top_k is not None and top_k > self.max_top_k_reduction_width:
+            raise ValueError("top_k reduction width exceeds its reserved capacity")
         context = get_context()
         if context.is_mixed:
             last_indices = getattr(context, "logits_indices", None)

@@ -59,6 +59,26 @@ def make_lm_head(rank=0, world_size=2):
         return ParallelLMHead(8, 2)
 
 
+def test_lm_head_reserves_all_bounded_tp_workspaces():
+    with (
+        patch("torch.distributed.get_rank", return_value=0),
+        patch("torch.distributed.get_world_size", return_value=2),
+    ):
+        head = ParallelLMHead(8, 2, max_top_k_reduction_width=3)
+
+    head.reserve_runtime_buffers(max_decode_tokens=4)
+
+    assert head._tp_greedy_local_buffer.numel() == 8
+    assert head._tp_greedy_gather_buffer.numel() == 16
+    assert head._tp_local_logits_buffer.numel() == 16
+    assert head._tp_gathered_logits_buffer.numel() == 32
+    assert head._tp_top_k_local_ids_buffer.numel() == 12
+    assert head._tp_top_k_values_buffer.numel() == 24
+    assert head._tp_top_k_ids_buffer.numel() == 24
+    assert head._tp_top_k_flat_values_buffer.numel() == 24
+    assert head._tp_top_k_flat_ids_buffer.numel() == 24
+
+
 def test_compact_token_id_dtype_preserves_large_vocabulary_ids():
     assert compact_token_id_dtype(248_320) == torch.int32
     assert compact_token_id_dtype(torch.iinfo(torch.int32).max) == torch.int32

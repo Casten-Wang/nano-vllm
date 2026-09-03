@@ -243,8 +243,9 @@ def test_sampling_noise_benchmark_tracks_reused_storage():
 
     assert result["errors"][0]["max_abs_error"] == 0
     assert result["eliminated_tensor_allocations_per_sampling_step"] == 1
-    assert result["persistent_sampling_noise_mib"] == 4 * 3 * 4 / 1024 / 1024
-    assert result["candidate_reuses_noise_storage"]
+    assert result["persistent_sampling_noise_mib"] == 0
+    assert result["reused_filtered_logits_mib"] == 4 * 3 * 4 / 1024 / 1024
+    assert result["candidate_reuses_filtered_logits_storage"]
 
 
 def test_gated_delta_packed_projection_replaces_three_gemms():

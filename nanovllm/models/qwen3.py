@@ -203,6 +203,16 @@ class Qwen3ForCausalLM(nn.Module):
         super().__init__()
         self.model = Qwen3Model(config)
         self.lm_head = ParallelLMHead(config.vocab_size, config.hidden_size)
+        self.lm_head.max_top_k_reduction_width = min(
+            int(
+                getattr(
+                    config,
+                    "nanovllm_tp_top_k_reduction_max_width",
+                    256,
+                )
+            ),
+            int(config.vocab_size) - 1,
+        )
         if config.tie_word_embeddings:
             self.lm_head.weight.data = self.model.embed_tokens.weight.data
 

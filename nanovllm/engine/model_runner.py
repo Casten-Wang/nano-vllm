@@ -154,8 +154,9 @@ class ModelRunner:
         torch.set_default_device("cuda")
         self.model = create_model(model_spec.architecture, hf_config)
         load_model(self.model, config.model)
-        self.reserve_runtime_buffers()
         self.sampler = Sampler()
+        self.sampler.reserve_runtime_buffers(int(config.model_config.vocab_size))
+        self.reserve_runtime_buffers()
         self.sampling_inputs = (
             SamplingInputBatch(config.max_num_seqs)
             if self.rank == 0
@@ -2035,9 +2036,13 @@ class ModelRunner:
             top_k = None
         else:
             vocab_size = int(self.config.model_config.vocab_size)
+            top_k_reduction_limit = int(
+                getattr(self.config, "tp_top_k_reduction_max_width", 256)
+            )
             top_k_enabled = all(
                 seq.temperature > 1e-10
                 and 0 < seq.top_k < vocab_size
+                and seq.top_k <= top_k_reduction_limit
                 for seq in seqs
             )
             path = "top_k" if top_k_enabled else "full"

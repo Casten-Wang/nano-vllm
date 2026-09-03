@@ -1,6 +1,7 @@
 import importlib.util
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -562,7 +563,7 @@ class SamplerTest(unittest.TestCase):
 
         self.assertTrue(torch.equal(actual, expected))
 
-    def test_sampler_reuses_random_noise_buffer_across_steps(self):
+    def test_sampler_reuses_filtered_logits_for_random_noise(self):
         sampler = Sampler()
         logits = torch.tensor([[1.0, 4.0, 3.0, 2.0]])
         temperatures = torch.ones(1)
@@ -575,15 +576,14 @@ class SamplerTest(unittest.TestCase):
             vocab_size=logits.size(1),
         )
 
-        sampler(logits, temperatures, top_ks, top_ps, metadata)
-        storage = sampler._noise_buffer.data_ptr()
-        sampler(logits, temperatures, top_ks, top_ps, metadata)
+        with patch.object(
+            torch,
+            "empty_like",
+            side_effect=AssertionError("sampling must reuse dead logits storage"),
+        ):
+            sampler(logits, temperatures, top_ks, top_ps, metadata)
 
-        self.assertEqual(sampler._noise_buffer.data_ptr(), storage)
-        self.assertEqual(
-            sampler.storage_stats()["noise_buffer_bytes"],
-            3 * torch.empty((), dtype=torch.float32).element_size(),
-        )
+        self.assertEqual(sampler.storage_stats()["noise_buffer_bytes"], 0)
 
 
 if __name__ == "__main__":
