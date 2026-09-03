@@ -144,6 +144,25 @@ def test_token_input_batch_handles_warmup_and_reuses_storage():
     assert torch.equal(indices, torch.tensor([0, 3], dtype=torch.int64))
 
 
+def test_token_block_tables_are_padded_and_reuse_storage():
+    batch = make_token_batch()
+
+    first = batch.update_block_tables([[3, 5, 7], [11]])
+    storage = first.data_ptr()
+    assert torch.equal(
+        first,
+        torch.tensor([[3, 5, 7], [11, -1, -1]], dtype=torch.int32),
+    )
+
+    second = batch.update_block_tables([[13], [17, 19]])
+
+    assert second.data_ptr() == storage
+    assert torch.equal(
+        second,
+        torch.tensor([[13, -1], [17, 19]], dtype=torch.int32),
+    )
+
+
 def test_token_input_batch_rejects_invalid_sizes():
     batch = make_token_batch(token_capacity=2, sequence_capacity=1)
 
@@ -155,6 +174,12 @@ def test_token_input_batch_rejects_invalid_sizes():
         batch.update_cu_seqlens([0, 1], [0])
     with pytest.raises(ValueError):
         batch.update_decode_context_lens([1, 2])
+
+
+@pytest.mark.parametrize("values", [[], [[]], [[1, 2, 3, 4, 5]], [[1], [2], [3], [4]]])
+def test_token_input_batch_rejects_invalid_block_tables(values):
+    with pytest.raises(ValueError):
+        make_token_batch().update_block_tables(values)
 
 
 def test_packed_block_metadata_preserves_values_and_reuses_storage():

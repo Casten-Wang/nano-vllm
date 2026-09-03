@@ -198,6 +198,20 @@ class TokenInputBatch:
         self._arrays = {
             name: tensor.numpy() for name, tensor in self.host.items()
         }
+        self.host_block_tables = torch.empty(
+            sequence_capacity,
+            max_num_blocks,
+            dtype=torch.int32,
+            device="cpu",
+            pin_memory=pin_memory,
+        )
+        self.device_block_tables = torch.empty(
+            sequence_capacity,
+            max_num_blocks,
+            dtype=torch.int32,
+            device=device,
+        )
+        self._block_table_array = self.host_block_tables.numpy()
         packed_block_capacity = sequence_capacity * max_num_blocks
         # Mixed batches retain decode and prefill metadata at the same time.
         # Two banks keep those live ranges disjoint while still avoiding
@@ -292,6 +306,28 @@ class TokenInputBatch:
 
     def update_logits_indices(self, values: list[int]) -> torch.Tensor:
         return self._update("logits_indices", values)
+
+    def update_block_tables(self, block_tables: list[list[int]]) -> torch.Tensor:
+        """Stage dense prefill block tables in persistent host/device storage."""
+
+        size = len(block_tables)
+        if not 0 < size <= self.sequence_capacity:
+            raise ValueError(
+                f"prefill batch size must be in [1, {self.sequence_capacity}]"
+            )
+        width = max((len(row) for row in block_tables), default=0)
+        if not 0 < width <= self.max_num_blocks:
+            raise ValueError(
+                "prefill block-table width must be in "
+                f"[1, {self.max_num_blocks}]"
+            )
+        host = self.host_block_tables[:size, :width]
+        host.fill_(-1)
+        for row_index, row in enumerate(block_tables):
+            self._block_table_array[row_index, : len(row)] = row
+        device = self.device_block_tables[:size, :width]
+        device.copy_(host, non_blocking=True)
+        return device
 
     def update_packed_block_metadata(
         self,

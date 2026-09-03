@@ -965,10 +965,9 @@ class ModelRunner:
             return self.decode_inputs.update_block_tables(
                 [seq.block_table for seq in seqs]
             )
-        max_len = max(len(seq.block_table) for seq in seqs)
-        block_tables = [seq.block_table + [-1] * (max_len - len(seq.block_table)) for seq in seqs]
-        block_tables = torch.tensor(block_tables, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
-        return block_tables
+        return self.token_inputs.update_block_tables(
+            [seq.block_table for seq in seqs]
+        )
 
     def prepare_packed_block_metadata(
         self,

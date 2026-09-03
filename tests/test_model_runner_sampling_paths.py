@@ -29,6 +29,26 @@ def make_runner(*, rank=0):
     return runner
 
 
+def test_prefill_block_tables_use_persistent_token_input_storage():
+    runner = object.__new__(ModelRunner)
+    runner.token_inputs = Mock()
+    runner.decode_inputs = Mock()
+    expected = torch.tensor([[3, 5], [7, -1]], dtype=torch.int32)
+    runner.token_inputs.update_block_tables.return_value = expected
+    seqs = [
+        SimpleNamespace(block_table=[3, 5]),
+        SimpleNamespace(block_table=[7]),
+    ]
+
+    actual = runner.prepare_block_tables(seqs)
+
+    assert actual is expected
+    runner.token_inputs.update_block_tables.assert_called_once_with(
+        [[3, 5], [7]]
+    )
+    runner.decode_inputs.update_block_tables.assert_not_called()
+
+
 def test_all_greedy_batch_skips_full_logits_sampling_path():
     runner = make_runner()
     runner.run_model.return_value = torch.tensor([7, 9])
