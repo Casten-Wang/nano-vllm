@@ -817,6 +817,13 @@ class HybridStateContextTest(unittest.TestCase):
                     int8_partitioned_decode_pool=None,
                     int8_dequant_pool=None,
                     decode_weight_buffer_pool=None,
+                    tp_logits_storage_stats=lambda: {
+                        "local_bytes": 20,
+                        "gathered_bytes": 28,
+                        "total_bytes": 48,
+                        "allocation_count": 2,
+                        "reuse_count": 6,
+                    },
                 ),
             ]
         )
@@ -839,7 +846,11 @@ class HybridStateContextTest(unittest.TestCase):
         self.assertEqual(stats["moe_decode_workspace_bytes"], 12)
         self.assertEqual(stats["sampling_rank_buffer_bytes"], 4)
         self.assertEqual(stats["sampling_noise_buffer_bytes"], 8)
-        self.assertEqual(stats["total_bytes_local_rank"], 104)
+        self.assertEqual(stats["tp_logits_local_buffer_bytes"], 20)
+        self.assertEqual(stats["tp_logits_gathered_buffer_bytes"], 28)
+        self.assertEqual(stats["tp_logits_buffer_allocation_count"], 2)
+        self.assertEqual(stats["tp_logits_buffer_reuse_count"], 6)
+        self.assertEqual(stats["total_bytes_local_rank"], 152)
 
     def test_multi_rank_kv_cache_stats_are_gathered(self):
         runner = object.__new__(ModelRunner)

@@ -343,6 +343,7 @@ class ModelRunner:
         pools = {}
         dequant_pools = {}
         moe_weight_pools = {}
+        tp_logits_stats = []
         for module in self.model.modules():
             pool = getattr(module, "int8_partitioned_decode_pool", None)
             if pool is not None:
@@ -357,6 +358,9 @@ class ModelRunner:
             )
             if moe_weight_pool is not None:
                 moe_weight_pools[id(moe_weight_pool)] = moe_weight_pool
+            logits_stats = getattr(module, "tp_logits_storage_stats", None)
+            if logits_stats is not None:
+                tp_logits_stats.append(logits_stats())
         stats = [pool.storage_stats() for pool in pools.values()]
         dequant_stats = [
             pool.storage_stats() for pool in dequant_pools.values()
@@ -374,6 +378,7 @@ class ModelRunner:
         )
         sampler_stats = self.sampler.storage_stats()
         sampler_total = sum(sampler_stats.values())
+        tp_logits_total = sum(item["total_bytes"] for item in tp_logits_stats)
         return {
             "int8_partitioned_decode_pool_count": len(stats),
             "int8_partitioned_workspace_bytes": sum(
@@ -389,12 +394,25 @@ class ModelRunner:
             "moe_decode_workspace_bytes": moe_workspace_total,
             "sampling_rank_buffer_bytes": sampler_stats["rank_buffer_bytes"],
             "sampling_noise_buffer_bytes": sampler_stats["noise_buffer_bytes"],
+            "tp_logits_local_buffer_bytes": sum(
+                item["local_bytes"] for item in tp_logits_stats
+            ),
+            "tp_logits_gathered_buffer_bytes": sum(
+                item["gathered_bytes"] for item in tp_logits_stats
+            ),
+            "tp_logits_buffer_allocation_count": sum(
+                item["allocation_count"] for item in tp_logits_stats
+            ),
+            "tp_logits_buffer_reuse_count": sum(
+                item["reuse_count"] for item in tp_logits_stats
+            ),
             "total_bytes_local_rank": (
                 partitioned_total
                 + dequant_total
                 + moe_weight_total
                 + moe_workspace_total
                 + sampler_total
+                + tp_logits_total
             ),
         }
 

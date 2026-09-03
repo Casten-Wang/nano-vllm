@@ -65,6 +65,58 @@ class ParallelLMHead(VocabParallelEmbedding):
     ):
         assert not bias
         super().__init__(num_embeddings, embedding_dim)
+        self.register_buffer(
+            "_tp_local_logits_buffer",
+            torch.empty(0),
+            persistent=False,
+        )
+        self.register_buffer(
+            "_tp_gathered_logits_buffer",
+            torch.empty(0),
+            persistent=False,
+        )
+        self.tp_logits_allocation_count = 0
+        self.tp_logits_reuse_count = 0
+
+    def _tp_logits_buffer(
+        self,
+        name: str,
+        required: int,
+        reference: torch.Tensor,
+    ) -> torch.Tensor:
+        buffer = getattr(self, name)
+        if (
+            buffer.numel() < required
+            or buffer.dtype != reference.dtype
+            or buffer.device != reference.device
+        ):
+            buffer = torch.empty(
+                required,
+                dtype=reference.dtype,
+                device=reference.device,
+            )
+            setattr(self, name, buffer)
+            self.tp_logits_allocation_count += 1
+        else:
+            self.tp_logits_reuse_count += 1
+        return buffer[:required]
+
+    def tp_logits_storage_stats(self) -> dict[str, int]:
+        local_bytes = (
+            self._tp_local_logits_buffer.numel()
+            * self._tp_local_logits_buffer.element_size()
+        )
+        gathered_bytes = (
+            self._tp_gathered_logits_buffer.numel()
+            * self._tp_gathered_logits_buffer.element_size()
+        )
+        return {
+            "local_bytes": local_bytes,
+            "gathered_bytes": gathered_bytes,
+            "total_bytes": local_bytes + gathered_bytes,
+            "allocation_count": self.tp_logits_allocation_count,
+            "reuse_count": self.tp_logits_reuse_count,
+        }
 
     def forward(self, x: torch.Tensor):
         context = get_context()
@@ -95,14 +147,29 @@ class ParallelLMHead(VocabParallelEmbedding):
             # the result exposes the expected [batch, vocabulary] layout as a
             # view and avoids both a list of full-size shard buffers and the
             # second full-vocabulary allocation previously created by cat.
-            local_logits = logits.transpose(0, 1).contiguous()
+            if torch.is_grad_enabled():
+                local_logits = logits.transpose(0, 1).contiguous()
+            else:
+                local_logits = self._tp_logits_buffer(
+                    "_tp_local_logits_buffer",
+                    logits.numel(),
+                    logits,
+                ).view(self.num_embeddings_per_partition, logits.shape[0])
+                local_logits.copy_(logits.transpose(0, 1))
             if self.tp_rank == 0:
-                gathered_logits = torch.empty(
-                    self.num_embeddings,
-                    logits.shape[0],
-                    dtype=logits.dtype,
-                    device=logits.device,
-                )
+                if torch.is_grad_enabled():
+                    gathered_logits = torch.empty(
+                        self.num_embeddings,
+                        logits.shape[0],
+                        dtype=logits.dtype,
+                        device=logits.device,
+                    )
+                else:
+                    gathered_logits = self._tp_logits_buffer(
+                        "_tp_gathered_logits_buffer",
+                        self.num_embeddings * logits.shape[0],
+                        logits,
+                    ).view(self.num_embeddings, logits.shape[0])
                 all_logits = list(
                     gathered_logits.split(
                         self.num_embeddings_per_partition,

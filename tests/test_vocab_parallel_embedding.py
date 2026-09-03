@@ -97,6 +97,64 @@ def test_lm_head_gathers_tp_logits_into_one_vocab_buffer():
         "destinations_contiguous": True,
     }
     assert not logits.is_contiguous()
+    assert head.tp_logits_storage_stats() == {
+        "local_bytes": 8 * hidden.element_size(),
+        "gathered_bytes": 16 * hidden.element_size(),
+        "total_bytes": 24 * hidden.element_size(),
+        "allocation_count": 2,
+        "reuse_count": 0,
+    }
+
+
+def test_lm_head_reuses_tp_logits_storage_for_smaller_batches():
+    head = make_lm_head()
+    head.weight.data.copy_(torch.tensor([[1.0, 0.0]] * 4))
+    context = SimpleNamespace(is_mixed=False, is_prefill=False)
+
+    def gather(local, gather_list, dst):
+        gather_list[0].copy_(local)
+        gather_list[1].fill_(7.0)
+
+    with (
+        torch.inference_mode(),
+        patch.object(embed_head, "get_context", return_value=context),
+        patch.object(embed_head.dist, "gather", side_effect=gather),
+    ):
+        large = head(torch.tensor([[1.0, 0.0], [2.0, 0.0]])).clone()
+        local_storage = head._tp_local_logits_buffer.data_ptr()
+        gathered_storage = head._tp_gathered_logits_buffer.data_ptr()
+        small = head(torch.tensor([[3.0, 0.0]])).clone()
+
+    torch.testing.assert_close(
+        large,
+        torch.tensor(
+            [[1.0, 1.0, 1.0, 1.0, 7.0, 7.0, 7.0, 7.0],
+             [2.0, 2.0, 2.0, 2.0, 7.0, 7.0, 7.0, 7.0]]
+        ),
+    )
+    torch.testing.assert_close(
+        small,
+        torch.tensor([[3.0, 3.0, 3.0, 3.0, 7.0, 7.0, 7.0, 7.0]]),
+    )
+    assert head._tp_local_logits_buffer.data_ptr() == local_storage
+    assert head._tp_gathered_logits_buffer.data_ptr() == gathered_storage
+    stats = head.tp_logits_storage_stats()
+    assert stats["allocation_count"] == 2
+    assert stats["reuse_count"] == 2
+
+
+def test_lm_head_does_not_reuse_tp_logits_storage_with_autograd():
+    head = make_lm_head()
+    context = SimpleNamespace(is_mixed=False, is_prefill=False)
+
+    with (
+        torch.enable_grad(),
+        patch.object(embed_head, "get_context", return_value=context),
+        patch.object(embed_head.dist, "gather"),
+    ):
+        head(torch.randn(2, 2))
+
+    assert head.tp_logits_storage_stats()["total_bytes"] == 0
 
 
 def test_nonzero_lm_head_rank_does_not_allocate_gather_output():
