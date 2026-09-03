@@ -1210,7 +1210,7 @@ def expert_dispatch_mixed(
 
     if not 0 < decode_token_count < hidden_states.shape[0]:
         raise ValueError("mixed decode token count must split the batch")
-    output = torch.zeros_like(hidden_states)
+    output = torch.empty_like(hidden_states)
     MOE_DISPATCH.batched_expert_dispatch(
         hidden_states[:decode_token_count],
         topk_ids[:decode_token_count],
@@ -1796,6 +1796,12 @@ def benchmark_mixed_expert_dispatch(
             "avoided_route_hidden_allocation_mib_per_step": (
                 decode_tokens
                 * args.top_k
+                * args.hidden_size
+                * hidden.element_size()
+                / (1024**2)
+            ),
+            "avoided_redundant_output_zero_mib_per_step": (
+                token_count
                 * args.hidden_size
                 * hidden.element_size()
                 / (1024**2)

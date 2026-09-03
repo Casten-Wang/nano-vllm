@@ -298,7 +298,12 @@ class Qwen35Experts(nn.Module):
                 dist.all_reduce(output)
             return output
         if self.decode_backend == "batched" and decode_token_count:
-            output = torch.zeros_like(hidden_states)
+            # Both partitions fully initialize their output: batched dispatch
+            # overwrites the decode prefix and the sorted path clears its
+            # prefill slice before accumulating routes. Avoid zeroing the
+            # whole mixed tensor here and then zeroing the prefill slice a
+            # second time.
+            output = torch.empty_like(hidden_states)
             batched_expert_dispatch(
                 hidden_states[:decode_token_count],
                 topk_ids[:decode_token_count],

@@ -833,6 +833,7 @@ def test_mixed_expert_benchmark_records_cuda_evidence_boundary():
     assert result["prefill_tokens"] == 3
     assert result["speedup_vs_grouped"] > 0
     assert result["avoided_route_hidden_allocation_mib_per_step"] > 0
+    assert result["avoided_redundant_output_zero_mib_per_step"] > 0
     assert not result["measured_on_cuda"]
     assert result["errors"][0]["max_abs_error"] < 1e-5
 

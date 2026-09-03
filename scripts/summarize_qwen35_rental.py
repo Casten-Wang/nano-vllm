@@ -575,6 +575,10 @@ def summarize_mixed_moe_dispatch(result: dict) -> dict:
         "avoided_route_hidden_allocation_mib_per_step",
         math.nan,
     )
+    avoided_output_zero = result.get(
+        "avoided_redundant_output_zero_mib_per_step",
+        math.nan,
+    )
     peak_delta = candidate_peak - reference_peak
     checks = {
         "cuda_measurement": result.get("measured_on_cuda") is True,
@@ -606,6 +610,7 @@ def summarize_mixed_moe_dispatch(result: dict) -> dict:
         "speedup_vs_grouped": speedup,
         "peak_extra_mib_delta": peak_delta,
         "avoided_route_hidden_allocation_mib_per_step": avoided_route_hidden,
+        "avoided_redundant_output_zero_mib_per_step": avoided_output_zero,
         "max_abs_error": max_abs_error,
         "thresholds": {
             "min_speedup": MIXED_MOE_MIN_SPEEDUP,
