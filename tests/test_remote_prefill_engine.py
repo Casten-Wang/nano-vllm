@@ -89,6 +89,11 @@ def make_engine(*, tensor_parallel_size=1):
                 {"rank": rank, "staged_bytes": 100 + rank}
                 for rank in range(tensor_parallel_size)
             ]
+        if method_name == "estimate_cache_transfer_bytes_for_blocks":
+            return [
+                {"rank": rank, "staged_bytes": 100 + rank}
+                for rank in range(tensor_parallel_size)
+            ]
         if method_name == "poll_sequence_cache_send":
             return [
                 {
@@ -721,6 +726,37 @@ def test_remote_prefill_capacity_snapshot_reports_live_routing_inputs():
         "staging_bytes_used": 200,
         "staging_bytes_free": 300,
     }
+
+
+def test_remote_prefill_demand_matches_block_and_all_rank_staging_needs():
+    engine = make_engine(tensor_parallel_size=2)
+    capacity_before = engine.remote_prefill_capacity_snapshot()
+
+    demand = engine.estimate_remote_prefill_demand(5)
+
+    assert demand.kv_blocks == 2
+    assert demand.staging_bytes == 201
+    assert engine.remote_prefill_capacity_snapshot() == capacity_before
+    assert engine.scheduler.is_finished()
+    engine.model_runner.call_rank_results.assert_called_once_with(
+        "estimate_cache_transfer_bytes_for_blocks",
+        2,
+    )
+
+
+@pytest.mark.parametrize("num_prompt_tokens", [0, -1, True, 1.5])
+def test_remote_prefill_demand_rejects_invalid_prompt_lengths(num_prompt_tokens):
+    engine = make_engine()
+
+    with pytest.raises(ValueError, match="positive integer"):
+        engine.estimate_remote_prefill_demand(num_prompt_tokens)
+
+
+def test_remote_prefill_demand_rejects_prompt_beyond_context_limit():
+    engine = make_engine()
+
+    with pytest.raises(ValueError, match="exceeds max_model_len"):
+        engine.estimate_remote_prefill_demand(33)
 
 
 def test_transfer_capacity_is_shared_by_sends_and_receives():

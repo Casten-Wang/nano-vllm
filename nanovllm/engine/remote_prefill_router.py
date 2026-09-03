@@ -109,19 +109,28 @@ def _headroom_score(
 
 def rank_remote_prefill_destinations(
     candidates: Mapping[str, CapacitySnapshot],
-    demand: RemotePrefillDemand,
+    demand: RemotePrefillDemand | Mapping[str, RemotePrefillDemand],
 ) -> tuple[str, ...]:
     """Rank admissible decode nodes by post-placement capacity headroom.
 
     The first result is preferred. Remaining results are deterministic fallback
     destinations if a concurrent reservation makes an earlier snapshot stale.
     Ties preserve caller order so a controller may rotate input order without
-    putting round-robin state in this policy.
+    putting round-robin state in this policy. A demand mapping supports nodes
+    with different block sizes, tensor parallel sizes, or cache dtypes.
     """
 
     scored: list[tuple[tuple[Fraction, Fraction, int, int], int, str]] = []
     for position, (destination, snapshot) in enumerate(candidates.items()):
-        score = _headroom_score(snapshot, demand)
+        if isinstance(demand, RemotePrefillDemand):
+            destination_demand = demand
+        else:
+            destination_demand = demand.get(destination)
+            if not isinstance(destination_demand, RemotePrefillDemand):
+                raise ValueError(
+                    f"remote prefill demand is missing for {destination!r}"
+                )
+        score = _headroom_score(snapshot, destination_demand)
         if score is not None:
             scored.append((score, -position, destination))
     scored.sort(reverse=True)

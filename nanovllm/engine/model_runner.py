@@ -981,14 +981,14 @@ class ModelRunner:
             slot=slot,
         )
 
-    def _sequence_state_views(
+    def _state_slot_views(
         self,
-        seq: Sequence,
+        state_slot: int | None,
     ) -> tuple[tuple[torch.Tensor, ...], tuple[torch.Tensor, ...]]:
         model_spec = self.config.model_spec
         if model_spec is None or not model_spec.is_hybrid:
             return (), ()
-        if seq.state_slot is None:
+        if state_slot is None:
             raise RuntimeError(
                 "hybrid cache transfer requires a recurrent state slot"
             )
@@ -1011,12 +1011,18 @@ class ModelRunner:
                 "hybrid cache transfer layer ids do not match model spec"
             )
         recurrent = tuple(
-            pool.recurrent[0, seq.state_slot] for _, pool in layers
+            pool.recurrent[0, state_slot] for _, pool in layers
         )
         convolution = tuple(
-            pool.convolution[0, seq.state_slot] for _, pool in layers
+            pool.convolution[0, state_slot] for _, pool in layers
         )
         return recurrent, convolution
+
+    def _sequence_state_views(
+        self,
+        seq: Sequence,
+    ) -> tuple[tuple[torch.Tensor, ...], tuple[torch.Tensor, ...]]:
+        return self._state_slot_views(seq.state_slot)
 
     def export_sequence_cache(
         self,
@@ -1056,6 +1062,25 @@ class ModelRunner:
             self.kv_cache,
             self.kv_scale,
             seq.block_table,
+            recurrent_states=recurrent,
+            convolution_states=convolution,
+        )
+        return {"rank": self.rank, "staged_bytes": staged_bytes}
+
+    def estimate_cache_transfer_bytes_for_blocks(self, num_blocks: int) -> dict:
+        """Estimate rank-local staging before scheduler state is reserved."""
+
+        from nanovllm.engine.cache_transfer import (
+            estimate_rank_cache_transfer_bytes_for_blocks,
+        )
+
+        model_spec = self.config.model_spec
+        state_slot = 0 if model_spec is not None and model_spec.is_hybrid else None
+        recurrent, convolution = self._state_slot_views(state_slot)
+        staged_bytes = estimate_rank_cache_transfer_bytes_for_blocks(
+            self.kv_cache,
+            self.kv_scale,
+            num_blocks,
             recurrent_states=recurrent,
             convolution_states=convolution,
         )

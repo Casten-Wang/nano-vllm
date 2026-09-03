@@ -81,6 +81,29 @@ def test_router_accepts_unbounded_staging_capacity():
     ) == ("unbounded",)
 
 
+def test_router_accepts_per_destination_demands_for_heterogeneous_nodes():
+    candidates = {
+        "small-blocks": snapshot(kv_free=4),
+        "large-blocks": snapshot(kv_free=4),
+    }
+    demands = {
+        "small-blocks": RemotePrefillDemand(kv_blocks=5, staging_bytes=200),
+        "large-blocks": RemotePrefillDemand(kv_blocks=4, staging_bytes=200),
+    }
+
+    assert rank_remote_prefill_destinations(candidates, demands) == (
+        "large-blocks",
+    )
+
+
+def test_router_requires_a_demand_for_every_candidate():
+    with pytest.raises(ValueError, match="missing for 'decode-1'"):
+        rank_remote_prefill_destinations(
+            {"decode-1": snapshot()},
+            {},
+        )
+
+
 @pytest.mark.parametrize(
     ("demand", "message"),
     [

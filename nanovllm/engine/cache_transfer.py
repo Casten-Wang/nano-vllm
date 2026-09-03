@@ -177,11 +177,38 @@ def estimate_rank_cache_transfer_bytes(
         raise ValueError("cache transfer block ids must be unique")
     if min(block_ids) < 0 or max(block_ids) >= kv_cache.shape[2]:
         raise ValueError("cache transfer block id is out of bounds")
+    return estimate_rank_cache_transfer_bytes_for_blocks(
+        kv_cache,
+        kv_scale,
+        len(block_ids),
+        recurrent_states=recurrent_states,
+        convolution_states=convolution_states,
+    )
+
+
+def estimate_rank_cache_transfer_bytes_for_blocks(
+    kv_cache: torch.Tensor,
+    kv_scale: torch.Tensor | None,
+    num_blocks: int,
+    *,
+    recurrent_states: tuple[torch.Tensor, ...] = (),
+    convolution_states: tuple[torch.Tensor, ...] = (),
+) -> int:
+    """Estimate rank-local transfer bytes before physical blocks are reserved."""
+
+    _validate_cache_layout(kv_cache, kv_scale)
+    _validate_state_pairs(recurrent_states, convolution_states)
+    if (
+        not isinstance(num_blocks, int)
+        or isinstance(num_blocks, bool)
+        or num_blocks <= 0
+    ):
+        raise ValueError("cache transfer block count must be a positive integer")
     kv_elements_per_block = kv_cache.numel() // kv_cache.shape[2]
-    total = len(block_ids) * kv_elements_per_block * kv_cache.element_size()
+    total = num_blocks * kv_elements_per_block * kv_cache.element_size()
     if kv_scale is not None:
         scale_elements_per_block = kv_scale.numel() // kv_scale.shape[2]
-        total += len(block_ids) * scale_elements_per_block * kv_scale.element_size()
+        total += num_blocks * scale_elements_per_block * kv_scale.element_size()
     total += sum(
         tensor.numel() * tensor.element_size()
         for tensor in (*recurrent_states, *convolution_states)

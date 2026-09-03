@@ -350,6 +350,13 @@ def test_model_runner_exports_and_imports_complete_hybrid_state():
         "rank": 0,
         "staged_bytes": payload.nbytes,
     }
+    estimated_before_reservation = (
+        source.estimate_cache_transfer_bytes_for_blocks(2)
+    )
+    assert estimated_before_reservation == {
+        "rank": 0,
+        "staged_bytes": payload.nbytes,
+    }
     destination.import_sequence_cache(
         destination_seq,
         payload,

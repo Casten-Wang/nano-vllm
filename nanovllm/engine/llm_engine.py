@@ -15,6 +15,7 @@ from nanovllm.engine.scheduler import ScheduleResult, Scheduler
 from nanovllm.engine.cache_transfer import CacheTransferPhase, CacheTransferSession
 from nanovllm.engine.model_runner import CONTROL_STATUS_SIZE, ModelRunner
 from nanovllm.engine.metrics import EngineMetrics
+from nanovllm.engine.remote_prefill_router import RemotePrefillDemand
 
 
 def _find_free_port() -> int:
@@ -819,6 +820,37 @@ class LLMEngine:
                 else max(staging_limit - active_staging_bytes, 0)
             ),
         }
+
+    def estimate_remote_prefill_demand(
+        self,
+        num_prompt_tokens: int,
+    ) -> RemotePrefillDemand:
+        """Estimate decode-side resources without reserving scheduler state."""
+
+        if (
+            not isinstance(num_prompt_tokens, int)
+            or isinstance(num_prompt_tokens, bool)
+            or num_prompt_tokens <= 0
+        ):
+            raise ValueError("num_prompt_tokens must be a positive integer")
+        if num_prompt_tokens > self.config.max_model_len:
+            raise ValueError("num_prompt_tokens exceeds max_model_len")
+        num_blocks = (
+            num_prompt_tokens + self.config.kvcache_block_size - 1
+        ) // self.config.kvcache_block_size
+        estimates = self.model_runner.call_rank_results(
+            "estimate_cache_transfer_bytes_for_blocks",
+            num_blocks,
+        )
+        staged_by_rank = _validate_rank_results(
+            estimates,
+            self.config.tensor_parallel_size,
+            "staged_bytes",
+        )
+        return RemotePrefillDemand(
+            kv_blocks=num_blocks,
+            staging_bytes=sum(staged_by_rank.values()),
+        )
 
     def _ensure_remote_prefill_staging_capacity(
         self,
