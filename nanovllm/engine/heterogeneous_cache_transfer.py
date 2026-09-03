@@ -243,3 +243,159 @@ def build_qwen35_peer_cache_fragments(
     if actual != expected:
         raise RuntimeError("peer cache fragments do not match capacity preflight")
     return fragments
+
+
+def assemble_qwen35_peer_cache_fragments(
+    fragments: tuple[PeerCacheFragment, ...],
+    plan: Qwen35CacheTransferPlan,
+) -> RankCacheTransfer:
+    """Validate all destination peers, then assemble one atomic rank payload."""
+
+    if not fragments or any(
+        not isinstance(fragment, PeerCacheFragment) for fragment in fragments
+    ):
+        raise ValueError("destination cache assembly requires peer fragments")
+    if not isinstance(plan, Qwen35CacheTransferPlan):
+        raise ValueError("heterogeneous cache transfer plan is invalid")
+    first = fragments[0]
+    src_tp_size = len(plan.profile.source_bytes)
+    dst_tp_size = len(plan.profile.destination_bytes)
+    common = (
+        first.transfer_id,
+        first.dst_rank,
+        first.src_tp_size,
+        first.dst_tp_size,
+        first.block_size,
+        first.cached_tokens,
+    )
+    if (
+        first.src_tp_size != src_tp_size
+        or first.dst_tp_size != dst_tp_size
+        or not 0 <= first.dst_rank < dst_tp_size
+    ):
+        raise ValueError("destination cache fragments do not match transfer plan")
+    expected_peer_bytes = {
+        src_rank: byte_count
+        for src_rank, dst_rank, byte_count in plan.profile.peer_bytes
+        if dst_rank == first.dst_rank
+    }
+    actual_peer_bytes = {}
+    for fragment in fragments:
+        if (
+            (
+                fragment.transfer_id,
+                fragment.dst_rank,
+                fragment.src_tp_size,
+                fragment.dst_tp_size,
+                fragment.block_size,
+                fragment.cached_tokens,
+            )
+            != common
+            or fragment.src_rank in actual_peer_bytes
+        ):
+            raise ValueError("destination cache fragment metadata is inconsistent")
+        actual_peer_bytes[fragment.src_rank] = fragment.nbytes
+    if actual_peer_bytes != expected_peer_bytes:
+        raise ValueError("destination cache peer bytes do not match preflight")
+
+    routes_by_component = {
+        "kv": plan.kv_slices,
+        "kv_scale": plan.kv_scale_slices,
+        "recurrent": plan.recurrent_slices,
+        "convolution": plan.convolution_slices,
+    }
+    grouped: dict[tuple[str, int], list[tuple[int, PeerTensorSlice]]] = {}
+    for fragment in fragments:
+        for item in fragment.slices:
+            grouped.setdefault((item.component, item.layer), []).append(
+                (fragment.src_rank, item)
+            )
+    if ("kv", -1) not in grouped:
+        raise ValueError("destination cache fragments are missing KV state")
+    if bool(("kv_scale", -1) in grouped) != bool(plan.kv_scale_slices):
+        raise ValueError("destination cache scale fragments do not match plan")
+    recurrent_layers = sorted(
+        layer for component, layer in grouped if component == "recurrent"
+    )
+    convolution_layers = sorted(
+        layer for component, layer in grouped if component == "convolution"
+    )
+    if (
+        not recurrent_layers
+        or recurrent_layers != convolution_layers
+        or recurrent_layers != list(range(len(recurrent_layers)))
+    ):
+        raise ValueError("destination cache state layer fragments are incomplete")
+
+    assembled: dict[tuple[str, int], torch.Tensor] = {}
+    for key, items in grouped.items():
+        component, _layer = key
+        routes = tuple(
+            route
+            for route in routes_by_component[component]
+            if route.dst_rank == first.dst_rank
+        )
+        expected_routes = {
+            (route.src_rank, route.dst_start, route.length) for route in routes
+        }
+        shard_dim = _COMPONENT_DIMS[component]
+        actual_routes = {
+            (src_rank, item.dst_start, item.tensor.shape[shard_dim])
+            for src_rank, item in items
+        }
+        if len(actual_routes) != len(items) or actual_routes != expected_routes:
+            raise ValueError("destination cache tensor routes do not match plan")
+        first_tensor = items[0][1].tensor
+        shape = list(first_tensor.shape)
+        destination_width = max(
+            route.dst_start + route.length for route in routes
+        )
+        shape[shard_dim] = destination_width
+        destination = first_tensor.new_empty(shape)
+        coverage = [False] * destination_width
+        for _src_rank, item in items:
+            tensor = item.tensor
+            reference = list(shape)
+            reference[shard_dim] = tensor.shape[shard_dim]
+            if (
+                tensor.dtype != first_tensor.dtype
+                or tensor.device.type != "cpu"
+                or list(tensor.shape) != reference
+            ):
+                raise ValueError("destination cache tensor slice layout is inconsistent")
+            end = item.dst_start + tensor.shape[shard_dim]
+            if end > destination_width or any(coverage[item.dst_start:end]):
+                raise ValueError("destination cache tensor slices overlap")
+            coverage[item.dst_start:end] = [True] * (end - item.dst_start)
+            destination.narrow(
+                shard_dim,
+                item.dst_start,
+                tensor.shape[shard_dim],
+            ).copy_(tensor)
+        if not all(coverage):
+            raise ValueError("destination cache tensor slices leave gaps")
+        assembled[key] = destination
+
+    payload = RankCacheTransfer(
+        format_version=TRANSFER_FORMAT_VERSION,
+        transfer_id=first.transfer_id,
+        tensor_parallel_rank=first.dst_rank,
+        tensor_parallel_size=dst_tp_size,
+        block_size=first.block_size,
+        cached_tokens=first.cached_tokens,
+        kv_blocks=assembled.pop(("kv", -1)),
+        kv_scales=assembled.pop(("kv_scale", -1), None),
+        recurrent_states=tuple(
+            assembled.pop(("recurrent", layer))
+            for layer in recurrent_layers
+        ),
+        convolution_states=tuple(
+            assembled.pop(("convolution", layer))
+            for layer in convolution_layers
+        ),
+    )
+    if assembled:
+        raise ValueError("destination cache fragments contain unexpected tensors")
+    if payload.nbytes != plan.profile.destination_bytes[first.dst_rank]:
+        raise RuntimeError("assembled cache payload does not match capacity preflight")
+    return payload

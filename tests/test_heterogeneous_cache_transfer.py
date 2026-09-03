@@ -9,6 +9,7 @@ from nanovllm.engine.cache_transfer import (
     RankCacheTransfer,
 )
 from nanovllm.engine.heterogeneous_cache_transfer import (
+    assemble_qwen35_peer_cache_fragments,
     build_qwen35_peer_cache_fragments,
 )
 from nanovllm.engine.cache_transfer_wire import (
@@ -17,6 +18,7 @@ from nanovllm.engine.cache_transfer_wire import (
     send_peer_cache_fragment,
 )
 from nanovllm.engine.tp_cache_reshard import (
+    apply_tp_transfer_plan,
     build_qwen35_cache_transfer_plan,
 )
 
@@ -238,3 +240,120 @@ def test_peer_fragment_wire_rejects_corrupted_payload():
 
     with pytest.raises(ValueError, match="checksum mismatch"):
         receive_peer_cache_fragment(wire)
+
+
+@pytest.mark.parametrize("src_tp,dst_tp", [(4, 8), (8, 4)])
+@pytest.mark.parametrize("with_scales", [False, True])
+def test_destination_assembly_matches_direct_tensor_routes(
+    src_tp,
+    dst_tp,
+    with_scales,
+):
+    plan = build_qwen35_cache_transfer_plan(
+        src_tp_size=src_tp,
+        dst_tp_size=dst_tp,
+        total_kv_heads=2,
+        kv_bytes_per_head=(
+            2 * 2 * 2 * 4 * 2 * (1 if with_scales else 4)
+        ),
+        kv_scale_bytes_per_head=(2 * 2 * 2 * 4 * 2 if with_scales else 0),
+        recurrent_heads=32,
+        recurrent_bytes_per_head=2 * 2 * 4,
+        convolution_group_widths=(16, 16, 32),
+        convolution_bytes_per_channel=3 * 2,
+    )
+    payloads = tuple(
+        make_payload(rank, src_tp, with_scales=with_scales)
+        for rank in range(src_tp)
+    )
+    fragments = tuple(
+        fragment
+        for payload in payloads
+        for fragment in build_qwen35_peer_cache_fragments(payload, plan)
+    )
+    expected_kv = apply_tp_transfer_plan(
+        tuple(payload.kv_blocks for payload in payloads),
+        plan.kv_slices,
+        dst_tp,
+        shard_dim=4,
+        dst_width=1,
+    )
+    expected_scales = (
+        apply_tp_transfer_plan(
+            tuple(payload.kv_scales for payload in payloads),
+            plan.kv_scale_slices,
+            dst_tp,
+            shard_dim=4,
+            dst_width=1,
+        )
+        if with_scales
+        else (None,) * dst_tp
+    )
+    expected_recurrent = apply_tp_transfer_plan(
+        tuple(payload.recurrent_states[0] for payload in payloads),
+        plan.recurrent_slices,
+        dst_tp,
+        shard_dim=0,
+        dst_width=32 // dst_tp,
+    )
+    expected_convolution = apply_tp_transfer_plan(
+        tuple(payload.convolution_states[0] for payload in payloads),
+        plan.convolution_slices,
+        dst_tp,
+        shard_dim=0,
+        dst_width=64 // dst_tp,
+    )
+
+    for dst_rank in range(dst_tp):
+        destination = assemble_qwen35_peer_cache_fragments(
+            tuple(
+                fragment
+                for fragment in reversed(fragments)
+                if fragment.dst_rank == dst_rank
+            ),
+            plan,
+        )
+        torch.testing.assert_close(destination.kv_blocks, expected_kv[dst_rank])
+        if with_scales:
+            torch.testing.assert_close(
+                destination.kv_scales,
+                expected_scales[dst_rank],
+            )
+        else:
+            assert destination.kv_scales is None
+        torch.testing.assert_close(
+            destination.recurrent_states[0],
+            expected_recurrent[dst_rank],
+        )
+        torch.testing.assert_close(
+            destination.convolution_states[0],
+            expected_convolution[dst_rank],
+        )
+
+
+def test_destination_assembly_rejects_missing_source_peer():
+    src_tp = 8
+    plan = build_qwen35_cache_transfer_plan(
+        src_tp_size=src_tp,
+        dst_tp_size=4,
+        total_kv_heads=2,
+        kv_bytes_per_head=2 * 2 * 2 * 4 * 2 * 4,
+        kv_scale_bytes_per_head=0,
+        recurrent_heads=32,
+        recurrent_bytes_per_head=2 * 2 * 4,
+        convolution_group_widths=(16, 16, 32),
+        convolution_bytes_per_channel=3 * 2,
+    )
+    fragments = tuple(
+        fragment
+        for rank in range(src_tp)
+        for fragment in build_qwen35_peer_cache_fragments(
+            make_payload(rank, src_tp, with_scales=False),
+            plan,
+        )
+        if fragment.dst_rank == 0
+    )
+    assert len(fragments) == 2
+
+    with pytest.raises(ValueError, match="peer bytes"):
+        assemble_qwen35_peer_cache_fragments(fragments[:1], plan)
