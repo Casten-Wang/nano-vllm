@@ -5,7 +5,11 @@ import pytest
 import torch
 
 from nanovllm.layers import embed_head
-from nanovllm.layers.embed_head import ParallelLMHead, VocabParallelEmbedding
+from nanovllm.layers.embed_head import (
+    ParallelLMHead,
+    VocabParallelEmbedding,
+    compact_token_id_dtype,
+)
 
 
 class TrackingSlice:
@@ -53,6 +57,12 @@ def make_lm_head(rank=0, world_size=2):
         patch("torch.distributed.get_world_size", return_value=world_size),
     ):
         return ParallelLMHead(8, 2)
+
+
+def test_compact_token_id_dtype_preserves_large_vocabulary_ids():
+    assert compact_token_id_dtype(248_320) == torch.int32
+    assert compact_token_id_dtype(torch.iinfo(torch.int32).max) == torch.int32
+    assert compact_token_id_dtype(torch.iinfo(torch.int32).max + 1) == torch.int64
 
 
 def test_lm_head_gathers_tp_logits_into_one_vocab_buffer():
@@ -297,13 +307,15 @@ def test_lm_head_tp_top_k_reduces_exact_global_candidates():
         selected_ids,
         torch.tensor([[6, 1], [1, 2]]),
     )
-    assert calls == [(torch.float32, (2, 2)), (torch.int64, (2, 2))]
+    assert selected_ids.dtype == torch.int64
+    assert calls == [(torch.float32, (2, 2)), (torch.int32, (2, 2))]
     stats = head.tp_logits_storage_stats()
     assert stats["top_k_reduction_count"] == 1
-    assert stats["gathered_bytes"] == 192
-    assert stats["total_bytes"] == 192
-    assert stats["allocation_count"] == 4
-    assert stats["top_k_candidate_bytes"] == 48
+    assert stats["local_bytes"] == 16
+    assert stats["gathered_bytes"] == 128
+    assert stats["total_bytes"] == 144
+    assert stats["allocation_count"] == 5
+    assert stats["top_k_candidate_bytes"] == 32
     assert stats["top_k_full_gather_avoided_bytes"] == 32
 
 
@@ -325,6 +337,7 @@ def test_lm_head_reuses_compact_tp_gather_buffers_for_smaller_batches():
         greedy_storage = head._tp_greedy_gather_buffer.data_ptr()
         head(torch.randn(1, 2), greedy=True)
         head(torch.randn(3, 2), top_k=2)
+        top_k_local_id_storage = head._tp_top_k_local_ids_buffer.data_ptr()
         top_k_value_storage = head._tp_top_k_values_buffer.data_ptr()
         top_k_id_storage = head._tp_top_k_ids_buffer.data_ptr()
         top_k_flat_value_storage = head._tp_top_k_flat_values_buffer.data_ptr()
@@ -333,6 +346,7 @@ def test_lm_head_reuses_compact_tp_gather_buffers_for_smaller_batches():
 
     assert head._tp_greedy_local_buffer.data_ptr() == greedy_local_storage
     assert head._tp_greedy_gather_buffer.data_ptr() == greedy_storage
+    assert head._tp_top_k_local_ids_buffer.data_ptr() == top_k_local_id_storage
     assert head._tp_top_k_values_buffer.data_ptr() == top_k_value_storage
     assert head._tp_top_k_ids_buffer.data_ptr() == top_k_id_storage
     assert (
@@ -341,8 +355,8 @@ def test_lm_head_reuses_compact_tp_gather_buffers_for_smaller_batches():
     )
     assert head._tp_top_k_flat_ids_buffer.data_ptr() == top_k_flat_id_storage
     stats = head.tp_logits_storage_stats()
-    assert stats["allocation_count"] == 6
-    assert stats["reuse_count"] == 6
+    assert stats["allocation_count"] == 7
+    assert stats["reuse_count"] == 7
 
 
 def test_nonzero_lm_head_rank_participates_in_top_k_reduction():
@@ -363,7 +377,7 @@ def test_nonzero_lm_head_rank_participates_in_top_k_reduction():
     assert candidates is None
     assert calls == [
         (torch.float32, (3, 2), None, 0),
-        (torch.int64, (3, 2), None, 0),
+        (torch.int32, (3, 2), None, 0),
     ]
 
 

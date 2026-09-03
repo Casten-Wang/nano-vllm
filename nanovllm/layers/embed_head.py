@@ -6,6 +6,16 @@ import torch.distributed as dist
 from nanovllm.utils.context import get_context
 
 
+def compact_token_id_dtype(vocab_size: int) -> torch.dtype:
+    """Use 32-bit collective payloads when every token id is representable."""
+
+    return (
+        torch.int32
+        if vocab_size <= torch.iinfo(torch.int32).max
+        else torch.int64
+    )
+
+
 class VocabParallelEmbedding(nn.Module):
 
     def __init__(
@@ -90,9 +100,15 @@ class ParallelLMHead(VocabParallelEmbedding):
             torch.empty(0),
             persistent=False,
         )
+        self._tp_candidate_id_dtype = compact_token_id_dtype(self.num_embeddings)
+        self.register_buffer(
+            "_tp_top_k_local_ids_buffer",
+            torch.empty(0, dtype=self._tp_candidate_id_dtype),
+            persistent=False,
+        )
         self.register_buffer(
             "_tp_top_k_ids_buffer",
-            torch.empty(0, dtype=torch.int64),
+            torch.empty(0, dtype=self._tp_candidate_id_dtype),
             persistent=False,
         )
         self.register_buffer(
@@ -102,7 +118,7 @@ class ParallelLMHead(VocabParallelEmbedding):
         )
         self.register_buffer(
             "_tp_top_k_flat_ids_buffer",
-            torch.empty(0, dtype=torch.int64),
+            torch.empty(0, dtype=self._tp_candidate_id_dtype),
             persistent=False,
         )
         self.tp_logits_allocation_count = 0
@@ -146,6 +162,7 @@ class ParallelLMHead(VocabParallelEmbedding):
             for buffer in (
                 self._tp_local_logits_buffer,
                 self._tp_greedy_local_buffer,
+                self._tp_top_k_local_ids_buffer,
             )
         )
         gathered_bytes = sum(
@@ -283,9 +300,19 @@ class ParallelLMHead(VocabParallelEmbedding):
             self.tp_top_k_reduction_count += 1
             local_k = min(top_k, self.num_embeddings_per_partition)
             local_values, local_ids = torch.topk(logits, local_k, dim=-1)
-            local_ids.add_(self.vocab_start_idx)
             if self.tp_size == 1:
-                return local_values, local_ids
+                return local_values, local_ids.add(self.vocab_start_idx)
+            if torch.is_grad_enabled():
+                candidate_ids = local_ids.add(self.vocab_start_idx)
+            else:
+                candidate_ids = self._tp_logits_buffer(
+                    "_tp_top_k_local_ids_buffer",
+                    local_ids.numel(),
+                    local_ids,
+                    dtype=self._tp_candidate_id_dtype,
+                ).view_as(local_ids)
+                candidate_ids.copy_(local_ids)
+                candidate_ids.add_(self.vocab_start_idx)
             if self.tp_rank == 0:
                 shape = (self.tp_size, logits.shape[0], local_k)
                 required = self.tp_size * logits.shape[0] * local_k
@@ -297,7 +324,7 @@ class ParallelLMHead(VocabParallelEmbedding):
                     )
                     gathered_ids = torch.empty(
                         shape,
-                        dtype=torch.int64,
+                        dtype=candidate_ids.dtype,
                         device=logits.device,
                     )
                 else:
@@ -309,7 +336,7 @@ class ParallelLMHead(VocabParallelEmbedding):
                     gathered_ids = self._tp_logits_buffer(
                         "_tp_top_k_ids_buffer",
                         required,
-                        local_ids,
+                        candidate_ids,
                     ).view(shape)
                 value_list = list(gathered_values.unbind(dim=0))
                 id_list = list(gathered_ids.unbind(dim=0))
@@ -319,11 +346,11 @@ class ParallelLMHead(VocabParallelEmbedding):
                 value_list = None
                 id_list = None
             dist.gather(local_values, value_list, 0)
-            dist.gather(local_ids, id_list, 0)
+            dist.gather(candidate_ids, id_list, 0)
             peer_count = self.tp_size - 1
             self.tp_top_k_candidate_bytes += (
                 local_values.numel() * local_values.element_size()
-                + local_ids.numel() * local_ids.element_size()
+                + candidate_ids.numel() * candidate_ids.element_size()
             ) * peer_count
             self.tp_top_k_full_gather_avoided_bytes += (
                 logits.numel() * logits.element_size() * peer_count
@@ -343,7 +370,7 @@ class ParallelLMHead(VocabParallelEmbedding):
                 all_ids_storage = self._tp_logits_buffer(
                     "_tp_top_k_flat_ids_buffer",
                     required,
-                    local_ids,
+                    candidate_ids,
                 ).view(logits.shape[0], self.tp_size, local_k)
                 all_values_storage.copy_(gathered_values.permute(1, 0, 2))
                 all_ids_storage.copy_(gathered_ids.permute(1, 0, 2))
@@ -355,7 +382,7 @@ class ParallelLMHead(VocabParallelEmbedding):
                 dim=-1,
             )
             selected_ids = all_ids.gather(1, selected_offsets)
-            return selected_values, selected_ids
+            return selected_values, selected_ids.to(torch.int64)
         if self.tp_size > 1:
             # Gather vocabulary-major shards into one allocation. Transposing
             # the result exposes the expected [batch, vocabulary] layout as a
