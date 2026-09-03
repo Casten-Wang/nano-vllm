@@ -240,6 +240,76 @@ def test_fp8_expert_loader_owns_only_local_tp4_blocks():
     assert len(experts.down_proj.required_checkpoint_shards) == 2
 
 
+def test_resident_fp8_experts_keep_quantized_storage_and_match_reference():
+    with (
+        patch("torch.distributed.get_world_size", return_value=1),
+        patch("torch.distributed.get_rank", return_value=0),
+    ):
+        experts = Qwen35Experts(
+            hidden_size=4,
+            intermediate_size=4,
+            num_experts=1,
+            checkpoint_format="fp8_block",
+            fp8_block_size=(2, 2),
+            resident_fp8=True,
+        )
+    gate = torch.eye(4, dtype=torch.float8_e4m3fn)
+    up = (torch.eye(4) * 2).to(torch.float8_e4m3fn)
+    down = torch.eye(4, dtype=torch.float8_e4m3fn)
+    scale = torch.ones(2, 2)
+    experts._load_gate_up_fp8_slice(
+        experts.gate_up_proj, gate, scale, (0, "gate"), (2, 2)
+    )
+    experts._load_gate_up_fp8_slice(
+        experts.gate_up_proj, up, scale, (0, "up"), (2, 2)
+    )
+    experts._load_down_fp8_slice(
+        experts.down_proj, down, scale, (0, "down"), (2, 2)
+    )
+    hidden = torch.tensor([[0.5, 1.0, -0.5, 2.0]])
+    actual = experts._forward_sorted(
+        hidden,
+        torch.zeros(1, 1, dtype=torch.long),
+        torch.ones(1, 1),
+    )
+    expected = torch.nn.functional.silu(hidden) * (2.0 * hidden)
+
+    assert experts.gate_up_proj.dtype == torch.float8_e4m3fn
+    assert experts.down_proj.dtype == torch.float8_e4m3fn
+    torch.testing.assert_close(actual, expected)
+
+
+def test_resident_fp8_experts_preserve_tp8_partial_block_scales():
+    with (
+        patch("torch.distributed.get_world_size", return_value=8),
+        patch("torch.distributed.get_rank", return_value=3),
+    ):
+        experts = Qwen35Experts(
+            hidden_size=8,
+            intermediate_size=64,
+            num_experts=1,
+            checkpoint_format="fp8_block",
+            fp8_block_size=(128, 128),
+            resident_fp8=True,
+        )
+    down = torch.ones(8, 64, dtype=torch.float8_e4m3fn)
+    scale = torch.full((1, 1), 3.0)
+
+    experts._load_down_fp8_slice(
+        experts.down_proj,
+        down,
+        scale,
+        (0, "down"),
+        (128, 128),
+    )
+
+    assert experts.down_scale.shape == (1, 1, 1)
+    torch.testing.assert_close(
+        experts._resident_weight("down", 0, torch.float32),
+        torch.full((8, 8), 3.0),
+    )
+
+
 class TinyFP8Model(nn.Module):
     def __init__(self):
         super().__init__()

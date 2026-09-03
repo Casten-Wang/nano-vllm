@@ -210,8 +210,38 @@ def test_fp8_checkpoint_rejects_unimplemented_native_backend(monkeypatch, tmp_pa
         ),
     )
 
-    with pytest.raises(ValueError, match="currently require.*reference"):
+    with pytest.raises(ValueError, match="require.*reference.*resident"):
         config_module.Config(str(tmp_path), weight_quant_backend="triton")
+
+
+def test_fp8_checkpoint_accepts_resident_reference_backend(monkeypatch, tmp_path):
+    text_config = SimpleNamespace(max_position_embeddings=32768)
+    monkeypatch.setattr(
+        config_module.AutoConfig,
+        "from_pretrained",
+        lambda _model: SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        config_module,
+        "resolve_model_spec",
+        lambda _config: SimpleNamespace(
+            architecture="Qwen3_5MoeForConditionalGeneration",
+            text_config=text_config,
+            quantization=QuantizationSpec(
+                format="fp8_block",
+                weight_bits=8,
+                weight_block_size=(128, 128),
+            ),
+        ),
+    )
+
+    config = config_module.Config(
+        str(tmp_path),
+        weight_quant_backend="resident",
+    )
+
+    assert config.weight_quant_backend == "resident"
+    assert text_config.nanovllm_weight_quant_backend == "resident"
 
 
 def test_fp8_reference_loader_is_scoped_to_qwen35(monkeypatch, tmp_path):

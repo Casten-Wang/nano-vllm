@@ -119,9 +119,10 @@ class Config:
             )
         if self.qwen35_moe_decode_chunk_size <= 0:
             raise ValueError("qwen35_moe_decode_chunk_size must be positive")
-        if self.weight_quant_backend not in ("auto", "reference", "triton"):
+        if self.weight_quant_backend not in ("auto", "reference", "resident", "triton"):
             raise ValueError(
-                "weight_quant_backend must be 'auto', 'reference', or 'triton'"
+                "weight_quant_backend must be 'auto', 'reference', 'resident', "
+                "or 'triton'"
             )
         if (
             not isinstance(self.max_remote_prefill_transfers, int)
@@ -166,10 +167,18 @@ class Config:
                 )
             if self.weight_quant_backend == "auto":
                 self.weight_quant_backend = "reference"
-            if self.weight_quant_backend != "reference":
+            if self.weight_quant_backend not in ("reference", "resident"):
                 raise ValueError(
-                    "block-FP8 checkpoints currently require "
-                    "weight_quant_backend='reference'"
+                    "block-FP8 checkpoints require weight_quant_backend="
+                    "'reference' or 'resident'"
+                )
+            if (
+                self.weight_quant_backend == "resident"
+                and self.qwen35_moe_decode_backend != "sorted"
+            ):
+                raise ValueError(
+                    "resident FP8 experts currently require "
+                    "qwen35_moe_decode_backend='sorted'"
                 )
             self.model_config.nanovllm_quantization_spec = quantization
             self.model_config.nanovllm_weight_quant_backend = self.weight_quant_backend

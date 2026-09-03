@@ -98,6 +98,8 @@ class Qwen35Experts(nn.Module):
         decode_backend: str = "sorted",
         decode_chunk_size: int = 8,
         checkpoint_format: str = "bf16",
+        fp8_block_size: tuple[int, int] | None = None,
+        resident_fp8: bool = False,
     ) -> None:
         super().__init__()
         if decode_backend not in ("sorted", "batched"):
@@ -113,20 +115,36 @@ class Qwen35Experts(nn.Module):
         self.tp_size = dist.get_world_size()
         self.tp_rank = dist.get_rank()
         self.local_intermediate_size = divide(intermediate_size, self.tp_size)
+        self.resident_fp8 = resident_fp8
+        self.fp8_block_size = fp8_block_size
+        if resident_fp8 and (checkpoint_format != "fp8_block" or fp8_block_size is None):
+            raise ValueError("resident FP8 experts require an FP8 block checkpoint")
+        parameter_dtype = torch.float8_e4m3fn if resident_fp8 else None
         self.gate_up_proj = nn.Parameter(
             torch.empty(
                 num_experts,
                 2 * self.local_intermediate_size,
                 hidden_size,
-            )
+                dtype=parameter_dtype,
+            ),
+            requires_grad=not resident_fp8,
         )
         self.down_proj = nn.Parameter(
             torch.empty(
                 num_experts,
                 hidden_size,
                 self.local_intermediate_size,
-            )
+                dtype=parameter_dtype,
+            ),
+            requires_grad=not resident_fp8,
         )
+        if resident_fp8:
+            br, bc = fp8_block_size
+            offset = self.tp_rank * self.local_intermediate_size
+            local_scale_width = (offset % br + self.local_intermediate_size + br - 1) // br
+            down_scale_width = (offset % bc + self.local_intermediate_size + bc - 1) // bc
+            self.register_buffer("gate_up_scale", torch.empty(num_experts, 2, local_scale_width, (hidden_size + bc - 1) // bc))
+            self.register_buffer("down_scale", torch.empty(num_experts, (hidden_size + br - 1) // br, down_scale_width))
         self.gate_up_proj.weight_loader = self._load_gate_up
         self.gate_up_proj.safetensors_loader = self._load_gate_up_slice
         self.down_proj.weight_loader = self._load_down
@@ -250,6 +268,14 @@ class Qwen35Experts(nn.Module):
             expert_id,
             target_start : target_start + self.local_intermediate_size,
         ]
+        if self.resident_fp8:
+            target.copy_(loaded_weight[source_start : source_start + self.local_intermediate_size, :])
+            br, bc = block_size
+            scale_start = source_start // br
+            scale_end = (source_start + self.local_intermediate_size + br - 1) // br
+            scale_target = 0 if projection == "gate" else 1
+            self.gate_up_scale[expert_id, scale_target].copy_(loaded_scale[scale_start:scale_end, :])
+            return
         dequantize_fp8_block_weight_slice(
             loaded_weight,
             loaded_scale,
@@ -334,6 +360,13 @@ class Qwen35Experts(nn.Module):
                 f"{shape}; expected {expected_shape}"
             )
         source_start = self.tp_rank * self.local_intermediate_size
+        if self.resident_fp8:
+            param.data[expert_id].copy_(loaded_weight[:, source_start : source_start + self.local_intermediate_size])
+            br, bc = block_size
+            scale_start = source_start // bc
+            scale_end = (source_start + self.local_intermediate_size + bc - 1) // bc
+            self.down_scale[expert_id].copy_(loaded_scale[:, scale_start:scale_end])
+            return
         dequantize_fp8_block_weight_slice(
             loaded_weight,
             loaded_scale,
@@ -435,11 +468,19 @@ class Qwen35Experts(nn.Module):
                 (topk_ids[0, route_order], route_order), dim=1
             ).cpu().tolist()
             for expert_id, route_index in routes:
-                gate_up = F.linear(hidden_states, self.gate_up_proj[expert_id])
+                gate_up_weight = (
+                    self._resident_weight("gate_up", expert_id, hidden_states.dtype)
+                    if self.resident_fp8 else self.gate_up_proj[expert_id]
+                )
+                down_weight = (
+                    self._resident_weight("down", expert_id, hidden_states.dtype)
+                    if self.resident_fp8 else self.down_proj[expert_id]
+                )
+                gate_up = F.linear(hidden_states, gate_up_weight)
                 gate, up = gate_up.chunk(2, dim=-1)
                 expert_output = F.linear(
                     F.silu(gate) * up,
-                    self.down_proj[expert_id],
+                    down_weight,
                 )
                 output.add_(
                     weight_expert_output(
@@ -479,11 +520,19 @@ class Qwen35Experts(nn.Module):
             end = offset + count
             token_index = sorted_tokens[offset:end]
             expert_input = hidden_states[token_index]
-            gate_up = F.linear(expert_input, self.gate_up_proj[expert_id])
+            gate_up_weight = (
+                self._resident_weight("gate_up", expert_id, hidden_states.dtype)
+                if self.resident_fp8 else self.gate_up_proj[expert_id]
+            )
+            down_weight = (
+                self._resident_weight("down", expert_id, hidden_states.dtype)
+                if self.resident_fp8 else self.down_proj[expert_id]
+            )
+            gate_up = F.linear(expert_input, gate_up_weight)
             gate, up = gate_up.chunk(2, dim=-1)
             expert_output = F.linear(
                 F.silu(gate) * up,
-                self.down_proj[expert_id],
+                down_weight,
             )
             expert_output = weight_expert_output(
                 expert_output,
@@ -492,6 +541,18 @@ class Qwen35Experts(nn.Module):
             output.index_add_(0, token_index, expert_output.to(output.dtype))
             offset = end
         return output
+
+    def _resident_weight(self, projection: str, expert_id: int, dtype: torch.dtype):
+        from nanovllm.models.qwen35_fp8 import dequantize_fp8_block_weight
+
+        br, bc = self.fp8_block_size
+        offset = self.tp_rank * self.local_intermediate_size
+        if projection == "gate_up":
+            parts = []
+            for index, weight in enumerate(self.gate_up_proj[expert_id].chunk(2, dim=0)):
+                parts.append(dequantize_fp8_block_weight(weight, self.gate_up_scale[expert_id, index], (br, bc), output_dtype=dtype, block_offset=(offset % br, 0)))
+            return torch.cat(parts, dim=0)
+        return dequantize_fp8_block_weight(self.down_proj[expert_id], self.down_scale[expert_id], (br, bc), output_dtype=dtype, block_offset=(0, offset % bc))
 
 
 class Qwen35SharedExpert(nn.Module):
@@ -553,6 +614,9 @@ class Qwen35SparseMoeBlock(nn.Module):
                 getattr(config, "qwen35_moe_decode_backend", "sorted"),
                 int(getattr(config, "qwen35_moe_decode_chunk_size", 8)),
                 getattr(quantization, "format", "bf16"),
+                getattr(quantization, "weight_block_size", None),
+                getattr(config, "nanovllm_weight_quant_backend", "reference")
+                == "resident",
             )
         self.shared_expert = Qwen35SharedExpert(
             self.hidden_size,
