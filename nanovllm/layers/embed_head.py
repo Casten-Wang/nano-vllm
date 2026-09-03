@@ -75,6 +75,21 @@ class ParallelLMHead(VocabParallelEmbedding):
             torch.empty(0),
             persistent=False,
         )
+        self.register_buffer(
+            "_tp_greedy_gather_buffer",
+            torch.empty(0),
+            persistent=False,
+        )
+        self.register_buffer(
+            "_tp_top_k_values_buffer",
+            torch.empty(0),
+            persistent=False,
+        )
+        self.register_buffer(
+            "_tp_top_k_ids_buffer",
+            torch.empty(0, dtype=torch.int64),
+            persistent=False,
+        )
         self.tp_logits_allocation_count = 0
         self.tp_logits_reuse_count = 0
         self.tp_greedy_reduction_count = 0
@@ -112,9 +127,14 @@ class ParallelLMHead(VocabParallelEmbedding):
             self._tp_local_logits_buffer.numel()
             * self._tp_local_logits_buffer.element_size()
         )
-        gathered_bytes = (
-            self._tp_gathered_logits_buffer.numel()
-            * self._tp_gathered_logits_buffer.element_size()
+        gathered_bytes = sum(
+            buffer.numel() * buffer.element_size()
+            for buffer in (
+                self._tp_gathered_logits_buffer,
+                self._tp_greedy_gather_buffer,
+                self._tp_top_k_values_buffer,
+                self._tp_top_k_ids_buffer,
+            )
         )
         return {
             "local_bytes": local_bytes,
@@ -196,13 +216,20 @@ class ParallelLMHead(VocabParallelEmbedding):
                 logits.numel() * logits.element_size() * peer_count
             )
             if self.tp_rank == 0:
-                gathered_candidates = torch.empty(
-                    self.tp_size,
-                    logits.shape[0],
-                    2,
-                    dtype=torch.float32,
-                    device=logits.device,
-                )
+                if torch.is_grad_enabled():
+                    gathered_candidates = torch.empty(
+                        self.tp_size,
+                        logits.shape[0],
+                        2,
+                        dtype=torch.float32,
+                        device=logits.device,
+                    )
+                else:
+                    gathered_candidates = self._tp_logits_buffer(
+                        "_tp_greedy_gather_buffer",
+                        self.tp_size * logits.shape[0] * 2,
+                        local_candidates,
+                    ).view(self.tp_size, logits.shape[0], 2)
                 candidate_list = list(gathered_candidates.unbind(dim=0))
             else:
                 gathered_candidates = None
@@ -228,20 +255,30 @@ class ParallelLMHead(VocabParallelEmbedding):
             if self.tp_size == 1:
                 return local_values, global_ids
             if self.tp_rank == 0:
-                gathered_values = torch.empty(
-                    self.tp_size,
-                    logits.shape[0],
-                    local_k,
-                    dtype=logits.dtype,
-                    device=logits.device,
-                )
-                gathered_ids = torch.empty(
-                    self.tp_size,
-                    logits.shape[0],
-                    local_k,
-                    dtype=torch.int64,
-                    device=logits.device,
-                )
+                shape = (self.tp_size, logits.shape[0], local_k)
+                required = self.tp_size * logits.shape[0] * local_k
+                if torch.is_grad_enabled():
+                    gathered_values = torch.empty(
+                        shape,
+                        dtype=logits.dtype,
+                        device=logits.device,
+                    )
+                    gathered_ids = torch.empty(
+                        shape,
+                        dtype=torch.int64,
+                        device=logits.device,
+                    )
+                else:
+                    gathered_values = self._tp_logits_buffer(
+                        "_tp_top_k_values_buffer",
+                        required,
+                        local_values,
+                    ).view(shape)
+                    gathered_ids = self._tp_logits_buffer(
+                        "_tp_top_k_ids_buffer",
+                        required,
+                        global_ids,
+                    ).view(shape)
                 value_list = list(gathered_values.unbind(dim=0))
                 id_list = list(gathered_ids.unbind(dim=0))
             else:

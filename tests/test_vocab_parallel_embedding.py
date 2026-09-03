@@ -193,7 +193,9 @@ def test_lm_head_tp_greedy_reduces_only_rank_local_candidates():
     torch.testing.assert_close(tokens, torch.tensor([3, 6]))
     assert observed["shape"] == (2, 2)
     stats = head.tp_logits_storage_stats()
-    assert stats["total_bytes"] == 0
+    assert stats["gathered_bytes"] == 32
+    assert stats["total_bytes"] == 32
+    assert stats["allocation_count"] == 1
     assert stats["greedy_reduction_count"] == 1
     assert stats["greedy_candidate_bytes"] == 16
     assert stats["greedy_full_gather_avoided_bytes"] == 32
@@ -287,8 +289,40 @@ def test_lm_head_tp_top_k_reduces_exact_global_candidates():
     assert calls == [(torch.float32, (2, 2)), (torch.int64, (2, 2))]
     stats = head.tp_logits_storage_stats()
     assert stats["top_k_reduction_count"] == 1
+    assert stats["gathered_bytes"] == 96
+    assert stats["total_bytes"] == 96
+    assert stats["allocation_count"] == 2
     assert stats["top_k_candidate_bytes"] == 48
     assert stats["top_k_full_gather_avoided_bytes"] == 32
+
+
+def test_lm_head_reuses_compact_tp_gather_buffers_for_smaller_batches():
+    head = make_lm_head()
+    context = SimpleNamespace(is_mixed=False, is_prefill=False)
+
+    def gather(local, gather_list, dst):
+        gather_list[0].copy_(local)
+        gather_list[1].copy_(local)
+
+    with (
+        torch.inference_mode(),
+        patch.object(embed_head, "get_context", return_value=context),
+        patch.object(embed_head.dist, "gather", side_effect=gather),
+    ):
+        head(torch.randn(3, 2), greedy=True)
+        greedy_storage = head._tp_greedy_gather_buffer.data_ptr()
+        head(torch.randn(1, 2), greedy=True)
+        head(torch.randn(3, 2), top_k=2)
+        top_k_value_storage = head._tp_top_k_values_buffer.data_ptr()
+        top_k_id_storage = head._tp_top_k_ids_buffer.data_ptr()
+        head(torch.randn(1, 2), top_k=2)
+
+    assert head._tp_greedy_gather_buffer.data_ptr() == greedy_storage
+    assert head._tp_top_k_values_buffer.data_ptr() == top_k_value_storage
+    assert head._tp_top_k_ids_buffer.data_ptr() == top_k_id_storage
+    stats = head.tp_logits_storage_stats()
+    assert stats["allocation_count"] == 3
+    assert stats["reuse_count"] == 3
 
 
 def test_nonzero_lm_head_rank_participates_in_top_k_reduction():
