@@ -35,3 +35,6 @@ Upstream = "https://github.com/GeeeekExplorer/nano-vllm"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["nanovllm*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
