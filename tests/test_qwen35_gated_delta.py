@@ -33,6 +33,7 @@ chunk_gated_delta_rule = qwen35_gated_delta.chunk_gated_delta_rule
 effective_chunk_size = qwen35_gated_delta.effective_chunk_size
 causal_upper_mask = qwen35_gated_delta.causal_upper_mask
 gather_prefill_group = qwen35_gated_delta._gather_prefill_group
+store_prefill_group = qwen35_gated_delta._store_prefill_group
 l2_normalize = qwen35_gated_delta.l2_normalize
 recurrent_gated_delta_rule = qwen35_gated_delta.recurrent_gated_delta_rule
 recurrent_gated_delta_step = qwen35_gated_delta.recurrent_gated_delta_step
@@ -189,6 +190,31 @@ def test_interleaved_prefill_group_keeps_copy_fallback():
         batched,
         torch.stack((projected[0:2], projected[3:5])),
     )
+
+
+def test_contiguous_prefill_group_is_stored_as_one_flat_batch():
+    output = torch.full((10, 4), -1)
+    grouped = torch.arange(24).view(2, 3, 4)
+    group = ((2, 5, 0), (5, 8, 1))
+
+    store_prefill_group(output, grouped, 3, group)
+
+    torch.testing.assert_close(output[2:8], grouped.view(6, 4))
+    torch.testing.assert_close(output[:2], torch.full((2, 4), -1))
+    torch.testing.assert_close(output[8:], torch.full((2, 4), -1))
+
+
+def test_interleaved_prefill_group_preserves_unselected_rows():
+    output = torch.full((7, 3), -1)
+    grouped = torch.arange(12).view(2, 2, 3)
+    group = ((0, 2, 0), (4, 6, 2))
+
+    store_prefill_group(output, grouped, 2, group)
+
+    torch.testing.assert_close(output[0:2], grouped[0])
+    torch.testing.assert_close(output[4:6], grouped[1])
+    torch.testing.assert_close(output[2:4], torch.full((2, 3), -1))
+    torch.testing.assert_close(output[6:], torch.full((1, 3), -1))
 
 
 @pytest.mark.parametrize("batch_size", [1, 3])

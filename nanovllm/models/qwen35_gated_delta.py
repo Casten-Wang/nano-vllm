@@ -431,6 +431,31 @@ def _gather_prefill_group(
     return torch.stack([tensor[start:end] for start, end, _ in group])
 
 
+def _store_prefill_group(
+    output: torch.Tensor,
+    grouped_output: torch.Tensor,
+    sequence_length: int,
+    group: tuple[tuple[int, int, int], ...],
+) -> None:
+    """Write a contiguous group in one copy and scatter only when required."""
+
+    first_start = group[0][0]
+    contiguous = all(
+        start == first_start + index * sequence_length
+        and end == start + sequence_length
+        for index, (start, end, _) in enumerate(group)
+    )
+    if contiguous:
+        output.narrow(
+            0,
+            first_start,
+            len(group) * sequence_length,
+        ).copy_(grouped_output.reshape(-1, *output.shape[1:]))
+        return
+    for batch_index, (start, end, _) in enumerate(group):
+        output[start:end] = grouped_output[batch_index, :sequence_length]
+
+
 def chunk_gated_delta_rule(
     query: torch.Tensor,
     key: torch.Tensor,
@@ -1386,8 +1411,12 @@ class Qwen35GatedDeltaNet(nn.Module):
                 group_slots,
                 state_span,
             )
-            for batch_index, (start, end, _) in enumerate(group):
-                outputs[start:end] = group_output[batch_index, :sequence_length]
+            _store_prefill_group(
+                outputs,
+                group_output,
+                sequence_length,
+                group,
+            )
 
         projected = self.out_proj(outputs)
         if self.tp_size > 1:
