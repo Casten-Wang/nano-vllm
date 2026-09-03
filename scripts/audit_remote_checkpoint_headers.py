@@ -277,6 +277,39 @@ def audit_quantized_tensor_groups(
     }
 
 
+def audit_fp8_shard_colocation(
+    headers: dict[str, dict],
+    weight_map: dict[str, str],
+) -> dict:
+    """Verify each FP8 weight can load its scale from the same open shard."""
+
+    errors = []
+    checked = 0
+    for name, metadata in sorted(headers.items()):
+        if not name.endswith(".weight") or not metadata.get("dtype", "").startswith(
+            "F8_"
+        ):
+            continue
+        checked += 1
+        scale_name = f"{name}_scale_inv"
+        weight_shard = weight_map.get(name)
+        scale_shard = weight_map.get(scale_name)
+        if weight_shard is None or scale_shard is None:
+            errors.append(
+                f"{name}: weight or scale is absent from the checkpoint index"
+            )
+        elif weight_shard != scale_shard:
+            errors.append(
+                f"{name}: weight is in {weight_shard}, but scale is in "
+                f"{scale_shard}"
+            )
+    return {
+        "checked_weight_count": checked,
+        "errors": errors,
+        "valid": checked > 0 and not errors,
+    }
+
+
 def audit_quantized_tp_layout(
     logical_headers: dict[str, dict],
     quantization: QuantizationSpec,
@@ -772,6 +805,15 @@ def main() -> None:
             headers,
             quantization,
         )
+        if quantization.format == "fp8_block":
+            shard_colocation = audit_fp8_shard_colocation(
+                headers,
+                index["weight_map"],
+            )
+            quantization_audit["shard_colocation"] = shard_colocation
+            quantization_audit["valid"] = (
+                quantization_audit["valid"] and shard_colocation["valid"]
+            )
         logical_headers, expert_layout_audit = coalesce_expert_logical_headers(
             unstacked_logical_headers
         )

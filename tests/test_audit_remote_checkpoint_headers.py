@@ -321,6 +321,48 @@ def test_fp8_group_audit_rejects_missing_or_orphan_scale():
     assert any("orphan" in error for error in result["errors"])
 
 
+def test_fp8_shard_audit_requires_weight_and_scale_colocation():
+    weight = "model.layers.0.mlp.up_proj.weight"
+    scale = f"{weight}_scale_inv"
+    headers = {
+        weight: {"dtype": "F8_E4M3", "shape": [512, 2048]},
+        scale: {"dtype": "F32", "shape": [4, 16]},
+    }
+
+    colocated = MODULE.audit_fp8_shard_colocation(
+        headers,
+        {weight: "model-1.safetensors", scale: "model-1.safetensors"},
+    )
+    split = MODULE.audit_fp8_shard_colocation(
+        headers,
+        {weight: "model-1.safetensors", scale: "model-2.safetensors"},
+    )
+
+    assert colocated == {
+        "checked_weight_count": 1,
+        "errors": [],
+        "valid": True,
+    }
+    assert not split["valid"]
+    assert "model-1.safetensors" in split["errors"][0]
+    assert "model-2.safetensors" in split["errors"][0]
+
+
+def test_fp8_shard_audit_rejects_unindexed_scale():
+    weight = "model.layers.0.mlp.up_proj.weight"
+    scale = f"{weight}_scale_inv"
+    result = MODULE.audit_fp8_shard_colocation(
+        {
+            weight: {"dtype": "F8_E4M3", "shape": [512, 2048]},
+            scale: {"dtype": "F32", "shape": [4, 16]},
+        },
+        {weight: "model-1.safetensors"},
+    )
+
+    assert not result["valid"]
+    assert "absent from the checkpoint index" in result["errors"][0]
+
+
 def test_gptq_group_audit_reconstructs_logical_weight():
     spec = MODULE.QuantizationSpec(
         format="gptq_int4",
