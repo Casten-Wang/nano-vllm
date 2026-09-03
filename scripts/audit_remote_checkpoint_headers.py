@@ -780,6 +780,75 @@ def official_shard_metadata(model_metadata: dict, shards: list[str]) -> list[dic
     return results
 
 
+def checkpoint_semantic_contract(
+    config: dict,
+    generation_config: dict,
+    index: dict,
+    model_spec,
+) -> dict:
+    """Expose the checkpoint assumptions that local execution depends on."""
+
+    text_config = model_spec.text_config
+    rope_parameters = getattr(text_config, "rope_parameters", None) or {}
+    metadata = index.get("metadata") or {}
+    total_size = metadata.get("total_size")
+    if (
+        isinstance(total_size, bool)
+        or not isinstance(total_size, int)
+        or total_size <= 0
+    ):
+        raise ValueError("checkpoint index metadata.total_size must be positive")
+    eos_token_ids = generation_config.get("eos_token_id")
+    if isinstance(eos_token_ids, int) and not isinstance(eos_token_ids, bool):
+        eos_token_ids = [eos_token_ids]
+    if (
+        not isinstance(eos_token_ids, list)
+        or not eos_token_ids
+        or any(
+            isinstance(token, bool) or not isinstance(token, int)
+            for token in eos_token_ids
+        )
+    ):
+        raise ValueError("generation_config.eos_token_id must contain token IDs")
+
+    quantization = model_spec.quantization
+    return {
+        "architecture": model_spec.architecture,
+        "outer_model_type": config.get("model_type"),
+        "text_model_type": getattr(text_config, "model_type", None),
+        "num_hidden_layers": model_spec.num_hidden_layers,
+        "full_attention_layers": list(model_spec.full_attention_layers),
+        "linear_attention_layers": list(model_spec.linear_attention_layers),
+        "hidden_size": int(text_config.hidden_size),
+        "num_attention_heads": int(text_config.num_attention_heads),
+        "num_key_value_heads": int(text_config.num_key_value_heads),
+        "head_dim": int(text_config.head_dim),
+        "num_experts": int(text_config.num_experts),
+        "num_experts_per_tok": int(text_config.num_experts_per_tok),
+        "moe_intermediate_size": int(text_config.moe_intermediate_size),
+        "max_position_embeddings": int(text_config.max_position_embeddings),
+        "partial_rotary_factor": rope_parameters.get("partial_rotary_factor"),
+        "eos_token_ids": eos_token_ids,
+        "index_tensor_count": len(index["weight_map"]),
+        "index_total_size_bytes": total_size,
+        "quantization": {
+            "format": quantization.format,
+            "weight_bits": quantization.weight_bits,
+            "activation_scheme": quantization.activation_scheme,
+            "weight_block_size": (
+                list(quantization.weight_block_size)
+                if quantization.weight_block_size is not None
+                else None
+            ),
+            "group_size": quantization.group_size,
+            "symmetric": quantization.symmetric,
+            "desc_act": quantization.desc_act,
+            "ignored_module_count": len(quantization.ignored_modules),
+            "ignored_patterns": list(quantization.ignored_patterns),
+        },
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", required=True, help="Hugging Face model repo")
@@ -806,6 +875,8 @@ def main() -> None:
     )
     config_bytes = fetch_bytes(f"{base}/config.json")
     config_document = json.loads(config_bytes)
+    generation_config_bytes = fetch_bytes(f"{base}/generation_config.json")
+    generation_config_document = json.loads(generation_config_bytes)
     quantization = resolve_quantization_spec(
         SimpleNamespace(
             quantization_config=config_document.get("quantization_config")
@@ -955,6 +1026,9 @@ def main() -> None:
         "revision": args.revision,
         "resolved_revision": model_metadata["sha"],
         "config_sha256": hashlib.sha256(config_bytes).hexdigest(),
+        "generation_config_sha256": hashlib.sha256(
+            generation_config_bytes
+        ).hexdigest(),
         "index_sha256": hashlib.sha256(index_bytes).hexdigest(),
         "headers_sha256": hashlib.sha256(
             json.dumps(
@@ -968,6 +1042,12 @@ def main() -> None:
         "shard_count": len(shards),
         "checkpoint_shards": checkpoint_shards,
         "source_tensor_count": len(headers),
+        "semantic_contract": checkpoint_semantic_contract(
+            config_document,
+            generation_config_document,
+            index,
+            model_spec,
+        ),
         "logical_tensor_count": len(logical_headers),
         "downloaded_header_bytes": downloaded_header_bytes,
         "quantization": quantization_audit,

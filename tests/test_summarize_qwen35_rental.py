@@ -32,6 +32,9 @@ def write_gptq_summary_inputs(root, run_id, *, backend="triton"):
             "valid": True,
             "repo": MODULE.OFFICIAL_GPTQ_CHECKPOINT_REPO,
             "resolved_revision": MODULE.OFFICIAL_GPTQ_CHECKPOINT_REVISION,
+            "semantic_contract": MODULE.expected_checkpoint_semantic_contract(
+                "gptq_int4"
+            ),
             "config_sha256": "b" * 64,
             "index_sha256": "c" * 64,
             "shard_count": 1,
@@ -140,6 +143,9 @@ def write_fp8_summary_inputs(
             "valid": True,
             "repo": MODULE.OFFICIAL_FP8_CHECKPOINT_REPO,
             "resolved_revision": MODULE.OFFICIAL_FP8_CHECKPOINT_REVISION,
+            "semantic_contract": MODULE.expected_checkpoint_semantic_contract(
+                "fp8_block"
+            ),
             "fp8_runtime_backend": requested_backend,
             "config_sha256": "e" * 64,
             "index_sha256": "f" * 64,
@@ -365,6 +371,23 @@ def test_optional_gptq_summary_is_disabled_when_directory_is_absent(tmp_path):
     }
 
 
+@pytest.mark.parametrize(
+    "quantization_format", ("bf16", "gptq_int4", "fp8_block")
+)
+def test_checkpoint_semantic_contract_rejects_official_metadata_drift(
+    quantization_format,
+):
+    contract = MODULE.expected_checkpoint_semantic_contract(quantization_format)
+    assert MODULE.checkpoint_semantic_contract_matches(
+        {"semantic_contract": contract}, quantization_format
+    )
+
+    contract["num_experts_per_tok"] = 4
+    assert not MODULE.checkpoint_semantic_contract_matches(
+        {"semantic_contract": contract}, quantization_format
+    )
+
+
 def test_optional_fp8_audit_is_disabled_without_changing_run_validity(tmp_path):
     assert MODULE.summarize_optional_fp8_audit(tmp_path) == {
         "enabled": False,
@@ -382,6 +405,9 @@ def test_optional_fp8_audit_reports_tp_alignment_without_execution_claim(
             "valid": True,
             "repo": MODULE.OFFICIAL_FP8_CHECKPOINT_REPO,
             "resolved_revision": MODULE.OFFICIAL_FP8_CHECKPOINT_REVISION,
+            "semantic_contract": MODULE.expected_checkpoint_semantic_contract(
+                "fp8_block"
+            ),
             "quantization": {"format": "fp8_block", "valid": True},
             "results": {
                 "tp4": {
@@ -939,6 +965,9 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
             "config_sha256": MODULE.OFFICIAL_CONFIG_SHA256,
             "index_sha256": MODULE.OFFICIAL_INDEX_SHA256,
             "headers_sha256": MODULE.OFFICIAL_HEADERS_SHA256,
+            "semantic_contract": MODULE.expected_checkpoint_semantic_contract(
+                "bf16"
+            ),
             "source_tensor_count": 1811,
             "shard_count": 14,
             "checkpoint_shards": [

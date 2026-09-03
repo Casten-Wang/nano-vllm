@@ -1,6 +1,7 @@
 from importlib.util import module_from_spec, spec_from_file_location
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -14,6 +15,88 @@ SPEC = spec_from_file_location(
 assert SPEC is not None and SPEC.loader is not None
 MODULE = module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
+
+
+def test_checkpoint_semantic_contract_exposes_execution_assumptions():
+    text_config = SimpleNamespace(
+        model_type="qwen3_5_moe_text",
+        hidden_size=2048,
+        num_attention_heads=16,
+        num_key_value_heads=2,
+        head_dim=256,
+        num_experts=256,
+        num_experts_per_tok=8,
+        moe_intermediate_size=512,
+        max_position_embeddings=262144,
+        rope_parameters={"partial_rotary_factor": 0.25},
+    )
+    model_spec = SimpleNamespace(
+        architecture="Qwen3_5MoeForConditionalGeneration",
+        text_config=text_config,
+        num_hidden_layers=40,
+        full_attention_layers=tuple(range(3, 40, 4)),
+        linear_attention_layers=tuple(
+            layer for layer in range(40) if layer % 4 != 3
+        ),
+        quantization=MODULE.QuantizationSpec(
+            format="gptq_int4",
+            weight_bits=4,
+            group_size=128,
+            symmetric=True,
+            desc_act=False,
+            ignored_patterns=(".*attn.*",),
+        ),
+    )
+
+    result = MODULE.checkpoint_semantic_contract(
+        {"model_type": "qwen3_5_moe"},
+        {"eos_token_id": [248046, 248044]},
+        {
+            "metadata": {"total_size": 24_403_162_208},
+            "weight_map": {"a": "one", "b": "two"},
+        },
+        model_spec,
+    )
+
+    assert result["num_hidden_layers"] == 40
+    assert len(result["full_attention_layers"]) == 10
+    assert len(result["linear_attention_layers"]) == 30
+    assert result["num_experts"] == 256
+    assert result["num_experts_per_tok"] == 8
+    assert result["partial_rotary_factor"] == 0.25
+    assert result["eos_token_ids"] == [248046, 248044]
+    assert result["index_tensor_count"] == 2
+    assert result["index_total_size_bytes"] == 24_403_162_208
+    assert result["quantization"] == {
+        "format": "gptq_int4",
+        "weight_bits": 4,
+        "activation_scheme": None,
+        "weight_block_size": None,
+        "group_size": 128,
+        "symmetric": True,
+        "desc_act": False,
+        "ignored_module_count": 0,
+        "ignored_patterns": [".*attn.*"],
+    }
+
+
+@pytest.mark.parametrize(
+    ("generation_config", "total_size"),
+    (({}, 1), ({"eos_token_id": [1]}, 0)),
+)
+def test_checkpoint_semantic_contract_rejects_incomplete_identity(
+    generation_config, total_size
+):
+    model_spec = SimpleNamespace(
+        text_config=SimpleNamespace(rope_parameters={}),
+    )
+    with pytest.raises(ValueError):
+        MODULE.checkpoint_semantic_contract(
+            {},
+            generation_config,
+            {"metadata": {"total_size": total_size}, "weight_map": {}},
+            model_spec,
+        )
 
 
 def test_header_only_audit_validates_shape_without_payload():

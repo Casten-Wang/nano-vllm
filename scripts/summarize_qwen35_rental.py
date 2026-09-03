@@ -65,6 +65,77 @@ OFFICIAL_INDEX_SHA256 = (
 OFFICIAL_HEADERS_SHA256 = (
     "39753f429d8ce99ba181f00e068b36df4ecd2603c34df5352492b21d5a32878b"
 )
+OFFICIAL_INDEX_CONTRACTS = {
+    "bf16": (1811, 71_903_655_008),
+    "gptq_int4": (124_611, 24_403_162_208),
+    "fp8_block": (64_196, 37_454_799_072),
+}
+
+
+def expected_checkpoint_semantic_contract(quantization_format: str) -> dict:
+    tensor_count, total_size = OFFICIAL_INDEX_CONTRACTS[quantization_format]
+    quantization = {
+        "format": quantization_format,
+        "weight_bits": 16,
+        "activation_scheme": None,
+        "weight_block_size": None,
+        "group_size": None,
+        "symmetric": None,
+        "desc_act": None,
+        "ignored_module_count": 0,
+        "ignored_patterns": [],
+    }
+    if quantization_format == "gptq_int4":
+        quantization.update(
+            weight_bits=4,
+            group_size=128,
+            symmetric=True,
+            desc_act=False,
+            ignored_patterns=[
+                ".*attn.*",
+                ".*shared_expert.*",
+                ".*mtp.*",
+                ".*visual.*",
+            ],
+        )
+    elif quantization_format == "fp8_block":
+        quantization.update(
+            weight_bits=8,
+            activation_scheme="dynamic",
+            weight_block_size=[128, 128],
+            ignored_module_count=287,
+        )
+    return {
+        "architecture": "Qwen3_5MoeForConditionalGeneration",
+        "outer_model_type": "qwen3_5_moe",
+        "text_model_type": "qwen3_5_moe_text",
+        "num_hidden_layers": 40,
+        "full_attention_layers": list(range(3, 40, 4)),
+        "linear_attention_layers": [
+            layer for layer in range(40) if layer % 4 != 3
+        ],
+        "hidden_size": 2048,
+        "num_attention_heads": 16,
+        "num_key_value_heads": 2,
+        "head_dim": 256,
+        "num_experts": 256,
+        "num_experts_per_tok": 8,
+        "moe_intermediate_size": 512,
+        "max_position_embeddings": 262144,
+        "partial_rotary_factor": 0.25,
+        "eos_token_ids": [248046, 248044],
+        "index_tensor_count": tensor_count,
+        "index_total_size_bytes": total_size,
+        "quantization": quantization,
+    }
+
+
+def checkpoint_semantic_contract_matches(
+    audit: dict, quantization_format: str
+) -> bool:
+    return audit.get("semantic_contract") == expected_checkpoint_semantic_contract(
+        quantization_format
+    )
 
 
 def load_json(path: Path) -> dict:
@@ -133,6 +204,7 @@ def summarize_optional_gptq(run_dir: Path, run_id: str) -> dict:
         audit.get("valid") is True
         and audit.get("repo") == OFFICIAL_GPTQ_CHECKPOINT_REPO
         and audit.get("resolved_revision") == OFFICIAL_GPTQ_CHECKPOINT_REVISION
+        and checkpoint_semantic_contract_matches(audit, "gptq_int4")
         and set(audit.get("results", {})) == tp_names
         and all(
             result.get("valid") is True
@@ -260,6 +332,7 @@ def summarize_optional_fp8_audit(
         audit.get("valid") is True
         and audit.get("repo") == OFFICIAL_FP8_CHECKPOINT_REPO
         and audit.get("resolved_revision") == OFFICIAL_FP8_CHECKPOINT_REVISION
+        and checkpoint_semantic_contract_matches(audit, "fp8_block")
         and audit.get("quantization", {}).get("format") == "fp8_block"
         and bool(results)
         and all(result.get("valid") is True for result in results.values())
@@ -2248,6 +2321,7 @@ def summarize(run_dir: Path, run_id: str) -> dict:
         and official_audit.get("config_sha256") == OFFICIAL_CONFIG_SHA256
         and official_audit.get("index_sha256") == OFFICIAL_INDEX_SHA256
         and official_audit.get("headers_sha256") == OFFICIAL_HEADERS_SHA256
+        and checkpoint_semantic_contract_matches(official_audit, "bf16")
         and set(official_audit.get("results", {})) == expected_tp_names
         and all(
             result.get("valid") is True
@@ -3114,6 +3188,7 @@ def summarize(run_dir: Path, run_id: str) -> dict:
                 "index_sha256",
                 "headers_sha256",
                 "source_tensor_count",
+                "semantic_contract",
                 "shard_count",
                 "checkpoint_shards",
             )
