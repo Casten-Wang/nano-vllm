@@ -1901,6 +1901,10 @@ def summarize_pd_transfer(
         )
         and measurements["effective_payload_gib_s_p50"] > 0
         and workload.get("receiver_ack_bytes") == 1
+        and isinstance(workload.get("payload_tensor_count"), int)
+        and workload["payload_tensor_count"] > 1
+        and measurements.get("receiver_storage_count") == 1
+        and measurements.get("receiver_storage_coalesced") is True
         and workload.get("payload_frame_bytes_sent", 0)
         > expected_components["total"]
         and install_valid
@@ -1914,6 +1918,11 @@ def summarize_pd_transfer(
         "latency_ms_p95": measurements.get("latency_ms_p95"),
         "effective_payload_gib_s_p50": measurements.get(
             "effective_payload_gib_s_p50"
+        ),
+        "payload_tensor_count": workload.get("payload_tensor_count"),
+        "receiver_storage_count": measurements.get("receiver_storage_count"),
+        "receiver_storage_coalesced": measurements.get(
+            "receiver_storage_coalesced"
         ),
         "cuda_install": {
             "valid": install_valid,

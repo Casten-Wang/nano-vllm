@@ -118,6 +118,21 @@ def payload_bytes(payload: RankCacheTransfer) -> dict[str, int]:
     return components
 
 
+def payload_tensors(payload: RankCacheTransfer) -> tuple[torch.Tensor, ...]:
+    return (
+        payload.kv_blocks,
+        *((payload.kv_scales,) if payload.kv_scales is not None else ()),
+        *payload.recurrent_states,
+        *payload.convolution_states,
+    )
+
+
+def payload_storage_count(payload: RankCacheTransfer) -> int:
+    return len(
+        {tensor.untyped_storage().data_ptr() for tensor in payload_tensors(payload)}
+    )
+
+
 def payload_from_memory_preflight(
     path: Path,
     *,
@@ -187,7 +202,10 @@ def _peak_rss_bytes() -> int:
     return int(value if sys.platform == "darwin" else value * 1024)
 
 
-def transfer_once(payload: RankCacheTransfer, timeout_s: float) -> tuple[float, int]:
+def transfer_once(
+    payload: RankCacheTransfer,
+    timeout_s: float,
+) -> tuple[float, int, int]:
     received = []
     failures = []
     with RankCacheReceiver("127.0.0.1", 0, timeout_s=timeout_s) as receiver:
@@ -215,7 +233,7 @@ def transfer_once(payload: RankCacheTransfer, timeout_s: float) -> tuple[float, 
         raise RuntimeError("cache transfer benchmark did not receive one payload")
     if not torch.equal(received[0].kv_blocks, payload.kv_blocks):
         raise RuntimeError("cache transfer benchmark KV round-trip mismatch")
-    return elapsed_ms, wire_bytes
+    return elapsed_ms, wire_bytes, payload_storage_count(received[0])
 
 
 def benchmark_cuda_install(
@@ -343,15 +361,26 @@ def run_benchmark(
         transfer_once(payload, timeout_s)
     samples = []
     wire_bytes = None
+    receiver_storage_count = None
     peak_before = _peak_rss_bytes()
     for _ in range(repeats):
-        elapsed_ms, current_wire_bytes = transfer_once(payload, timeout_s)
+        elapsed_ms, current_wire_bytes, current_storage_count = transfer_once(
+            payload,
+            timeout_s,
+        )
         samples.append(elapsed_ms)
         if wire_bytes is None:
             wire_bytes = current_wire_bytes
         elif wire_bytes != current_wire_bytes:
             raise RuntimeError("cache transfer wire size changed between repeats")
+        if receiver_storage_count is None:
+            receiver_storage_count = current_storage_count
+        elif receiver_storage_count != current_storage_count:
+            raise RuntimeError(
+                "cache transfer receive storage count changed between repeats"
+            )
     components = payload_bytes(payload)
+    tensor_count = len(payload_tensors(payload))
     median_ms = median(samples)
     return {
         "schema_version": 1,
@@ -369,6 +398,7 @@ def run_benchmark(
             "payload_frame_bytes_sent": wire_bytes,
             "receiver_ack_bytes": 1,
             "framing_overhead_bytes": wire_bytes - components["total"],
+            "payload_tensor_count": tensor_count,
         },
         "results": {
             "latency_ms_samples": samples,
@@ -379,6 +409,10 @@ def run_benchmark(
             ),
             "process_peak_rss_before_bytes": peak_before,
             "process_peak_rss_after_bytes": _peak_rss_bytes(),
+            "receiver_storage_count": receiver_storage_count,
+            "receiver_storage_coalesced": (
+                tensor_count > 1 and receiver_storage_count == 1
+            ),
         },
         "cuda_install": benchmark_cuda_install(
             payload,

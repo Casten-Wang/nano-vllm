@@ -36,6 +36,9 @@ def test_cache_transfer_benchmark_records_raw_samples_and_limitations():
     assert result["workload"]["payload_frame_bytes_sent"] > 6144
     assert result["workload"]["receiver_ack_bytes"] == 1
     assert result["workload"]["framing_overhead_bytes"] > 0
+    assert result["workload"]["payload_tensor_count"] == 4
+    assert result["results"]["receiver_storage_count"] == 1
+    assert result["results"]["receiver_storage_coalesced"] is True
     if torch.cuda.is_available():
         assert result["cuda_install"]["enabled"]
         assert result["cuda_install"]["valid"]

@@ -1645,12 +1645,15 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
                     "components_bytes": components,
                     "payload_frame_bytes_sent": components["total"] + 400,
                     "receiver_ack_bytes": 1,
+                    "payload_tensor_count": 4,
                 },
                 "results": {
                     "latency_ms_samples": [1.0] * 10,
                     "latency_ms_p50": 1.0,
                     "latency_ms_p95": 1.0,
                     "effective_payload_gib_s_p50": 1.0,
+                    "receiver_storage_count": 1,
+                    "receiver_storage_coalesced": True,
                 },
                 "cuda_install": {
                     "enabled": True,
