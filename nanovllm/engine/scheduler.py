@@ -465,7 +465,9 @@ class Scheduler:
             if self.remote_prefills or self.remote_prefill_sources:
                 return [], False
             raise RuntimeError("scheduler has no runnable sequence")
-        self.running.extendleft(reversed(scheduled_seqs))
+        # Requests that did not fit this step's token budget go first next
+        # time; append completed decode work behind them to prevent starvation.
+        self.running.extend(scheduled_seqs)
         return scheduled_seqs, False
 
     def schedule_dynamic_chunked_prefill(self) -> ScheduleResult:

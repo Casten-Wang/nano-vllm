@@ -402,7 +402,7 @@ class BlockManagerLifecycleTest(unittest.TestCase):
         self.assertEqual(list(scheduler.running), waiting)
         self.assertFalse(scheduler.waiting)
 
-    def test_legacy_decode_respects_token_budget_below_sequence_limit(self):
+    def test_legacy_decode_respects_token_budget_and_rotates_requests(self):
         scheduler = Scheduler(
             FakeConfig(
                 max_num_seqs=4,
@@ -424,11 +424,17 @@ class BlockManagerLifecycleTest(unittest.TestCase):
 
         self.assertFalse(is_prefill)
         self.assertEqual(scheduled, running[:2])
-        self.assertEqual(list(scheduler.running), running)
+        self.assertEqual(list(scheduler.running), running[2:] + running[:2])
         self.assertEqual(
             sum(seq.num_scheduled_tokens for seq in scheduled),
             scheduler.max_num_batched_tokens,
         )
+
+        scheduled, is_prefill = scheduler.schedule()
+
+        self.assertFalse(is_prefill)
+        self.assertEqual(scheduled, running[2:])
+        self.assertEqual(list(scheduler.running), running)
 
     def test_legacy_partial_prefill_uses_one_remaining_sequence_slot(self):
         scheduler = Scheduler(
