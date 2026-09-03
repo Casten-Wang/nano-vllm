@@ -167,9 +167,12 @@ class Qwen3_5MoeForCausalLM(nn.Module):
         hidden_states: torch.Tensor,
         *,
         greedy: bool = False,
+        top_k: int | None = None,
     ) -> torch.Tensor:
         if greedy:
             return self.lm_head(hidden_states, greedy=True)
+        if top_k is not None:
+            return self.lm_head(hidden_states, top_k=top_k)
         return self.lm_head(hidden_states)
 
 

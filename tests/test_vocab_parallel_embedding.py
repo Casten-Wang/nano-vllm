@@ -106,6 +106,9 @@ def test_lm_head_gathers_tp_logits_into_one_vocab_buffer():
         "greedy_reduction_count": 0,
         "greedy_candidate_bytes": 0,
         "greedy_full_gather_avoided_bytes": 0,
+        "top_k_reduction_count": 0,
+        "top_k_candidate_bytes": 0,
+        "top_k_full_gather_avoided_bytes": 0,
     }
 
 
@@ -243,6 +246,71 @@ def test_single_rank_lm_head_greedy_returns_direct_argmax():
         tokens = head(torch.tensor([[1.0, 0.0], [0.0, 1.0]]), greedy=True)
 
     torch.testing.assert_close(tokens, torch.tensor([2, 3]))
+
+
+def test_lm_head_tp_top_k_reduces_exact_global_candidates():
+    head = make_lm_head()
+    head.weight.data.copy_(
+        torch.tensor(
+            [[1.0, 0.0], [4.0, 0.0], [3.0, 0.0], [2.0, 0.0]]
+        )
+    )
+    hidden = torch.tensor([[1.0, 0.0], [2.0, 0.0]])
+    context = SimpleNamespace(is_mixed=False, is_prefill=False)
+    calls = []
+
+    def gather(local, gather_list, dst):
+        calls.append((local.dtype, tuple(local.shape)))
+        gather_list[0].copy_(local)
+        if local.dtype.is_floating_point:
+            gather_list[1].copy_(
+                torch.tensor([[8.0, 0.5], [5.0, 4.5]])
+            )
+        else:
+            gather_list[1].copy_(torch.tensor([[6, 4], [7, 5]]))
+
+    with (
+        torch.inference_mode(),
+        patch.object(embed_head, "get_context", return_value=context),
+        patch.object(embed_head.dist, "gather", side_effect=gather),
+    ):
+        selected_values, selected_ids = head(hidden, top_k=2)
+
+    torch.testing.assert_close(
+        selected_values,
+        torch.tensor([[8.0, 4.0], [8.0, 6.0]]),
+    )
+    torch.testing.assert_close(
+        selected_ids,
+        torch.tensor([[6, 1], [1, 2]]),
+    )
+    assert calls == [(torch.float32, (2, 2)), (torch.int64, (2, 2))]
+    stats = head.tp_logits_storage_stats()
+    assert stats["top_k_reduction_count"] == 1
+    assert stats["top_k_candidate_bytes"] == 48
+    assert stats["top_k_full_gather_avoided_bytes"] == 32
+
+
+def test_nonzero_lm_head_rank_participates_in_top_k_reduction():
+    head = make_lm_head(rank=1)
+    context = SimpleNamespace(is_mixed=False, is_prefill=False)
+    calls = []
+
+    def gather(local, gather_list, dst):
+        calls.append((local.dtype, tuple(local.shape), gather_list, dst))
+
+    with (
+        torch.inference_mode(),
+        patch.object(embed_head, "get_context", return_value=context),
+        patch.object(embed_head.dist, "gather", side_effect=gather),
+    ):
+        candidates = head(torch.randn(3, 2), top_k=2)
+
+    assert candidates is None
+    assert calls == [
+        (torch.float32, (3, 2), None, 0),
+        (torch.int64, (3, 2), None, 0),
+    ]
 
 
 def test_nonzero_lm_head_rank_does_not_allocate_gather_output():

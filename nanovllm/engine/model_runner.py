@@ -416,6 +416,16 @@ class ModelRunner:
                 item["greedy_full_gather_avoided_bytes"]
                 for item in tp_logits_stats
             ),
+            "tp_top_k_reduction_count": sum(
+                item["top_k_reduction_count"] for item in tp_logits_stats
+            ),
+            "tp_top_k_candidate_bytes": sum(
+                item["top_k_candidate_bytes"] for item in tp_logits_stats
+            ),
+            "tp_top_k_full_gather_avoided_bytes": sum(
+                item["top_k_full_gather_avoided_bytes"]
+                for item in tp_logits_stats
+            ),
             "total_bytes_local_rank": (
                 partitioned_total
                 + dequant_total
@@ -1830,19 +1840,39 @@ class ModelRunner:
         return temperatures, top_ks, top_ps, metadata
 
     def _prepare_sampling_path(self, seqs: list[Sequence]):
-        greedy = all(seq.temperature <= 1e-10 for seq in seqs)
+        if all(seq.temperature <= 1e-10 for seq in seqs):
+            path = "greedy"
+            top_k = None
+        else:
+            vocab_size = int(self.config.model_config.vocab_size)
+            top_k_enabled = all(
+                seq.temperature > 1e-10
+                and 0 < seq.top_k < vocab_size
+                for seq in seqs
+            )
+            path = "top_k" if top_k_enabled else "full"
+            top_k = max(seq.top_k for seq in seqs) if top_k_enabled else None
         sample_args = (
             self.prepare_sample(seqs)
-            if self.rank == 0 and not greedy
+            if self.rank == 0 and path != "greedy"
             else None
         )
-        return greedy, sample_args
+        return path, top_k, sample_args
 
-    def _finish_sampling(self, model_output, *, greedy: bool, sample_args):
+    def _finish_sampling(self, model_output, *, path: str, sample_args):
         if self.rank != 0:
             return None
-        if greedy:
+        if path == "greedy":
             return model_output.tolist()
+        if path == "top_k":
+            selected_logits, selected_indices = model_output
+            return self.sampler.sample_top_k_candidates(
+                selected_logits,
+                selected_indices,
+                *sample_args,
+            ).tolist()
+        if path != "full":
+            raise ValueError("sampling path is invalid")
         return self.sampler(model_output, *sample_args).tolist()
 
     @torch.inference_mode()
@@ -1853,6 +1883,7 @@ class ModelRunner:
         is_prefill: bool,
         *,
         greedy: bool = False,
+        top_k: int | None = None,
     ):
         context = get_context()
         use_graph = self.should_use_cudagraph(input_ids, is_prefill)
@@ -1902,6 +1933,7 @@ class ModelRunner:
                 return self.model.compute_logits(
                     self.model(input_ids, positions),
                     greedy=greedy,
+                    top_k=top_k,
                 )
             finally:
                 restore(previous_trace)
@@ -1924,20 +1956,22 @@ class ModelRunner:
         return self.model.compute_logits(
             graph_vars["outputs"][:bs],
             greedy=greedy,
+            top_k=top_k,
         )
 
     def run(self, seqs: list[Sequence], is_prefill: bool) -> list[int]:
         input_ids, positions = self.prepare_prefill(seqs) if is_prefill else self.prepare_decode(seqs)
-        greedy, sample_args = self._prepare_sampling_path(seqs)
+        sampling_path, top_k, sample_args = self._prepare_sampling_path(seqs)
         model_output = self.run_model(
             input_ids,
             positions,
             is_prefill,
-            greedy=greedy,
+            greedy=sampling_path == "greedy",
+            top_k=top_k,
         )
         token_ids = self._finish_sampling(
             model_output,
-            greedy=greedy,
+            path=sampling_path,
             sample_args=sample_args,
         )
         reset_context()
@@ -1970,7 +2004,7 @@ class ModelRunner:
             state_access_path=state_access_path,
         )
         seqs = decode_seqs + prefill_seqs
-        greedy, sample_args = self._prepare_sampling_path(seqs)
+        sampling_path, top_k, sample_args = self._prepare_sampling_path(seqs)
         self.shape_trace.record_model_step(
             input_ids=input_ids,
             positions=positions,
@@ -1984,13 +2018,14 @@ class ModelRunner:
         try:
             model_output = self.model.compute_logits(
                 self.model(input_ids, positions),
-                greedy=greedy,
+                greedy=sampling_path == "greedy",
+                top_k=top_k,
             )
         finally:
             restore(previous_trace)
         token_ids = self._finish_sampling(
             model_output,
-            greedy=greedy,
+            path=sampling_path,
             sample_args=sample_args,
         )
         reset_context()

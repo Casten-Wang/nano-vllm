@@ -512,6 +512,50 @@ class SamplerTest(unittest.TestCase):
 
         self.assertEqual(sampler._rank_buffer.data_ptr(), storage)
 
+    def test_preselected_global_top_k_matches_full_logits_sampling(self):
+        sampler = Sampler()
+        logits = torch.tensor(
+            [[1.0, 9.0, 4.0, 8.0, 3.0], [7.0, 1.0, 6.0, 2.0, 5.0]],
+            dtype=torch.bfloat16,
+        )
+        temperatures = torch.tensor([0.7, 1.2])
+        top_ks = torch.tensor([2, 3], dtype=torch.int32)
+        top_ps = torch.tensor([0.8, 0.95])
+        metadata = build_sampling_metadata(
+            temperatures.tolist(),
+            top_ks.tolist(),
+            top_ps.tolist(),
+            vocab_size=logits.size(1),
+        )
+        selected_logits, selected_indices = torch.topk(
+            logits,
+            metadata.max_top_k,
+            dim=-1,
+        )
+
+        with unittest.mock.patch.object(
+            torch.Tensor,
+            "exponential_",
+            new=lambda tensor, *args, **kwargs: tensor.fill_(1),
+        ):
+            expected = sampler(
+                logits,
+                temperatures,
+                top_ks,
+                top_ps,
+                metadata,
+            )
+            actual = sampler.sample_top_k_candidates(
+                selected_logits,
+                selected_indices,
+                temperatures,
+                top_ks,
+                top_ps,
+                metadata,
+            )
+
+        self.assertTrue(torch.equal(actual, expected))
+
     def test_sampler_reuses_random_noise_buffer_across_steps(self):
         sampler = Sampler()
         logits = torch.tensor([[1.0, 4.0, 3.0, 2.0]])

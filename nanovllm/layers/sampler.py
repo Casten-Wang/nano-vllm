@@ -253,8 +253,44 @@ def compact_top_k_logits(
         max_top_k,
         dim=-1,
     )
+    selected_logits = filter_top_k_candidates(
+        selected_logits,
+        temperatures,
+        top_ks,
+        top_ps,
+        any_top_p_enabled,
+        rank_buffer,
+    )
+    return selected_logits, selected_indices
+
+
+def filter_top_k_candidates(
+    selected_logits: torch.Tensor,
+    temperatures: torch.Tensor,
+    top_ks: torch.Tensor,
+    top_ps: torch.Tensor,
+    any_top_p_enabled: bool,
+    rank_buffer: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Apply per-request sampling parameters to preselected top-k logits."""
+
+    if selected_logits.ndim != 2 or selected_logits.size(1) == 0:
+        raise ValueError("selected logits must have shape [batch, candidates]")
+    batch_size, candidate_count = selected_logits.shape
+    if any(tensor.ndim != 1 for tensor in (temperatures, top_ks, top_ps)):
+        raise ValueError("sampling parameter tensors must be one-dimensional")
+    if any(
+        tensor.numel() != batch_size
+        for tensor in (temperatures, top_ks, top_ps)
+    ):
+        raise ValueError("sampling parameter batch sizes must match candidates")
+    if any(
+        tensor.device != selected_logits.device
+        for tensor in (temperatures, top_ks, top_ps)
+    ):
+        raise ValueError("sampling tensors must be on the same device as candidates")
     selected_logits = selected_logits.float().div_(temperatures.unsqueeze(1))
-    ranks = _sampling_ranks(logits, max_top_k, rank_buffer)
+    ranks = _sampling_ranks(selected_logits, candidate_count, rank_buffer)
     selected_logits.masked_fill_(
         ranks >= top_ks.unsqueeze(1),
         float("-inf"),
@@ -266,7 +302,45 @@ def compact_top_k_logits(
         selected_remove[:, 1:] = selected_remove[:, :-1].clone()
         selected_remove[:, 0] = False
         selected_logits.masked_fill_(selected_remove, float("-inf"))
-    return selected_logits, selected_indices
+    return selected_logits
+
+
+def sample_top_k_candidates(
+    selected_logits: torch.Tensor,
+    selected_indices: torch.Tensor,
+    temperatures: torch.Tensor,
+    top_ks: torch.Tensor,
+    top_ps: torch.Tensor,
+    any_top_p_enabled: bool,
+    rank_buffer: torch.Tensor | None = None,
+    noise_buffer: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Sample exact token ids from already selected global top-k candidates."""
+
+    if selected_indices.shape != selected_logits.shape:
+        raise ValueError("selected token ids must match selected logits")
+    if selected_indices.device != selected_logits.device:
+        raise ValueError("selected token ids must share the logits device")
+    selected_logits = filter_top_k_candidates(
+        selected_logits,
+        temperatures,
+        top_ks,
+        top_ps,
+        any_top_p_enabled,
+        rank_buffer,
+    )
+    probabilities = torch.softmax(selected_logits, dim=-1)
+    noise = (
+        torch.empty_like(probabilities)
+        if noise_buffer is None
+        else noise_buffer
+    )
+    if noise.shape != probabilities.shape or noise.device != probabilities.device:
+        raise ValueError("sampling noise buffer must match candidate probabilities")
+    selected_offsets = probabilities.div_(
+        noise.exponential_(1).clamp_min_(1e-10)
+    ).argmax(dim=-1)
+    return selected_indices.gather(1, selected_offsets.unsqueeze(1)).squeeze(1)
 
 
 def sample_top_k_compact(
@@ -351,6 +425,37 @@ class Sampler(nn.Module):
                 self._noise_buffer.numel() * self._noise_buffer.element_size()
             ),
         }
+
+    @torch.inference_mode()
+    def sample_top_k_candidates(
+        self,
+        selected_logits: torch.Tensor,
+        selected_indices: torch.Tensor,
+        temperatures: torch.Tensor,
+        top_ks: torch.Tensor,
+        top_ps: torch.Tensor,
+        metadata: SamplingBatchMetadata,
+    ) -> torch.Tensor:
+        if (
+            metadata.sample_count != selected_logits.size(0)
+            or not metadata.all_top_k_enabled
+            or metadata.max_top_k != selected_logits.size(1)
+        ):
+            raise ValueError("sampling metadata does not match top-k candidates")
+        return sample_top_k_candidates(
+            selected_logits,
+            selected_indices,
+            temperatures,
+            top_ks,
+            top_ps,
+            metadata.any_top_p_enabled,
+            self._ranks(metadata.max_top_k, selected_logits.device),
+            self._noise(
+                tuple(selected_logits.shape),
+                dtype=torch.float32,
+                device=selected_logits.device,
+            ),
+        )
 
     @torch.inference_mode()
     def forward(

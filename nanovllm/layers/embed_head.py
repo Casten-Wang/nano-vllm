@@ -80,6 +80,9 @@ class ParallelLMHead(VocabParallelEmbedding):
         self.tp_greedy_reduction_count = 0
         self.tp_greedy_candidate_bytes = 0
         self.tp_greedy_full_gather_avoided_bytes = 0
+        self.tp_top_k_reduction_count = 0
+        self.tp_top_k_candidate_bytes = 0
+        self.tp_top_k_full_gather_avoided_bytes = 0
 
     def _tp_logits_buffer(
         self,
@@ -124,9 +127,30 @@ class ParallelLMHead(VocabParallelEmbedding):
             "greedy_full_gather_avoided_bytes": (
                 self.tp_greedy_full_gather_avoided_bytes
             ),
+            "top_k_reduction_count": self.tp_top_k_reduction_count,
+            "top_k_candidate_bytes": self.tp_top_k_candidate_bytes,
+            "top_k_full_gather_avoided_bytes": (
+                self.tp_top_k_full_gather_avoided_bytes
+            ),
         }
 
-    def forward(self, x: torch.Tensor, *, greedy: bool = False):
+    def forward(
+        self,
+        x: torch.Tensor,
+        *,
+        greedy: bool = False,
+        top_k: int | None = None,
+    ):
+        if greedy and top_k is not None:
+            raise ValueError("greedy and top_k reductions are mutually exclusive")
+        if top_k is not None and (
+            not isinstance(top_k, int)
+            or isinstance(top_k, bool)
+            or not 0 < top_k <= self.num_embeddings
+        ):
+            raise ValueError(
+                "top_k reduction width must be in the vocabulary range"
+            )
         context = get_context()
         if context.is_mixed:
             last_indices = getattr(context, "logits_indices", None)
@@ -196,6 +220,56 @@ class ParallelLMHead(VocabParallelEmbedding):
                 batch_indices,
                 1,
             ].to(torch.int64)
+        if top_k is not None:
+            self.tp_top_k_reduction_count += 1
+            local_k = min(top_k, self.num_embeddings_per_partition)
+            local_values, local_ids = torch.topk(logits, local_k, dim=-1)
+            global_ids = local_ids + self.vocab_start_idx
+            if self.tp_size == 1:
+                return local_values, global_ids
+            if self.tp_rank == 0:
+                gathered_values = torch.empty(
+                    self.tp_size,
+                    logits.shape[0],
+                    local_k,
+                    dtype=logits.dtype,
+                    device=logits.device,
+                )
+                gathered_ids = torch.empty(
+                    self.tp_size,
+                    logits.shape[0],
+                    local_k,
+                    dtype=torch.int64,
+                    device=logits.device,
+                )
+                value_list = list(gathered_values.unbind(dim=0))
+                id_list = list(gathered_ids.unbind(dim=0))
+            else:
+                gathered_values = None
+                gathered_ids = None
+                value_list = None
+                id_list = None
+            dist.gather(local_values, value_list, 0)
+            dist.gather(global_ids, id_list, 0)
+            peer_count = self.tp_size - 1
+            self.tp_top_k_candidate_bytes += (
+                local_values.numel() * local_values.element_size()
+                + global_ids.numel() * global_ids.element_size()
+            ) * peer_count
+            self.tp_top_k_full_gather_avoided_bytes += (
+                logits.numel() * logits.element_size() * peer_count
+            )
+            if gathered_values is None or gathered_ids is None:
+                return None
+            all_values = gathered_values.permute(1, 0, 2).flatten(1)
+            all_ids = gathered_ids.permute(1, 0, 2).flatten(1)
+            selected_values, selected_offsets = torch.topk(
+                all_values,
+                top_k,
+                dim=-1,
+            )
+            selected_ids = all_ids.gather(1, selected_offsets)
+            return selected_values, selected_ids
         if self.tp_size > 1:
             # Gather vocabulary-major shards into one allocation. Transposing
             # the result exposes the expected [batch, vocabulary] layout as a
