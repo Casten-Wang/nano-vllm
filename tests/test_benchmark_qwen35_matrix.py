@@ -75,6 +75,32 @@ def test_moe_candidate_covers_float_and_int8_kv_per_tp_size():
     }
 
 
+def test_decode_conv_candidate_has_exact_weighted_pairs():
+    cases = MODULE.build_cases(
+        (4, 8),
+        include_decode_conv_candidate=True,
+    )
+
+    assert len(cases) == 16
+    candidates = [
+        case
+        for case in cases
+        if case.decode_conv_backend == "channel_accumulate"
+    ]
+    assert len(candidates) == 4
+    for candidate in candidates:
+        assert candidate.moe_decode_backend == "batched"
+        assert any(
+            case.tensor_parallel_size == candidate.tensor_parallel_size
+            and case.recurrent_state_dtype == candidate.recurrent_state_dtype
+            and case.kv_cache_dtype == candidate.kv_cache_dtype
+            and case.moe_decode_backend == candidate.moe_decode_backend
+            and case.decode_conv_backend == "weighted"
+            for case in cases
+        )
+    assert len({case.name for case in cases}) == len(cases)
+
+
 def test_moe_candidate_runs_cuda_graph_and_requires_observed_path():
     arguments = args()
     candidate = MODULE.BenchmarkCase(
@@ -102,6 +128,23 @@ def test_weight_quant_backend_is_forwarded_to_each_case():
 
     assert command[command.index("--weight-quant-backend") + 1] == "triton"
     assert "--enforce-eager" in command
+
+
+def test_decode_conv_backend_is_forwarded_to_each_case():
+    case = MODULE.BenchmarkCase(
+        4,
+        "model",
+        "auto",
+        moe_decode_backend="batched",
+        decode_conv_backend="channel_accumulate",
+    )
+
+    command = MODULE.command_for_case(args(), case)
+
+    assert command[command.index("--qwen35-decode-conv-backend") + 1] == (
+        "channel_accumulate"
+    )
+    assert "conv-channel_accumulate" in case.name
 
 
 def test_default_sequence_capacity_tracks_workload(monkeypatch):

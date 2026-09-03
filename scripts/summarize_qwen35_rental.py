@@ -13,6 +13,10 @@ MOE_RUNTIME_MIN_THROUGHPUT_RATIO = 0.99
 MOE_RUNTIME_MIN_TPOT_SPEEDUP = 1.02
 MOE_RUNTIME_MAX_PEAK_EXTRA_MIB = 64.0
 MOE_RUNTIME_MAX_CV = 0.05
+DECODE_CONV_MIN_THROUGHPUT_RATIO = 0.99
+DECODE_CONV_MIN_TPOT_RATIO = 0.99
+DECODE_CONV_MAX_PEAK_EXTRA_MIB = 0.0
+DECODE_CONV_MAX_CV = 0.05
 QWEN35_TOTAL_QUERY_HEADS = 16
 QWEN35_KV_HEADS_PER_RANK = 1
 QWEN35_HEAD_DIM = 256
@@ -1156,12 +1160,14 @@ def summarize_moe_runtime(rows: list[dict]) -> dict[str, dict]:
         ): row
         for row in rows
         if row.get("qwen35_moe_decode_backend") == "sorted"
+        and row.get("qwen35_decode_conv_backend", "weighted") == "weighted"
     }
     comparisons = {}
     candidates = [
         row
         for row in rows
         if row.get("qwen35_moe_decode_backend") == "batched"
+        and row.get("qwen35_decode_conv_backend", "weighted") == "weighted"
     ]
     if not candidates:
         raise ValueError("performance matrix contains no batched MoE candidate")
@@ -1293,6 +1299,100 @@ def summarize_moe_runtime(rows: list[dict]) -> dict[str, dict]:
                 candidate_decode_host_sync_eliminated=candidate_sync_eliminated,
                 candidate_batched_dispatch_observed=candidate_batched_observed,
             ),
+        }
+    return comparisons
+
+
+def summarize_decode_conv_runtime(rows: list[dict]) -> dict[str, dict]:
+    """Compare the low-peak decode convolution against an exact baseline."""
+
+    def key(row: dict) -> tuple:
+        return (
+            row["tensor_parallel_size"],
+            row["recurrent_state_dtype"],
+            row["kv_cache_dtype"],
+            row["qwen35_moe_decode_backend"],
+        )
+
+    baselines = {
+        key(row): row
+        for row in rows
+        if row.get("qwen35_decode_conv_backend", "weighted") == "weighted"
+    }
+    candidates = [
+        row
+        for row in rows
+        if row.get("qwen35_decode_conv_backend") == "channel_accumulate"
+    ]
+    if not candidates:
+        raise ValueError(
+            "performance matrix contains no channel-accumulate decode "
+            "convolution candidate"
+        )
+    expected_keys = {
+        baseline_key
+        for baseline_key in baselines
+        if baseline_key[1] == "model" and baseline_key[3] == "batched"
+    }
+    candidate_keys = {key(row) for row in candidates}
+    if candidate_keys != expected_keys:
+        raise ValueError(
+            "decode convolution candidates do not exactly cover every "
+            "batched-MoE model-state KV mode"
+        )
+
+    comparisons: dict[str, dict] = {}
+    for candidate in candidates:
+        candidate_key = key(candidate)
+        baseline = baselines[candidate_key]
+        baseline_median = baseline["median"]
+        candidate_median = candidate["median"]
+        throughput_ratio = (
+            candidate_median["output_throughput_tok_s"]
+            / baseline_median["output_throughput_tok_s"]
+        )
+        tpot_ratio = baseline_median["avg_tpot_s"] / candidate_median["avg_tpot_s"]
+        peak_memory_delta_mib = (
+            candidate_median["peak_torch_allocated_mib"]
+            - baseline_median["peak_torch_allocated_mib"]
+        )
+        stability_metrics = ("output_throughput_tok_s", "avg_tpot_s")
+        max_cv = max(
+            *(
+                baseline["coefficient_of_variation"][metric]
+                for metric in stability_metrics
+            ),
+            *(
+                candidate["coefficient_of_variation"][metric]
+                for metric in stability_metrics
+            ),
+        )
+        output_digest_matches = (
+            baseline["generated_token_ids_digest"]
+            == candidate["generated_token_ids_digest"]
+        )
+        checks = {
+            "output_digest_matches": output_digest_matches,
+            "stable_measurements": max_cv <= DECODE_CONV_MAX_CV,
+            "throughput_non_regression": (
+                throughput_ratio >= DECODE_CONV_MIN_THROUGHPUT_RATIO
+            ),
+            "tpot_non_regression": tpot_ratio >= DECODE_CONV_MIN_TPOT_RATIO,
+            "peak_memory_non_regression": (
+                peak_memory_delta_mib <= DECODE_CONV_MAX_PEAK_EXTRA_MIB
+            ),
+        }
+        tp_name = f"tp{candidate_key[0]}"
+        comparisons.setdefault(tp_name, {})[candidate_key[2]] = {
+            "baseline": "weighted",
+            "candidate": "channel_accumulate",
+            "throughput_ratio": throughput_ratio,
+            "tpot_ratio": tpot_ratio,
+            "peak_memory_delta_mib": peak_memory_delta_mib,
+            "max_coefficient_of_variation": max_cv,
+            "output_digest_matches": output_digest_matches,
+            "checks": checks,
+            "promote_to_default": all(checks.values()),
         }
     return comparisons
 
@@ -2425,6 +2525,12 @@ def summarize(run_dir: Path, run_id: str) -> dict:
         run_dir / "performance" / f"{run_id}_matrix_summary.json"
     )
     quality = load_json(run_dir / "quality" / f"{run_id}_summary.json")
+    decode_conv_quality = load_json(
+        run_dir
+        / "quality_conv"
+        / "channel_accumulate"
+        / f"{run_id}-conv-channel_accumulate_summary.json"
+    )
     gptq = summarize_optional_gptq(run_dir, run_id)
     fp8 = summarize_optional_fp8_audit(run_dir, run_id, performance.get("runs"))
     kernel_paths = sorted((run_dir / "kernels").glob("tp*.json"))
@@ -2447,6 +2553,15 @@ def summarize(run_dir: Path, run_id: str) -> dict:
     )
     if not cudagraph_paths:
         raise ValueError("no CUDA Graph parity artifacts were found")
+    decode_conv_cudagraph_paths = sorted(
+        (run_dir / "cudagraph_conv" / "channel_accumulate").glob(
+            "tp*/*/run_*/summary.json"
+        )
+    )
+    if not decode_conv_cudagraph_paths:
+        raise ValueError(
+            "no channel-accumulate CUDA Graph parity artifacts were found"
+        )
 
     valid_runs = [
         row
@@ -2466,6 +2581,7 @@ def summarize(run_dir: Path, run_id: str) -> dict:
         key=lambda row: row["median"]["peak_torch_allocated_mib"],
     )
     moe_runtime = summarize_moe_runtime(performance["runs"])
+    decode_conv_runtime = summarize_decode_conv_runtime(performance["runs"])
     recurrent_state_access = summarize_recurrent_state_access(
         performance["runs"]
     )
@@ -3266,6 +3382,31 @@ def summarize(run_dir: Path, run_id: str) -> dict:
         clean_worktrees = clean_worktrees and not result["git_dirty"]
         cuda_measurements = cuda_measurements and result["cuda_available"]
 
+    decode_conv_cudagraph = {}
+    for path in decode_conv_cudagraph_paths:
+        result = load_json(path)
+        tp_name = path.parents[2].name
+        context_name = path.parents[1].name
+        cases = decode_conv_cudagraph.setdefault(tp_name, {})
+        if context_name in cases:
+            raise ValueError(
+                "multiple channel-accumulate "
+                f"{context_name} CUDA Graph summaries found for {tp_name}"
+            )
+        cases[context_name] = {
+            "passed": result["passed"],
+            "hybrid_graph_captured": result.get(
+                "hybrid_graph_captured", False
+            ),
+            "decode_conv_backend": result.get(
+                "qwen35_decode_conv_backend"
+            ),
+            "scenario_count": len(result["scenarios"]),
+        }
+        commits.add(result["commit"])
+        clean_worktrees = clean_worktrees and not result["git_dirty"]
+        cuda_measurements = cuda_measurements and result["cuda_available"]
+
     quality_case_dirs = sorted(
         path
         for path in (run_dir / "quality").glob(f"{run_id}_qwen35_*")
@@ -3279,6 +3420,27 @@ def summarize(run_dir: Path, run_id: str) -> dict:
         raise ValueError("no quality case artifacts were found")
     checkpoint_digests = {performance["workload"]["checkpoint_manifest_digest"]}
     for path in quality_case_paths:
+        result = load_json(path)
+        commits.add(result["commit"])
+        clean_worktrees = clean_worktrees and not result["git_dirty"]
+        checkpoint_digests.add(result["checkpoint_manifest"]["digest"])
+
+    decode_conv_quality_case_dirs = sorted(
+        path
+        for path in (
+            run_dir / "quality_conv" / "channel_accumulate"
+        ).glob(f"{run_id}-conv-channel_accumulate_qwen35_*")
+        if path.is_dir()
+    )
+    decode_conv_quality_case_paths = [
+        case_dir / f"{case_dir.name}.json"
+        for case_dir in decode_conv_quality_case_dirs
+    ]
+    if not decode_conv_quality_case_paths:
+        raise ValueError(
+            "no channel-accumulate quality case artifacts were found"
+        )
+    for path in decode_conv_quality_case_paths:
         result = load_json(path)
         commits.add(result["commit"])
         clean_worktrees = clean_worktrees and not result["git_dirty"]
@@ -3305,6 +3467,38 @@ def summarize(run_dir: Path, run_id: str) -> dict:
             for cases in cudagraph.values()
             for item in cases.values()
         )
+    )
+    decode_conv_cudagraph_valid = (
+        set(decode_conv_cudagraph) == set(kernels)
+        and all(
+            set(cases) == {"short", "long"}
+            for cases in decode_conv_cudagraph.values()
+        )
+        and all(
+            item["passed"]
+            and item["hybrid_graph_captured"]
+            and item["decode_conv_backend"] == "channel_accumulate"
+            for cases in decode_conv_cudagraph.values()
+            for item in cases.values()
+        )
+    )
+    decode_conv_quality_valid = (
+        decode_conv_quality.get("case_token_digest")
+        == quality.get("case_token_digest")
+        and decode_conv_quality.get("tensor_parallel_sizes")
+        == quality.get("tensor_parallel_sizes")
+        and decode_conv_quality.get("quality_gates", {}).get("all_passed")
+        is True
+        and decode_conv_quality.get("cross_tp", {}).get("all_passed") is True
+        and all(
+            row.get("qwen35_decode_conv_backend") == "channel_accumulate"
+            for row in decode_conv_quality.get("cases", [])
+        )
+    )
+    decode_conv_runtime_valid = all(
+        item["promote_to_default"]
+        for by_kv in decode_conv_runtime.values()
+        for item in by_kv.values()
     )
     evidence = {
         "official_checkpoint_headers_valid": official_checkpoint_valid,
@@ -3354,6 +3548,9 @@ def summarize(run_dir: Path, run_id: str) -> dict:
             for item in by_kv.values()
         ),
         "hybrid_cudagraph_parity": cudagraph_valid,
+        "decode_conv_runtime_evidence": decode_conv_runtime_valid,
+        "decode_conv_cudagraph_parity": decode_conv_cudagraph_valid,
+        "decode_conv_quality": decode_conv_quality_valid,
         "attention_kernel_evidence": (
             set(attention) == expected_tp_names and attention_valid
         ),
@@ -3535,6 +3732,17 @@ def summarize(run_dir: Path, run_id: str) -> dict:
             "all_tp_passed": cudagraph_valid,
             "same_tp_coverage": set(cudagraph) == set(kernels),
             "by_tp": cudagraph,
+        },
+        "decode_convolution": {
+            "candidate": "channel_accumulate",
+            "promote_to_default": (
+                decode_conv_runtime_valid
+                and decode_conv_cudagraph_valid
+                and decode_conv_quality_valid
+            ),
+            "runtime_by_tp": decode_conv_runtime,
+            "cudagraph_by_tp": decode_conv_cudagraph,
+            "quality": decode_conv_quality,
         },
         "int8_attention": {
             "short_context": ATTENTION_SHORT_CONTEXT,

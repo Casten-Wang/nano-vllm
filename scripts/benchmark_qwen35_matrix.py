@@ -23,15 +23,17 @@ class BenchmarkCase:
     recurrent_state_dtype: str
     kv_cache_dtype: str
     moe_decode_backend: str = "sorted"
+    decode_conv_backend: str = "weighted"
 
     @property
     def name(self) -> str:
         kv = "bf16" if self.kv_cache_dtype == "auto" else self.kv_cache_dtype
-        suffix = (
-            ""
-            if self.moe_decode_backend == "sorted"
-            else f"_moe-{self.moe_decode_backend}"
-        )
+        suffixes = []
+        if self.moe_decode_backend != "sorted":
+            suffixes.append(f"moe-{self.moe_decode_backend}")
+        if self.decode_conv_backend != "weighted":
+            suffixes.append(f"conv-{self.decode_conv_backend}")
+        suffix = "" if not suffixes else "_" + "_".join(suffixes)
         return (
             f"qwen35_tp{self.tensor_parallel_size}_"
             f"state-{self.recurrent_state_dtype}_kv-{kv}{suffix}"
@@ -49,6 +51,7 @@ def build_cases(
     tp_sizes: tuple[int, ...],
     *,
     include_moe_candidate: bool = False,
+    include_decode_conv_candidate: bool = False,
 ) -> list[BenchmarkCase]:
     cases = [
         BenchmarkCase(tp, state_dtype, kv_dtype)
@@ -58,13 +61,27 @@ def build_cases(
             ("auto", "int8"),
         )
     ]
-    if include_moe_candidate:
+    if include_moe_candidate or include_decode_conv_candidate:
         cases.extend(
             BenchmarkCase(
                 tp,
                 "model",
                 kv_dtype,
                 moe_decode_backend="batched",
+            )
+            for tp, kv_dtype in itertools.product(
+                tp_sizes,
+                ("auto", "int8"),
+            )
+        )
+    if include_decode_conv_candidate:
+        cases.extend(
+            BenchmarkCase(
+                tp,
+                "model",
+                kv_dtype,
+                moe_decode_backend="batched",
+                decode_conv_backend="channel_accumulate",
             )
             for tp, kv_dtype in itertools.product(
                 tp_sizes,
@@ -95,6 +112,8 @@ def command_for_case(
         case.recurrent_state_dtype,
         "--qwen35-moe-decode-backend",
         case.moe_decode_backend,
+        "--qwen35-decode-conv-backend",
+        case.decode_conv_backend,
         "--weight-quant-backend",
         getattr(args, "weight_quant_backend", "auto"),
         "--kv-cache-dtype",
@@ -598,6 +617,15 @@ def parse_args() -> argparse.Namespace:
             "model-dtype recurrent state and BF16 KV cache."
         ),
     )
+    parser.add_argument(
+        "--include-decode-conv-candidate",
+        action="store_true",
+        help=(
+            "Add paired batched-MoE weighted and channel-accumulate decode "
+            "convolution cases for model-dtype recurrent state and both KV "
+            "cache modes."
+        ),
+    )
     parser.add_argument("--result-dir", default="benchmark_results/qwen35_matrix")
     parser.add_argument(
         "--run-id",
@@ -658,6 +686,7 @@ def main() -> None:
     cases = build_cases(
         args.tp_sizes,
         include_moe_candidate=args.include_moe_candidate,
+        include_decode_conv_candidate=args.include_decode_conv_candidate,
     )
     run_id = args.run_id or datetime.now(timezone.utc).strftime(
         "qwen35_%Y%m%dT%H%M%S%fZ"

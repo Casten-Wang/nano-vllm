@@ -332,6 +332,9 @@ def run_worker(args: argparse.Namespace) -> None:
         model,
         tensor_parallel_size=args.tensor_parallel_size,
         recurrent_state_dtype=args.recurrent_state_dtype,
+        qwen35_decode_conv_backend=getattr(
+            args, "qwen35_decode_conv_backend", "weighted"
+        ),
         weight_quant_backend=getattr(args, "weight_quant_backend", "auto"),
         qwen35_moe_decode_backend=getattr(
             args, "qwen35_moe_decode_backend", "sorted"
@@ -753,6 +756,8 @@ def run_worker_process(
         args.recurrent_state_dtype,
         "--weight-quant-backend",
         getattr(args, "weight_quant_backend", "auto"),
+        "--qwen35-decode-conv-backend",
+        getattr(args, "qwen35_decode_conv_backend", "weighted"),
         "--qwen35-moe-decode-backend",
         getattr(args, "qwen35_moe_decode_backend", "sorted"),
         "--max-model-len",
@@ -783,6 +788,11 @@ def main() -> None:
         "--weight-quant-backend",
         choices=("auto", "reference", "triton"),
         default="auto",
+    )
+    parser.add_argument(
+        "--qwen35-decode-conv-backend",
+        choices=("weighted", "channel_accumulate"),
+        default="weighted",
     )
     parser.add_argument(
         "--qwen35-moe-decode-backend",
@@ -911,6 +921,7 @@ def main() -> None:
             "tensor_parallel_size": args.tensor_parallel_size,
             "recurrent_state_dtype": args.recurrent_state_dtype,
             "requested_weight_quant_backend": args.weight_quant_backend,
+            "qwen35_decode_conv_backend": args.qwen35_decode_conv_backend,
             "qwen35_moe_decode_backend": args.qwen35_moe_decode_backend,
             "prompt_lengths": actual_prompt_lengths,
             "cases_per_length": args.cases_per_length,

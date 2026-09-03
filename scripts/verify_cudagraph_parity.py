@@ -112,6 +112,7 @@ def run_worker(args: argparse.Namespace) -> None:
         max_num_batched_tokens=args.max_num_batched_tokens,
         max_num_seqs=args.max_num_seqs,
         tensor_parallel_size=args.tensor_parallel_size,
+        qwen35_decode_conv_backend=args.qwen35_decode_conv_backend,
         qwen35_moe_decode_backend=args.qwen35_moe_decode_backend,
         qwen35_moe_decode_chunk_size=args.qwen35_moe_decode_chunk_size,
         kv_cache_dtype=args.kv_cache_dtype,
@@ -202,6 +203,7 @@ def run_worker(args: argparse.Namespace) -> None:
             "max_num_batched_tokens": args.max_num_batched_tokens,
             "max_num_seqs": args.max_num_seqs,
             "tensor_parallel_size": args.tensor_parallel_size,
+            "qwen35_decode_conv_backend": args.qwen35_decode_conv_backend,
             "qwen35_moe_decode_backend": args.qwen35_moe_decode_backend,
             "qwen35_moe_decode_chunk_size": args.qwen35_moe_decode_chunk_size,
             "output_len": args.output_len,
@@ -243,6 +245,8 @@ def worker_command(
         str(args.max_num_seqs),
         "--tensor-parallel-size",
         str(args.tensor_parallel_size),
+        "--qwen35-decode-conv-backend",
+        args.qwen35_decode_conv_backend,
         "--qwen35-moe-decode-backend",
         args.qwen35_moe_decode_backend,
         "--qwen35-moe-decode-chunk-size",
@@ -469,6 +473,11 @@ def main() -> None:
     parser.add_argument("--max-num-seqs", type=int, default=32)
     parser.add_argument("--tensor-parallel-size", type=int, default=1)
     parser.add_argument(
+        "--qwen35-decode-conv-backend",
+        choices=("weighted", "channel_accumulate"),
+        default="weighted",
+    )
+    parser.add_argument(
         "--qwen35-moe-decode-backend",
         choices=("sorted", "batched"),
         default="batched",
@@ -656,6 +665,7 @@ def main() -> None:
         "kv_cache_dtype": args.kv_cache_dtype,
         "kv_dequant_backend": args.kv_dequant_backend,
         "tensor_parallel_size": args.tensor_parallel_size,
+        "qwen35_decode_conv_backend": args.qwen35_decode_conv_backend,
         "qwen35_moe_decode_backend": args.qwen35_moe_decode_backend,
         "qwen35_moe_decode_chunk_size": args.qwen35_moe_decode_chunk_size,
         "output_len": args.output_len,

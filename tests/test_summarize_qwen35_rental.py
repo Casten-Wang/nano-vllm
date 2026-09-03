@@ -777,9 +777,21 @@ def write_attention_case(
     )
 
 
-def write_cudagraph_case(root, context_name, attention_path, batch_sizes):
+def write_cudagraph_case(
+    root,
+    context_name,
+    attention_path,
+    batch_sizes,
+    *,
+    decode_conv_backend="weighted",
+):
+    base = (
+        "cudagraph"
+        if decode_conv_backend == "weighted"
+        else f"cudagraph_conv/{decode_conv_backend}"
+    )
     write(
-        root / f"cudagraph/tp4/{context_name}/run_1/summary.json",
+        root / f"{base}/tp4/{context_name}/run_1/summary.json",
         {
             "commit": "abc",
             "git_dirty": False,
@@ -787,6 +799,7 @@ def write_cudagraph_case(root, context_name, attention_path, batch_sizes):
             "kv_cache_dtype": "int8",
             "passed": True,
             "hybrid_graph_captured": True,
+            "qwen35_decode_conv_backend": decode_conv_backend,
             "scenarios": [
                 {
                     "batch_size": batch_size,
@@ -1360,7 +1373,26 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     int8_candidate["storage"]["kv_cache_storage"]["total_bytes"] = 256 * 5_160
     for item in int8_candidate["storage"]["kv_cache_storage_by_rank"]:
         item["total_bytes"] = 256 * 5_160
-    rows.extend((int8_baseline, int8_candidate))
+    conv_candidate = deepcopy(rows[1])
+    conv_candidate.update(
+        label="batched-conv-channel-accumulate",
+        qwen35_decode_conv_backend="channel_accumulate",
+    )
+    conv_candidate["median"]["peak_torch_allocated_mib"] = 11
+    int8_conv_candidate = deepcopy(int8_candidate)
+    int8_conv_candidate.update(
+        label="batched-int8-conv-channel-accumulate",
+        qwen35_decode_conv_backend="channel_accumulate",
+    )
+    int8_conv_candidate["median"]["peak_torch_allocated_mib"] = 11
+    rows.extend(
+        (
+            int8_baseline,
+            int8_candidate,
+            conv_candidate,
+            int8_conv_candidate,
+        )
+    )
     write(
         tmp_path / f"performance/{run_id}_matrix_summary.json",
         {
@@ -1391,12 +1423,40 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
             "quality_gates": {"all_passed": True, "thresholds": {}},
         },
     )
+    write(
+        tmp_path
+        / "quality_conv/channel_accumulate"
+        / f"{run_id}-conv-channel_accumulate_summary.json",
+        {
+            "model": "/model",
+            "tensor_parallel_sizes": None,
+            "case_token_digest": None,
+            "cases": [
+                {"qwen35_decode_conv_backend": "channel_accumulate"}
+            ],
+            "cross_tp": {"all_passed": True, "comparisons": []},
+            "quality_gates": {"all_passed": True, "thresholds": {}},
+        },
+    )
     quality_dir = tmp_path / f"quality/{run_id}_qwen35_tp4"
     write(
         quality_dir / f"{quality_dir.name}.json",
         {"commit": "abc", "git_dirty": False, "checkpoint_manifest": {"digest": "weights"}},
     )
     write(quality_dir / "batch0_len128_cases.json", [{"prompt_ids": [1, 2]}])
+    conv_quality_dir = (
+        tmp_path
+        / "quality_conv/channel_accumulate"
+        / f"{run_id}-conv-channel_accumulate_qwen35_tp4"
+    )
+    write(
+        conv_quality_dir / f"{conv_quality_dir.name}.json",
+        {
+            "commit": "abc",
+            "git_dirty": False,
+            "checkpoint_manifest": {"digest": "weights"},
+        },
+    )
     write(
         tmp_path / "kernels/tp4.json",
         {
@@ -1757,6 +1817,20 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
         "int8_partitioned_decode",
         [3],
     )
+    write_cudagraph_case(
+        tmp_path,
+        "short",
+        "int8_fused_decode",
+        [3, 9, 64],
+        decode_conv_backend="channel_accumulate",
+    )
+    write_cudagraph_case(
+        tmp_path,
+        "long",
+        "int8_partitioned_decode",
+        [3],
+        decode_conv_backend="channel_accumulate",
+    )
     write_attention_case(tmp_path, "short", 4096, partitioned=False)
     write_attention_case(tmp_path, "long", 16385, partitioned=True)
     write_attention_case(
@@ -1912,7 +1986,11 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     assert report["performance"]["lowest_peak_memory"]["label"] == "sorted"
     state_access = report["performance"]["recurrent_state_access"]
     assert state_access["all_configurations_valid"]
-    assert len(state_access["by_configuration"]["tp4"]) == 4
+    assert len(state_access["by_configuration"]["tp4"]) == 6
+    assert report["decode_convolution"]["promote_to_default"]
+    assert report["evidence"]["decode_conv_runtime_evidence"]
+    assert report["evidence"]["decode_conv_cudagraph_parity"]
+    assert report["evidence"]["decode_conv_quality"]
     assert report["graph_safe_moe"]["all_tp_promoted"]
     assert report["hybrid_cudagraph"]["all_tp_passed"]
     assert report["hybrid_cudagraph"]["by_tp"]["tp4"]["short"][

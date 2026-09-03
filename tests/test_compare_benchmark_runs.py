@@ -66,6 +66,7 @@ def result(
         "nccl_environment": {"NCCL_ALGO": "Ring"},
         "tensor_parallel_size": 4,
         "recurrent_state_dtype": "float32",
+        "qwen35_decode_conv_backend": "weighted",
         "qwen35_moe_decode_backend": "sorted",
         "qwen35_moe_decode_chunk_size": 8,
         "sampling_chunk_size": 32,

@@ -69,6 +69,8 @@ def command_for_case(
         case.recurrent_state_dtype,
         "--weight-quant-backend",
         getattr(args, "weight_quant_backend", "auto"),
+        "--qwen35-decode-conv-backend",
+        getattr(args, "qwen35_decode_conv_backend", "weighted"),
         "--qwen35-moe-decode-backend",
         getattr(args, "qwen35_moe_decode_backend", "sorted"),
         "--prompt-lengths",
@@ -171,6 +173,9 @@ def summarize_results(
                 ),
                 "weight_quant_backend": configuration.get(
                     "weight_quant_backend"
+                ),
+                "qwen35_decode_conv_backend": configuration.get(
+                    "qwen35_decode_conv_backend"
                 ),
                 "qwen35_moe_decode_backend": configuration.get(
                     "qwen35_moe_decode_backend"
@@ -361,6 +366,11 @@ def parse_args() -> argparse.Namespace:
         "--weight-quant-backend",
         choices=("auto", "reference", "resident", "triton"),
         default="auto",
+    )
+    parser.add_argument(
+        "--qwen35-decode-conv-backend",
+        choices=("weighted", "channel_accumulate"),
+        default="weighted",
     )
     parser.add_argument(
         "--qwen35-moe-decode-backend",

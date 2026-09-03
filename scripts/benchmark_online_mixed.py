@@ -127,6 +127,11 @@ def parse_args() -> argparse.Namespace:
         default=1,
     )
     parser.add_argument(
+        "--qwen35-decode-conv-backend",
+        choices=("weighted", "channel_accumulate"),
+        default="weighted",
+    )
+    parser.add_argument(
         "--qwen35-moe-decode-backend",
         choices=("sorted", "batched"),
         default="sorted",
@@ -213,6 +218,7 @@ def main() -> None:
         max_num_seqs=args.max_num_seqs,
         num_kvcache_blocks_override=args.num_kvcache_blocks_override,
         tensor_parallel_size=args.tensor_parallel_size,
+        qwen35_decode_conv_backend=args.qwen35_decode_conv_backend,
         qwen35_moe_decode_backend=args.qwen35_moe_decode_backend,
         kv_cache_dtype=args.kv_cache_dtype,
         kv_dequant_backend=args.kv_dequant_backend,
@@ -400,6 +406,7 @@ def main() -> None:
         "max_num_seqs": args.max_num_seqs,
         "num_kvcache_blocks_override": args.num_kvcache_blocks_override,
         "tensor_parallel_size": args.tensor_parallel_size,
+        "qwen35_decode_conv_backend": args.qwen35_decode_conv_backend,
         "qwen35_moe_decode_backend": args.qwen35_moe_decode_backend,
         "seed": args.seed,
         "temperature": args.temperature,

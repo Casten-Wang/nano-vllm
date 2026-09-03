@@ -80,7 +80,9 @@ def test_commands_are_fail_fast_and_cover_complete_validation_suite():
         "attention-long-tp4",
         "attention-max-tp4",
         "cudagraph-short-tp4",
+        "cudagraph-conv-channel_accumulate-short-tp4",
         "cudagraph-long-tp4",
+        "cudagraph-conv-channel_accumulate-long-tp4",
         "pd-export-auto-float32-tp8",
         "pd-transfer-auto-float32-tp8",
         "pd-export-int8-model-tp8",
@@ -109,9 +111,12 @@ def test_commands_are_fail_fast_and_cover_complete_validation_suite():
         "attention-long-tp8",
         "attention-max-tp8",
         "cudagraph-short-tp8",
+        "cudagraph-conv-channel_accumulate-short-tp8",
         "cudagraph-long-tp8",
+        "cudagraph-conv-channel_accumulate-long-tp8",
         "performance-matrix",
         "quality-matrix",
+        "quality-conv-channel_accumulate",
         "final-summary",
     ]
     official = stages[0][1]
@@ -181,21 +186,34 @@ def test_commands_are_fail_fast_and_cover_complete_validation_suite():
     assert long_attention[long_attention.index("--partition-sizes") + 1] == "256,512"
     short_graph = commands["cudagraph-short-tp4"]
     long_graph = commands["cudagraph-long-tp4"]
+    candidate_graph = commands[
+        "cudagraph-conv-channel_accumulate-short-tp4"
+    ]
     assert short_graph[short_graph.index("--input-length-base") + 1] == "33"
     assert long_graph[long_graph.index("--input-length-base") + 1] == "8192"
     assert long_graph[long_graph.index("--batch-sizes") + 1] == "3"
+    assert candidate_graph[
+        candidate_graph.index("--qwen35-decode-conv-backend") + 1
+    ] == "channel_accumulate"
     tp8_kernels = commands["kernels-tp8"]
     tp8_attention = commands["attention-short-tp8"]
     assert tp8_kernels[tp8_kernels.index("--tp-size") + 1] == "8"
     assert tp8_attention[tp8_attention.index("--num-heads") + 1] == "2"
-    assert "--no-checkpoint-audit" in stages[-3][1]
-    assert "--no-memory-preflight" in stages[-3][1]
-    assert "--include-moe-candidate" in stages[-3][1]
-    assert "--no-checkpoint-audit" in stages[-2][1]
-    assert stages[-2][1][stages[-2][1].index("--prompt-lengths") + 1] == (
+    performance = commands["performance-matrix"]
+    quality = commands["quality-matrix"]
+    candidate_quality = commands["quality-conv-channel_accumulate"]
+    assert "--no-checkpoint-audit" in performance
+    assert "--no-memory-preflight" in performance
+    assert "--include-moe-candidate" in performance
+    assert "--include-decode-conv-candidate" in performance
+    assert "--no-checkpoint-audit" in quality
+    assert quality[quality.index("--prompt-lengths") + 1] == (
         "128,1024,3072,8192"
     )
-    assert stages[-2][1][stages[-2][1].index("--continuation-len") + 1] == "16"
+    assert quality[quality.index("--continuation-len") + 1] == "16"
+    assert candidate_quality[
+        candidate_quality.index("--qwen35-decode-conv-backend") + 1
+    ] == "channel_accumulate"
     assert stages[-1][1][-1].endswith("summary.json")
 
 

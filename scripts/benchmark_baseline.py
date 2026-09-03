@@ -57,6 +57,7 @@ def write_markdown(path: Path, result: dict) -> None:
         f"- gpu_memory_utilization: `{result['gpu_memory_utilization']}`",
         f"- tensor_parallel_size: `{result['tensor_parallel_size']}`",
         f"- recurrent_state_dtype: `{result['recurrent_state_dtype']}`",
+        f"- qwen35_decode_conv_backend: `{result['qwen35_decode_conv_backend']}`",
         f"- qwen35_moe_decode_backend: `{result['qwen35_moe_decode_backend']}`",
         f"- qwen35_moe_decode_chunk_size: `{result['qwen35_moe_decode_chunk_size']}`",
         f"- sampling_chunk_size: `{result['sampling_chunk_size']}`",
@@ -137,6 +138,12 @@ def parse_args() -> argparse.Namespace:
         default="float32",
     )
     parser.add_argument(
+        "--qwen35-decode-conv-backend",
+        choices=("weighted", "channel_accumulate"),
+        default="weighted",
+        help="Qwen3.6 Decode depthwise-convolution implementation.",
+    )
+    parser.add_argument(
         "--qwen35-moe-decode-backend",
         choices=("sorted", "batched"),
         default="sorted",
@@ -186,6 +193,8 @@ def default_result_prefix(args: argparse.Namespace) -> str:
         parts.append("decode-kv-reserve")
     if args.enforce_eager:
         parts.append("eager")
+    if args.qwen35_decode_conv_backend != "weighted":
+        parts.append(f"conv-{args.qwen35_decode_conv_backend}")
     if args.qwen35_moe_decode_backend != "sorted":
         parts.append(f"moe-{args.qwen35_moe_decode_backend}")
     if args.weight_quant_backend != "auto":
@@ -215,6 +224,7 @@ def main() -> None:
         tensor_parallel_size=args.tensor_parallel_size,
         gpu_memory_utilization=args.gpu_memory_utilization,
         recurrent_state_dtype=args.recurrent_state_dtype,
+        qwen35_decode_conv_backend=args.qwen35_decode_conv_backend,
         qwen35_moe_decode_backend=args.qwen35_moe_decode_backend,
         qwen35_moe_decode_chunk_size=args.qwen35_moe_decode_chunk_size,
         sampling_chunk_size=args.sampling_chunk_size,
@@ -311,6 +321,7 @@ def main() -> None:
         "tensor_parallel_size": args.tensor_parallel_size,
         "gpu_memory_utilization": args.gpu_memory_utilization,
         "recurrent_state_dtype": args.recurrent_state_dtype,
+        "qwen35_decode_conv_backend": args.qwen35_decode_conv_backend,
         "qwen35_moe_decode_backend": args.qwen35_moe_decode_backend,
         "qwen35_moe_decode_chunk_size": args.qwen35_moe_decode_chunk_size,
         "sampling_chunk_size": args.sampling_chunk_size,

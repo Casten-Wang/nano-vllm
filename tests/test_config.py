@@ -46,6 +46,20 @@ def test_qwen35_moe_decode_backend_is_forwarded_to_text_config(
     assert text_config.qwen35_moe_decode_chunk_size == 4
 
 
+def test_qwen35_decode_conv_backend_is_forwarded_to_text_config(
+    monkeypatch,
+    tmp_path,
+):
+    config, text_config = make_config(
+        monkeypatch,
+        tmp_path,
+        qwen35_decode_conv_backend="channel_accumulate",
+    )
+
+    assert config.qwen35_decode_conv_backend == "channel_accumulate"
+    assert text_config.qwen35_decode_conv_backend == "channel_accumulate"
+
+
 def test_runtime_model_length_is_forwarded_as_allocation_bound(
     monkeypatch,
     tmp_path,
@@ -81,6 +95,15 @@ def test_invalid_qwen35_moe_decode_backend_is_rejected(monkeypatch, tmp_path):
             monkeypatch,
             tmp_path,
             qwen35_moe_decode_backend="unknown",
+        )
+
+
+def test_invalid_qwen35_decode_conv_backend_is_rejected(monkeypatch, tmp_path):
+    with pytest.raises(ValueError, match="qwen35_decode_conv_backend"):
+        make_config(
+            monkeypatch,
+            tmp_path,
+            qwen35_decode_conv_backend="unknown",
         )
 
 

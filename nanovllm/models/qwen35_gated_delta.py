@@ -898,6 +898,11 @@ class Qwen35GatedDeltaNet(nn.Module):
         self.key_head_dim = int(config.linear_key_head_dim)
         self.value_head_dim = int(config.linear_value_head_dim)
         self.conv_kernel_size = int(config.linear_conv_kernel_dim)
+        self.decode_conv_backend = getattr(
+            config,
+            "qwen35_decode_conv_backend",
+            "weighted",
+        )
         self.tp_size = dist.get_world_size()
         self.tp_rank = dist.get_rank()
         if self.total_k_heads % self.tp_size or self.total_v_heads % self.tp_size:
@@ -1212,13 +1217,23 @@ class Qwen35GatedDeltaNet(nn.Module):
             cached_recurrent_state = recurrent_state
         else:
             recurrent_state, conv_state = self.state_pool.get(0, slots)
-        convolved, conv_state = causal_conv1d_step(
-            mixed_qkv,
-            conv_state,
-            self.conv1d.weight.squeeze(1),
-            inplace_state=True,
-            inplace_output=True,
-        )
+        if (
+            self.decode_conv_backend == "channel_accumulate"
+            and not torch.is_grad_enabled()
+        ):
+            convolved, conv_state = causal_conv1d_step_accumulate_(
+                mixed_qkv,
+                conv_state,
+                self.conv1d.weight.squeeze(1),
+            )
+        else:
+            convolved, conv_state = causal_conv1d_step(
+                mixed_qkv,
+                conv_state,
+                self.conv1d.weight.squeeze(1),
+                inplace_state=True,
+                inplace_output=True,
+            )
         convolved = convolved.unsqueeze(1)
         query, key, value = convolved.split(
             (self.local_key_dim, self.local_key_dim, self.local_value_dim),

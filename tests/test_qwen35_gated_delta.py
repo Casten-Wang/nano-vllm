@@ -1683,6 +1683,79 @@ def test_decode_layer_reuses_qkv_projection_for_convolution_output():
     assert observed["output"] == observed["input"]
 
 
+def test_decode_layer_selects_channel_accumulate_backend_in_inference():
+    config = tiny_config()
+    config.qwen35_decode_conv_backend = "channel_accumulate"
+    layer = make_layer(layer_config=config)
+    layer.allocate_state_cache(2, "cpu")
+    hidden = torch.randn(2, 4)
+    context = SimpleNamespace(
+        is_mixed=False,
+        is_prefill=False,
+        state_slots=torch.tensor([0, 1], dtype=torch.int64),
+        state_reset_mask=torch.tensor([True, True]),
+        state_token_ranges=(),
+        decode_state_span=(0, 2),
+    )
+    context_module = types.ModuleType("nanovllm.utils.context")
+    context_module.get_context = lambda: context
+    original_accumulate = qwen35_gated_delta.causal_conv1d_step_accumulate_
+
+    with (
+        torch.inference_mode(),
+        patch.dict(sys.modules, {"nanovllm.utils.context": context_module}),
+        patch.object(
+            qwen35_gated_delta,
+            "causal_conv1d_step_accumulate_",
+            wraps=original_accumulate,
+        ) as accumulate,
+        patch.object(
+            qwen35_gated_delta,
+            "causal_conv1d_step",
+            side_effect=AssertionError("weighted backend was called"),
+        ),
+    ):
+        layer(hidden)
+
+    accumulate.assert_called_once()
+
+
+def test_channel_accumulate_backend_keeps_autograd_fallback():
+    config = tiny_config()
+    config.qwen35_decode_conv_backend = "channel_accumulate"
+    layer = make_layer(layer_config=config)
+    layer.allocate_state_cache(1, "cpu")
+    hidden = torch.randn(1, 4)
+    context = SimpleNamespace(
+        is_mixed=False,
+        is_prefill=False,
+        state_slots=torch.tensor([0], dtype=torch.int64),
+        state_reset_mask=torch.tensor([True]),
+        state_token_ranges=(),
+        decode_state_span=(0, 1),
+    )
+    context_module = types.ModuleType("nanovllm.utils.context")
+    context_module.get_context = lambda: context
+    original_weighted = qwen35_gated_delta.causal_conv1d_step
+
+    with (
+        patch.dict(sys.modules, {"nanovllm.utils.context": context_module}),
+        patch.object(
+            qwen35_gated_delta,
+            "causal_conv1d_step_accumulate_",
+            side_effect=AssertionError("inference-only backend was called"),
+        ),
+        patch.object(
+            qwen35_gated_delta,
+            "causal_conv1d_step",
+            wraps=original_weighted,
+        ) as weighted,
+    ):
+        layer(hidden)
+
+    weighted.assert_called_once()
+
+
 def test_decode_padding_scratch_slot_does_not_change_real_states():
     torch.manual_seed(29)
     layer = make_layer()

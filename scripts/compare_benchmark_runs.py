@@ -43,6 +43,7 @@ ENVIRONMENT_FIELDS = (
 OPTIMIZATION_FIELDS = (
     "tensor_parallel_size",
     "recurrent_state_dtype",
+    "qwen35_decode_conv_backend",
     "qwen35_moe_decode_backend",
     "qwen35_moe_decode_chunk_size",
     "sampling_chunk_size",

@@ -569,6 +569,41 @@ def commands(args: argparse.Namespace) -> list[tuple[str, list[str]]]:
                     ],
                 )
             )
+            result.append(
+                (
+                    f"cudagraph-conv-channel_accumulate-{context_name}-tp{tp_size}",
+                    [
+                        sys.executable,
+                        str(CUDAGRAPH_PARITY_SCRIPT),
+                        "--model",
+                        args.model,
+                        "--tensor-parallel-size",
+                        str(tp_size),
+                        "--batch-sizes",
+                        batch_sizes,
+                        "--input-length-base",
+                        str(base_length),
+                        "--max-model-len",
+                        str(args.max_model_len),
+                        "--max-num-batched-tokens",
+                        str(args.max_model_len),
+                        "--max-num-seqs",
+                        str(args.max_num_seqs),
+                        "--qwen35-moe-decode-backend",
+                        "batched",
+                        "--qwen35-decode-conv-backend",
+                        "channel_accumulate",
+                        "--result-dir",
+                        str(
+                            root
+                            / "cudagraph_conv"
+                            / "channel_accumulate"
+                            / f"tp{tp_size}"
+                            / context_name
+                        ),
+                    ],
+                )
+            )
     result.extend(
         (
             (
@@ -582,6 +617,7 @@ def commands(args: argparse.Namespace) -> list[tuple[str, list[str]]]:
                     "--no-checkpoint-audit",
                     "--no-memory-preflight",
                     "--include-moe-candidate",
+                    "--include-decode-conv-candidate",
                 ],
             ),
             (
@@ -606,6 +642,32 @@ def commands(args: argparse.Namespace) -> list[tuple[str, list[str]]]:
                     str(args.max_model_len),
                     "--max-num-batched-tokens",
                     str(args.max_model_len),
+                ],
+            ),
+            (
+                "quality-conv-channel_accumulate",
+                [
+                    sys.executable,
+                    str(QUALITY_SCRIPT),
+                    "--model",
+                    args.model,
+                    "--tp-sizes",
+                    tp_sizes,
+                    "--run-id",
+                    f"{args.run_id}-conv-channel_accumulate",
+                    "--result-dir",
+                    str(root / "quality_conv" / "channel_accumulate"),
+                    "--no-checkpoint-audit",
+                    "--prompt-lengths",
+                    f"128,1024,3072,{QUALITY_MAX_PROMPT_LENGTH}",
+                    "--continuation-len",
+                    str(QUALITY_CONTINUATION_LENGTH),
+                    "--max-model-len",
+                    str(args.max_model_len),
+                    "--max-num-batched-tokens",
+                    str(args.max_model_len),
+                    "--qwen35-decode-conv-backend",
+                    "channel_accumulate",
                 ],
             ),
         )
@@ -1045,6 +1107,22 @@ def collect_stage_artifacts(
         ).rsplit("-", 2)
         search_root = root / "fairness" / mode / tp_name
         required = [search_root / f"{repeat_name}.json"]
+    elif stage_name.startswith("cudagraph-conv-channel_accumulate-"):
+        context_name, tp_name = stage_name.removeprefix(
+            "cudagraph-conv-channel_accumulate-"
+        ).rsplit("-", 1)
+        search_root = (
+            root
+            / "cudagraph_conv"
+            / "channel_accumulate"
+            / tp_name
+            / context_name
+        )
+        required = sorted(search_root.glob("run_*/summary.json"))
+        if len(required) != 1:
+            raise RuntimeError(
+                f"stage {stage_name} must produce exactly one summary"
+            )
     elif stage_name.startswith("cudagraph-"):
         _, context_name, tp_name = stage_name.split("-")
         search_root = root / "cudagraph" / tp_name / context_name
@@ -1063,6 +1141,12 @@ def collect_stage_artifacts(
     elif stage_name == "quality-matrix":
         search_root = root / "quality"
         required = [search_root / f"{args.run_id}_summary.json"]
+    elif stage_name == "quality-conv-channel_accumulate":
+        search_root = root / "quality_conv" / "channel_accumulate"
+        required = [
+            search_root
+            / f"{args.run_id}-conv-channel_accumulate_summary.json"
+        ]
     elif stage_name == "gptq-performance-matrix":
         search_root = root / "gptq" / "performance"
         required = [search_root / f"{args.run_id}-gptq_matrix_summary.json"]

@@ -66,6 +66,7 @@ class Config:
     int8_partitioned_decode_threshold: int = 8192
     int8_partitioned_decode_partition_size: int = 512
     recurrent_state_dtype: str = "float32"
+    qwen35_decode_conv_backend: str = "weighted"
     qwen35_moe_decode_backend: str = "sorted"
     qwen35_moe_decode_chunk_size: int = 8
     tp_top_k_reduction_max_width: int = 256
@@ -118,6 +119,11 @@ class Config:
             raise ValueError("int8_partitioned_decode_partition_size must be positive")
         if self.recurrent_state_dtype not in ("float32", "model"):
             raise ValueError("recurrent_state_dtype must be 'float32' or 'model'")
+        if self.qwen35_decode_conv_backend not in ("weighted", "channel_accumulate"):
+            raise ValueError(
+                "qwen35_decode_conv_backend must be 'weighted' or "
+                "'channel_accumulate'"
+            )
         if self.qwen35_moe_decode_backend not in ("sorted", "batched"):
             raise ValueError(
                 "qwen35_moe_decode_backend must be 'sorted' or 'batched'"
@@ -208,6 +214,9 @@ class Config:
             quantization.require_runtime_support()
         self.model_config.qwen35_moe_decode_backend = (
             self.qwen35_moe_decode_backend
+        )
+        self.model_config.qwen35_decode_conv_backend = (
+            self.qwen35_decode_conv_backend
         )
         self.model_config.qwen35_moe_decode_chunk_size = (
             self.qwen35_moe_decode_chunk_size
