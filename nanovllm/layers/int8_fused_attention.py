@@ -770,6 +770,49 @@ class PartitionedDecodeBufferPool:
         self.workspace_storage: torch.Tensor | None = None
         self.output_storage: torch.Tensor | None = None
 
+    def reserve(
+        self,
+        *,
+        num_seqs: int,
+        num_heads: int,
+        num_partitions: int,
+        head_dim: int,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> None:
+        """Allocate the maximum configured workspace before KV-cache sizing."""
+
+        if min(num_seqs, num_heads, num_partitions, head_dim) <= 0:
+            raise ValueError("partitioned buffer reservation dimensions must be positive")
+        block_head_dim = _next_power_of_two(head_dim)
+        if block_head_dim > 256:
+            raise ValueError("partitioned buffer head dimension exceeds kernel limit")
+        partial_items = num_seqs * num_heads * num_partitions
+        workspace_items = partial_items * (block_head_dim + 2)
+        output_items = num_seqs * num_heads * head_dim
+        if self._needs_storage(
+            self.workspace_storage,
+            size=workspace_items,
+            dtype=torch.float32,
+            device=device,
+        ):
+            self.workspace_storage = torch.empty(
+                workspace_items,
+                dtype=torch.float32,
+                device=device,
+            )
+        if self._needs_storage(
+            self.output_storage,
+            size=output_items,
+            dtype=dtype,
+            device=device,
+        ):
+            self.output_storage = torch.empty(
+                output_items,
+                dtype=dtype,
+                device=device,
+            )
+
     @staticmethod
     def _needs_storage(
         storage: torch.Tensor | None,

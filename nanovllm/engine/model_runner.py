@@ -1041,10 +1041,6 @@ class ModelRunner:
         model_spec = config.model_spec
         if hf_config is None or model_spec is None:
             raise RuntimeError("model configuration was not initialized")
-        free, total = torch.cuda.mem_get_info()
-        used = total - free
-        peak = torch.cuda.memory_stats()["allocated_bytes.all.peak"]
-        current = torch.cuda.memory_stats()["allocated_bytes.all.current"]
         num_layers = model_spec.num_kv_cache_layers
         cache_plan = plan_cache_memory(
             model_spec,
@@ -1053,6 +1049,29 @@ class ModelRunner:
         )
         num_kv_heads = cache_plan.local_kv_heads
         head_dim = getattr(hf_config, "head_dim", hf_config.hidden_size // hf_config.num_attention_heads)
+        partitioned_decode_pool = PartitionedDecodeBufferPool()
+        if (
+            config.kv_dequant_backend == "fused"
+            and config.sliding_window_size is None
+            and config.max_model_len >= config.int8_partitioned_decode_threshold
+        ):
+            partitioned_decode_pool.reserve(
+                num_seqs=min(config.max_num_seqs, config.max_num_batched_tokens),
+                num_heads=hf_config.num_attention_heads // self.world_size,
+                num_partitions=(
+                    config.max_model_len
+                    + config.int8_partitioned_decode_partition_size
+                    - 1
+                )
+                // config.int8_partitioned_decode_partition_size,
+                head_dim=head_dim,
+                dtype=hf_config.dtype,
+                device=torch.device("cuda", torch.cuda.current_device()),
+            )
+        free, total = torch.cuda.mem_get_info()
+        used = total - free
+        peak = torch.cuda.memory_stats()["allocated_bytes.all.peak"]
+        current = torch.cuda.memory_stats()["allocated_bytes.all.current"]
         kv_data_bytes = cache_plan.kv_bytes_per_token * self.block_size
         scale_bytes = cache_plan.int8_scale_bytes_per_token * self.block_size
         block_bytes = kv_data_bytes + scale_bytes
@@ -1077,7 +1096,6 @@ class ModelRunner:
             num_kv_heads,
             dtype=torch.float16,
         )
-        partitioned_decode_pool = PartitionedDecodeBufferPool()
         dequant_pool = Int8DequantBufferPool()
         layer_id = 0
         for module in self.model.modules():

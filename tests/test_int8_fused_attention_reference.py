@@ -67,6 +67,44 @@ else:
 
 @unittest.skipIf(torch is None or IMPORT_ERROR is not None, "torch/triton unavailable")
 class PartitionedWorkspaceTest(unittest.TestCase):
+    def test_buffer_pool_can_be_reserved_before_first_long_decode(self):
+        pool = int8_fused_attention.PartitionedDecodeBufferPool()
+        pool.reserve(
+            num_seqs=4,
+            num_heads=3,
+            num_partitions=5,
+            head_dim=6,
+            dtype=torch.bfloat16,
+            device=torch.device("cpu"),
+        )
+
+        self.assertEqual(
+            pool.storage_stats(),
+            {
+                "workspace_bytes": 4 * 3 * 5 * (8 + 2) * 4,
+                "output_bytes": 4 * 3 * 6 * 2,
+                "total_bytes": 4 * 3 * 5 * (8 + 2) * 4 + 4 * 3 * 6 * 2,
+            },
+        )
+        workspace_ptr = pool.workspace_storage.data_ptr()
+        output_ptr = pool.output_storage.data_ptr()
+        q = torch.empty(2, 3, 6, dtype=torch.bfloat16)
+        pool.acquire(q, 3, 8)
+        self.assertEqual(pool.workspace_storage.data_ptr(), workspace_ptr)
+        self.assertEqual(pool.output_storage.data_ptr(), output_ptr)
+
+    def test_buffer_pool_rejects_invalid_reservation(self):
+        pool = int8_fused_attention.PartitionedDecodeBufferPool()
+        with self.assertRaisesRegex(ValueError, "dimensions must be positive"):
+            pool.reserve(
+                num_seqs=0,
+                num_heads=1,
+                num_partitions=1,
+                head_dim=8,
+                dtype=torch.float16,
+                device=torch.device("cpu"),
+            )
+
     def test_buffer_pool_reuses_storage_across_shapes(self):
         pool = int8_fused_attention.PartitionedDecodeBufferPool()
         large_q = torch.empty(4, 3, 8, dtype=torch.float16)
