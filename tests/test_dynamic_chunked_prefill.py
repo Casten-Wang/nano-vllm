@@ -640,6 +640,51 @@ def test_fairness_reserve_does_not_waste_budget_on_short_prefill():
     assert second.num_decode_tokens + second.num_prefill_tokens == 8
 
 
+def test_fairness_reserve_accounts_for_unbound_prefix_cache_hits():
+    scheduler = make_scheduler(
+        max_tokens=8,
+        max_seqs=9,
+        block_size=4,
+        starvation_token_budget=256,
+    )
+    scheduler.prefill_starvation_threshold = 1
+    original = Sequence(list(range(9)))
+    scheduler.block_manager.allocate(original, 0)
+    original.num_scheduled_tokens = len(original)
+    scheduler.block_manager.hash_blocks(original)
+    scheduler.block_manager.deallocate(original)
+
+    running = []
+    for token in range(8):
+        seq = Sequence([token + 20] * 4)
+        scheduler.block_manager.allocate(seq, 0)
+        seq.status = SequenceStatus.RUNNING
+        seq.is_prefill = False
+        seq.num_cached_tokens = len(seq)
+        scheduler.running.append(seq)
+        running.append(seq)
+    waiting = Sequence(list(range(9)))
+    scheduler.waiting.append(waiting)
+
+    first = scheduler.schedule()
+    assert first.decode_seqs == running
+    scheduler.postprocess_mixed(first, [100] * len(first.seqs))
+    scheduler.block_manager.reset_cache_stats()
+
+    second = scheduler.schedule()
+
+    # Two cached blocks leave one actual prefill token. Reserving from the
+    # stale zero num_cached_tokens value would schedule only four decodes.
+    assert len(second.decode_seqs) == 7
+    assert second.prefill_seqs == [waiting]
+    assert waiting.num_cached_tokens == 8
+    assert waiting.num_scheduled_tokens == 1
+    assert second.num_decode_tokens + second.num_prefill_tokens == 8
+    # The fairness forecast is deliberately excluded from cache hit metrics;
+    # only the admission lookup is recorded.
+    assert scheduler.block_manager.prefix_cache_queries == 1
+
+
 def test_kv_pressure_workload_preempts_and_eventually_completes():
     scheduler = make_scheduler(
         max_tokens=2048,

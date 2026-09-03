@@ -105,17 +105,33 @@ class BlockManager:
         is owned by that request until a later request can reuse it safely.
         """
 
-        self.prefix_cache_queries += 1
+        return self._count_cached_blocks(seq, record_stats=True)
+
+    def peek_num_cached_blocks(self, seq: Sequence) -> int:
+        """Forecast reusable prefix blocks without changing hit metrics."""
+
+        return self._count_cached_blocks(seq, record_stats=False)
+
+    def _count_cached_blocks(
+        self,
+        seq: Sequence,
+        *,
+        record_stats: bool,
+    ) -> int:
+        if record_stats:
+            self.prefix_cache_queries += 1
         h = -1
         num_cached_blocks = 0
         for i in range(seq.num_blocks - 1):
             token_ids = seq.block(i)
             h = self.compute_hash(token_ids, h)
-            self.prefix_cache_checked_blocks += 1
+            if record_stats:
+                self.prefix_cache_checked_blocks += 1
             block_id = self.hash_to_block_id.get(h, -1)
             if block_id == -1 or self.blocks[block_id].token_ids != token_ids:
                 break
-            self.prefix_cache_hit_blocks += 1
+            if record_stats:
+                self.prefix_cache_hit_blocks += 1
             num_cached_blocks += 1
         return num_cached_blocks
 

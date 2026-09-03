@@ -362,8 +362,14 @@ class Scheduler:
             # retain at least half of a multi-token step for decode latency.
             reserve_cap = max(1, self.max_num_batched_tokens // 2)
             head = self.waiting[0]
+            cached_tokens = head.num_cached_tokens
+            if self.prefix_cache_enabled and not head.block_table:
+                cached_tokens = (
+                    self.block_manager.peek_num_cached_blocks(head)
+                    * self.block_size
+                )
             head_remaining_tokens = max(
-                head.num_tokens - head.num_cached_tokens,
+                head.num_tokens - cached_tokens,
                 0,
             )
             prefill_reserve = min(
