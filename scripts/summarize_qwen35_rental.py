@@ -2724,6 +2724,67 @@ def summarize(run_dir: Path, run_id: str) -> dict:
         )
         for row in performance["runs"]
     )
+
+    def kv_capacity_item_valid(item, expected_rank, expected_blocks, block_bytes):
+        fields = (
+            "free_bytes_before_kv",
+            "total_device_bytes",
+            "used_bytes_before_kv",
+            "requested_memory_bytes",
+            "peak_allocated_bytes",
+            "current_allocated_bytes",
+            "transient_peak_bytes",
+            "allocatable_bytes_before_sync",
+            "block_bytes",
+            "local_num_blocks_before_sync",
+            "shared_num_blocks",
+            "unused_capacity_bytes_after_sync",
+        )
+        if not all(
+            isinstance(item.get(field), int)
+            and not isinstance(item.get(field), bool)
+            for field in fields
+        ):
+            return False
+        return (
+            item.get("rank") == expected_rank
+            and item["block_bytes"] == block_bytes
+            and item["shared_num_blocks"] == expected_blocks
+            and item["total_device_bytes"] - item["free_bytes_before_kv"]
+            == item["used_bytes_before_kv"]
+            and item["peak_allocated_bytes"] - item["current_allocated_bytes"]
+            == item["transient_peak_bytes"]
+            and item["requested_memory_bytes"]
+            - item["used_bytes_before_kv"]
+            - item["transient_peak_bytes"]
+            == item["allocatable_bytes_before_sync"]
+            and item["local_num_blocks_before_sync"]
+            == item["allocatable_bytes_before_sync"] // block_bytes
+            and item["local_num_blocks_before_sync"] >= expected_blocks > 0
+            and item["unused_capacity_bytes_after_sync"]
+            == item["allocatable_bytes_before_sync"]
+            - expected_blocks * block_bytes
+        )
+
+    kv_capacity_accounting_valid = all(
+        len(row.get("storage", {}).get("kv_cache_storage_by_rank", []))
+        == row["tensor_parallel_size"]
+        and all(
+            kv_capacity_item_valid(
+                item,
+                rank,
+                row["storage"].get("num_kvcache_blocks", 0),
+                KVCACHE_BLOCK_SIZE
+                * memory_by_tp.get(f"tp{row['tensor_parallel_size']}", {})
+                .get("kv_bytes_per_token_by_dtype", {})
+                .get(row["kv_cache_dtype"], 0),
+            )
+            for rank, item in enumerate(
+                row["storage"]["kv_cache_storage_by_rank"]
+            )
+        )
+        for row in performance["runs"]
+    )
     attention = {}
     attention_valid = True
     for tp_name in sorted(expected_tp_names):
@@ -3536,6 +3597,7 @@ def summarize(run_dir: Path, run_id: str) -> dict:
             recurrent_storage_matches_preflight
         ),
         "kv_storage_matches_preflight": kv_storage_matches_preflight,
+        "kv_capacity_accounting_valid": kv_capacity_accounting_valid,
         "performance_paths_valid": (
             performance["all_execution_paths_valid"]
             and recurrent_state_access["all_configurations_valid"]

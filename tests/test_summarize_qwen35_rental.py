@@ -1241,6 +1241,29 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
             },
         },
     )
+
+    def kv_rank(rank, block_bytes):
+        allocatable_bytes = 4_200_000
+        shared_num_blocks = 1
+        return {
+            "rank": rank,
+            "total_bytes": block_bytes,
+            "free_bytes_before_kv": 6_000_000,
+            "total_device_bytes": 8_000_000,
+            "used_bytes_before_kv": 2_000_000,
+            "requested_memory_bytes": 7_200_000,
+            "peak_allocated_bytes": 3_000_000,
+            "current_allocated_bytes": 2_000_000,
+            "transient_peak_bytes": 1_000_000,
+            "allocatable_bytes_before_sync": allocatable_bytes,
+            "block_bytes": block_bytes,
+            "local_num_blocks_before_sync": allocatable_bytes // block_bytes,
+            "shared_num_blocks": shared_num_blocks,
+            "unused_capacity_bytes_after_sync": (
+                allocatable_bytes - shared_num_blocks * block_bytes
+            ),
+        }
+
     rows = [
         {
             "label": "sorted",
@@ -1267,7 +1290,7 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
                 "num_kvcache_blocks": 1,
                 "kv_cache_storage": {"total_bytes": 256 * 10_240},
                 "kv_cache_storage_by_rank": [
-                    {"rank": rank, "total_bytes": 256 * 10_240}
+                    kv_rank(rank, 256 * 10_240)
                     for rank in range(4)
                 ],
                 "recurrent_state_storage": {
@@ -1327,7 +1350,7 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
                 "num_kvcache_blocks": 1,
                 "kv_cache_storage": {"total_bytes": 256 * 10_240},
                 "kv_cache_storage_by_rank": [
-                    {"rank": rank, "total_bytes": 256 * 10_240}
+                    kv_rank(rank, 256 * 10_240)
                     for rank in range(4)
                 ],
                 "recurrent_state_storage": {
@@ -1366,13 +1389,15 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     int8_baseline = deepcopy(rows[0])
     int8_baseline.update(label="sorted-int8", kv_cache_dtype="int8")
     int8_baseline["storage"]["kv_cache_storage"]["total_bytes"] = 256 * 5_160
-    for item in int8_baseline["storage"]["kv_cache_storage_by_rank"]:
-        item["total_bytes"] = 256 * 5_160
+    int8_baseline["storage"]["kv_cache_storage_by_rank"] = [
+        kv_rank(rank, 256 * 5_160) for rank in range(4)
+    ]
     int8_candidate = deepcopy(rows[1])
     int8_candidate.update(label="batched-int8", kv_cache_dtype="int8")
     int8_candidate["storage"]["kv_cache_storage"]["total_bytes"] = 256 * 5_160
-    for item in int8_candidate["storage"]["kv_cache_storage_by_rank"]:
-        item["total_bytes"] = 256 * 5_160
+    int8_candidate["storage"]["kv_cache_storage_by_rank"] = [
+        kv_rank(rank, 256 * 5_160) for rank in range(4)
+    ]
     conv_candidate = deepcopy(rows[1])
     conv_candidate.update(
         label="batched-conv-channel-accumulate",
@@ -2378,6 +2403,18 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     assert not mismatched_kv_report["valid"]
     performance_result["runs"][0]["storage"]["kv_cache_storage_by_rank"][3][
         "total_bytes"
+    ] -= 1
+    performance_result["runs"][0]["storage"]["kv_cache_storage_by_rank"][3][
+        "unused_capacity_bytes_after_sync"
+    ] += 1
+    write(performance_path, performance_result)
+    mismatched_capacity_report = MODULE.summarize(tmp_path, run_id)
+    assert not mismatched_capacity_report["evidence"][
+        "kv_capacity_accounting_valid"
+    ]
+    assert not mismatched_capacity_report["valid"]
+    performance_result["runs"][0]["storage"]["kv_cache_storage_by_rank"][3][
+        "unused_capacity_bytes_after_sync"
     ] -= 1
     write(performance_path, performance_result)
 
