@@ -2,6 +2,11 @@ import pytest
 import torch
 
 from nanovllm.engine.tp_cache_reshard import (
+    TPTransferSlice,
+    apply_tp_transfer_plan,
+    plan_grouped_uniform_reshard,
+    plan_kv_head_reshard,
+    plan_uniform_reshard,
     reshard_kv_heads,
     reshard_qwen35_convolution_state,
     reshard_uniform_tensor,
@@ -65,6 +70,36 @@ def test_qwen36_kv_cache_reshard_preserves_replicated_heads(src_tp, dst_tp):
 
 
 @pytest.mark.parametrize("src_tp,dst_tp", [(4, 8), (8, 4), (4, 4)])
+def test_direct_kv_transfer_plan_matches_qwen36_oracle(src_tp, dst_tp):
+    global_kv = torch.arange(2 * 3 * 2 * 4 * 2 * 2).reshape(
+        2, 3, 2, 4, 2, 2
+    )
+    source = make_kv_head_shards(
+        global_kv,
+        src_tp,
+        total_kv_heads=2,
+        dim=4,
+    )
+    expected = reshard_kv_heads(
+        source,
+        dst_tp,
+        total_kv_heads=2,
+        head_dim=4,
+    )
+
+    actual = apply_tp_transfer_plan(
+        source,
+        plan_kv_head_reshard(2, src_tp, dst_tp),
+        dst_tp,
+        shard_dim=4,
+        dst_width=1,
+    )
+
+    for actual_rank, expected_rank in zip(actual, expected):
+        torch.testing.assert_close(actual_rank, expected_rank)
+
+
+@pytest.mark.parametrize("src_tp,dst_tp", [(4, 8), (8, 4), (4, 4)])
 def test_int8_scale_reshard_uses_kv_head_dimension(src_tp, dst_tp):
     global_scale = torch.arange(2 * 3 * 2 * 4 * 2, dtype=torch.float16).reshape(
         2, 3, 2, 4, 2
@@ -103,6 +138,24 @@ def test_recurrent_state_reshard_uses_value_head_dimension(src_tp, dst_tp):
     torch.testing.assert_close(torch.cat(destination, dim=0), global_state)
 
 
+@pytest.mark.parametrize("src_tp,dst_tp", [(4, 8), (8, 4), (4, 4)])
+def test_direct_recurrent_transfer_plan_matches_oracle(src_tp, dst_tp):
+    global_state = torch.arange(32 * 2 * 3, dtype=torch.float32).reshape(32, 2, 3)
+    source = make_uniform_shards(global_state, src_tp, dim=0)
+    expected = reshard_uniform_tensor(source, dst_tp, shard_dim=0)
+
+    actual = apply_tp_transfer_plan(
+        source,
+        plan_uniform_reshard(32, src_tp, dst_tp),
+        dst_tp,
+        shard_dim=0,
+        dst_width=32 // dst_tp,
+    )
+
+    for actual_rank, expected_rank in zip(actual, expected):
+        torch.testing.assert_close(actual_rank, expected_rank)
+
+
 def make_convolution_shards(
     query: torch.Tensor,
     key: torch.Tensor,
@@ -135,6 +188,31 @@ def test_qwen35_convolution_reshard_preserves_independent_groups(src_tp, dst_tp)
     expected = make_convolution_shards(query, key, value, dst_tp)
     for actual, expected_rank in zip(destination, expected):
         torch.testing.assert_close(actual, expected_rank)
+
+
+@pytest.mark.parametrize("src_tp,dst_tp", [(4, 8), (8, 4), (4, 4)])
+def test_direct_qwen35_convolution_plan_matches_oracle(src_tp, dst_tp):
+    query = torch.arange(16 * 3).reshape(16, 3)
+    key = 1_000 + torch.arange(16 * 3).reshape(16, 3)
+    value = 2_000 + torch.arange(32 * 3).reshape(32, 3)
+    source = make_convolution_shards(query, key, value, src_tp)
+    expected = reshard_qwen35_convolution_state(
+        source,
+        dst_tp,
+        key_channels_per_src_rank=16 // src_tp,
+        value_channels_per_src_rank=32 // src_tp,
+    )
+
+    actual = apply_tp_transfer_plan(
+        source,
+        plan_grouped_uniform_reshard((16, 16, 32), src_tp, dst_tp),
+        dst_tp,
+        shard_dim=0,
+        dst_width=64 // dst_tp,
+    )
+
+    for actual_rank, expected_rank in zip(actual, expected):
+        torch.testing.assert_close(actual_rank, expected_rank)
 
 
 def test_plain_rank_concatenation_is_not_a_valid_qkv_reshard():
@@ -216,4 +294,51 @@ def test_kv_reshard_rejects_incompatible_head_topology(
             dst_tp,
             total_kv_heads=total_kv_heads,
             head_dim=0,
+        )
+
+
+def test_transfer_plan_rejects_destination_gaps():
+    source = (torch.arange(4),)
+    with pytest.raises(ValueError, match="destination gaps"):
+        apply_tp_transfer_plan(
+            source,
+            (TPTransferSlice(0, 0, 0, 0, 3),),
+            1,
+            shard_dim=0,
+            dst_width=4,
+        )
+
+
+def test_transfer_plan_rejects_overlapping_writes():
+    source = (torch.arange(4),)
+    with pytest.raises(ValueError, match="overlapping writes"):
+        apply_tp_transfer_plan(
+            source,
+            (
+                TPTransferSlice(0, 0, 0, 0, 3),
+                TPTransferSlice(0, 0, 2, 2, 2),
+            ),
+            1,
+            shard_dim=0,
+            dst_width=4,
+        )
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        TPTransferSlice(1, 0, 0, 0, 1),
+        TPTransferSlice(0, 1, 0, 0, 1),
+        TPTransferSlice(0, 0, 4, 0, 1),
+        TPTransferSlice(0, 0, 0, 4, 1),
+    ],
+)
+def test_transfer_plan_rejects_out_of_bounds_entries(entry):
+    with pytest.raises(ValueError, match="out of bounds"):
+        apply_tp_transfer_plan(
+            (torch.arange(4),),
+            (entry,),
+            1,
+            shard_dim=0,
+            dst_width=4,
         )
