@@ -222,6 +222,8 @@ def test_idle_remote_prefill_step_polls_without_running_model():
         prefill_stopped_by_token_budget=0,
         prefill_stopped_by_sequence_capacity=0,
         prefill_stopped_by_kv_capacity=0,
+        prefill_stopped_by_decode_kv_reservation=0,
+        last_decode_kv_reserve_blocks=0,
     )
     engine.metrics = SimpleNamespace(record_scheduler_state=Mock())
     engine.model_runner = SimpleNamespace(call=Mock())
@@ -829,6 +831,8 @@ def test_remote_prefill_capacity_snapshot_reports_live_routing_inputs():
         "prefill_stopped_by_token_budget": 0,
         "prefill_stopped_by_sequence_capacity": 0,
         "prefill_stopped_by_kv_capacity": 0,
+        "prefill_stopped_by_decode_kv_reservation": 0,
+        "decode_kv_reserve_blocks": 0,
         "transfer_slots_total": 2,
         "transfer_slots_used": 2,
         "transfer_slots_free": 0,

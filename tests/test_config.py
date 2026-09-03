@@ -103,6 +103,11 @@ def test_invalid_preemption_policy_is_rejected(monkeypatch, tmp_path):
         make_config(monkeypatch, tmp_path, preemption_policy="smallest")
 
 
+def test_decode_kv_reservation_requires_boolean(monkeypatch, tmp_path):
+    with pytest.raises(ValueError, match="enable_decode_kv_reservation"):
+        make_config(monkeypatch, tmp_path, enable_decode_kv_reservation=1)
+
+
 def test_negative_prefill_starvation_threshold_is_rejected(monkeypatch, tmp_path):
     with pytest.raises(ValueError, match="prefill_starvation_threshold"):
         make_config(

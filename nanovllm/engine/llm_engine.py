@@ -1195,6 +1195,12 @@ class LLMEngine:
             prefill_stopped_by_kv_capacity=(
                 self.scheduler.prefill_stopped_by_kv_capacity
             ),
+            prefill_stopped_by_decode_kv_reservation=(
+                self.scheduler.prefill_stopped_by_decode_kv_reservation
+            ),
+            decode_kv_reserve_blocks=(
+                self.scheduler.last_decode_kv_reserve_blocks
+            ),
         )
         if not seqs:
             return [], 0, 0, 0

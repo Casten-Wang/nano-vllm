@@ -62,6 +62,7 @@ class Config:
     prefill_starvation_threshold: int = 0
     prefill_starvation_token_budget: int = 256
     preemption_policy: str = "fcfs"
+    enable_decode_kv_reservation: bool = False
     int8_partitioned_decode_threshold: int = 8192
     int8_partitioned_decode_partition_size: int = 512
     recurrent_state_dtype: str = "float32"
@@ -109,6 +110,8 @@ class Config:
             raise ValueError("prefill_starvation_token_budget must be positive")
         if self.preemption_policy not in ("fcfs", "min_recompute"):
             raise ValueError("preemption_policy must be 'fcfs' or 'min_recompute'")
+        if not isinstance(self.enable_decode_kv_reservation, bool):
+            raise ValueError("enable_decode_kv_reservation must be a boolean")
         if self.int8_partitioned_decode_threshold <= 0:
             raise ValueError("int8_partitioned_decode_threshold must be positive")
         if self.int8_partitioned_decode_partition_size <= 0:

@@ -69,6 +69,7 @@ def write_markdown(path: Path, result: dict) -> None:
         f"- int8_partitioned_decode_partition_size: `{result['int8_partitioned_decode_partition_size']}`",
         f"- sliding_window_size: `{result['sliding_window_size']}`",
         f"- enable_dynamic_chunked_prefill: `{result['enable_dynamic_chunked_prefill']}`",
+        f"- enable_decode_kv_reservation: `{result['enable_decode_kv_reservation']}`",
         f"- execution_valid: `{result['execution_validation']['valid']}`",
         f"- generation_valid: `{result['generation_validation']['valid']}`",
         f"- execution_paths: `{','.join(result['execution_validation']['observed_paths'])}`",
@@ -103,6 +104,9 @@ def write_markdown(path: Path, result: dict) -> None:
         f"| final_kv_block_usage | {result['final_kv_block_usage']:.6f} |",
         f"| peak_used_kvcache_blocks | {result['metrics']['peak_used_kvcache_blocks']} |",
         f"| peak_kv_block_usage | {result['metrics']['peak_kv_block_usage']:.6f} |",
+        f"| preemption_count | {result['metrics']['preemption_count']} |",
+        f"| prefill_stopped_by_decode_kv_reservation | {result['metrics']['prefill_stopped_by_decode_kv_reservation']} |",
+        f"| peak_decode_kv_reserve_blocks | {result['metrics']['peak_decode_kv_reserve_blocks']} |",
         f"| pure_prefill_throughput_tok_s | {result['metrics']['pure_prefill_throughput_tok_s']:.4f} |",
         f"| pure_decode_throughput_tok_s | {result['metrics']['pure_decode_throughput_tok_s']:.4f} |",
         f"| avg_ttft_s | {result['metrics']['avg_ttft_s']:.6f} |",
@@ -154,6 +158,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--int8-partitioned-decode-partition-size", type=int, default=512)
     parser.add_argument("--sliding-window-size", type=int, default=None)
     parser.add_argument("--enable-dynamic-chunked-prefill", action="store_true")
+    parser.add_argument("--enable-decode-kv-reservation", action="store_true")
     parser.add_argument("--name", default=None, help="Result file prefix. Defaults to a prefix derived from enabled features.")
     parser.add_argument(
         "--output-stem",
@@ -177,6 +182,8 @@ def default_result_prefix(args: argparse.Namespace) -> str:
         parts.append(f"sw{args.sliding_window_size}")
     if args.enable_dynamic_chunked_prefill:
         parts.append("dynchunk")
+    if args.enable_decode_kv_reservation:
+        parts.append("decode-kv-reserve")
     if args.enforce_eager:
         parts.append("eager")
     if args.qwen35_moe_decode_backend != "sorted":
@@ -218,6 +225,7 @@ def main() -> None:
         int8_partitioned_decode_partition_size=args.int8_partitioned_decode_partition_size,
         sliding_window_size=args.sliding_window_size,
         enable_dynamic_chunked_prefill=args.enable_dynamic_chunked_prefill,
+        enable_decode_kv_reservation=args.enable_decode_kv_reservation,
     )
     # Use the effective backend in result names and comparison metadata.  For
     # GPTQ checkpoints, Config resolves the user-facing ``auto`` choice to the
@@ -315,6 +323,7 @@ def main() -> None:
         "int8_partitioned_decode_partition_size": args.int8_partitioned_decode_partition_size,
         "sliding_window_size": args.sliding_window_size,
         "enable_dynamic_chunked_prefill": args.enable_dynamic_chunked_prefill,
+        "enable_decode_kv_reservation": args.enable_decode_kv_reservation,
         "require_paths": required_paths,
         "warmup": args.warmup,
         "input_tokens": input_tokens,

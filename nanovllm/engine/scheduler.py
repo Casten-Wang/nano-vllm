@@ -58,6 +58,11 @@ class Scheduler:
             1,
         )
         self.preemption_policy = getattr(config, "preemption_policy", "fcfs")
+        self.enable_decode_kv_reservation = getattr(
+            config,
+            "enable_decode_kv_reservation",
+            False,
+        )
         self.block_manager = BlockManager(config.num_kvcache_blocks, config.kvcache_block_size)
         model_spec = getattr(config, "model_spec", None)
         self.state_manager = (
@@ -86,6 +91,8 @@ class Scheduler:
         self.prefill_stopped_by_token_budget = 0
         self.prefill_stopped_by_sequence_capacity = 0
         self.prefill_stopped_by_kv_capacity = 0
+        self.prefill_stopped_by_decode_kv_reservation = 0
+        self.last_decode_kv_reserve_blocks = 0
 
     def _mark_prefill_stop(self, reason: str) -> None:
         """Record the first admission boundary reached in this step."""
@@ -98,9 +105,22 @@ class Scheduler:
             self.prefill_stopped_by_sequence_capacity += 1
         elif reason == "kv_capacity":
             self.prefill_stopped_by_kv_capacity += 1
+        elif reason == "decode_kv_reservation":
+            self.prefill_stopped_by_decode_kv_reservation += 1
         else:
             raise ValueError(f"unknown prefill stop reason: {reason}")
         self.last_prefill_stop_reason = reason
+
+    def _mark_kv_stop(
+        self,
+        reserve_free_blocks: int,
+        fits_without_reserve: bool,
+    ) -> None:
+        self._mark_prefill_stop(
+            "decode_kv_reservation"
+            if reserve_free_blocks and fits_without_reserve
+            else "kv_capacity"
+        )
 
     def capacity_snapshot(self) -> dict[str, int | float | str | None]:
         """Return scheduler-owned capacity and admission-pressure state."""
@@ -131,7 +151,31 @@ class Scheduler:
                 self.prefill_stopped_by_sequence_capacity
             ),
             "prefill_stopped_by_kv_capacity": self.prefill_stopped_by_kv_capacity,
+            "prefill_stopped_by_decode_kv_reservation": (
+                self.prefill_stopped_by_decode_kv_reservation
+            ),
+            "decode_kv_reserve_blocks": self.last_decode_kv_reserve_blocks,
         }
+
+    def _next_decode_block_demand(
+        self,
+        scheduled: list[Sequence],
+        pending: deque[Sequence],
+    ) -> int:
+        """Count blocks required to keep active decode requests runnable."""
+
+        if not self.enable_decode_kv_reservation:
+            return 0
+        next_step_demand = sum(
+            len(seq) % self.block_size == 0
+            and seq.num_completion_tokens + 1 < seq.max_tokens
+            for seq in scheduled
+        )
+        pending_demand = sum(
+            len(seq) % self.block_size == 1
+            for seq in pending
+        )
+        return next_step_demand + pending_demand
 
     def is_finished(self):
         return (
@@ -421,6 +465,7 @@ class Scheduler:
 
     def schedule(self) -> tuple[list[Sequence], bool] | ScheduleResult:
         self.last_prefill_stop_reason = None
+        self.last_decode_kv_reserve_blocks = 0
         waiting_before = len(self.waiting)
         if self.enable_dynamic_chunked_prefill:
             result = self.schedule_dynamic_chunked_prefill()
@@ -629,6 +674,11 @@ class Scheduler:
             )
             decode_budget = max(decode_budget - prefill_reserve, 0)
         decode_seqs = self.schedule_decode_first(decode_budget)
+        decode_kv_reserve_blocks = self._next_decode_block_demand(
+            decode_seqs,
+            self.running,
+        )
+        self.last_decode_kv_reserve_blocks = decode_kv_reserve_blocks
         prefill_budget = self.max_num_batched_tokens - len(decode_seqs)
         # ``self.running`` still contains decode requests that did not fit the
         # current token budget. They continue to own KV/state slots and must be
@@ -658,6 +708,7 @@ class Scheduler:
             prefill_budget,
             prefill_batch_slots,
             admission_budget=prefill_admission_slots,
+            reserve_free_blocks=decode_kv_reserve_blocks,
         )
         # Remove requests admitted by this prefill step before considering
         # decode backfill. They have not been postprocessed yet and therefore
@@ -768,11 +819,14 @@ class Scheduler:
         seq_budget: int,
         *,
         admission_budget: int | None = None,
+        reserve_free_blocks: int = 0,
     ) -> list[Sequence]:
         if admission_budget is None:
             admission_budget = seq_budget
         if min(token_budget, seq_budget, admission_budget) < 0:
             raise ValueError("prefill budgets must be non-negative")
+        if reserve_free_blocks < 0:
+            raise ValueError("reserve_free_blocks must be non-negative")
         scheduled_seqs = []
         num_batched_tokens = 0
         admitted_seqs = 0
@@ -803,10 +857,19 @@ class Scheduler:
                             seq,
                             num_blocks=seq.num_blocks,
                             num_cached_blocks=num_cached_blocks,
+                            reserve_free_blocks=reserve_free_blocks,
                         )
                         == -1
                     ):
-                        self._mark_prefill_stop("kv_capacity")
+                        self._mark_kv_stop(
+                            reserve_free_blocks,
+                            self.block_manager.can_allocate(
+                                seq,
+                                num_blocks=seq.num_blocks,
+                                num_cached_blocks=num_cached_blocks,
+                            )
+                            != -1,
+                        )
                         break
                     self.block_manager.allocate(
                         seq,
@@ -827,8 +890,17 @@ class Scheduler:
                     seq,
                     num_blocks=target_blocks,
                     num_cached_blocks=num_cached_blocks,
+                    reserve_free_blocks=reserve_free_blocks,
                 ) == -1:
-                    self._mark_prefill_stop("kv_capacity")
+                    self._mark_kv_stop(
+                        reserve_free_blocks,
+                        self.block_manager.can_allocate(
+                            seq,
+                            num_blocks=target_blocks,
+                            num_cached_blocks=num_cached_blocks,
+                        )
+                        != -1,
+                    )
                     break
                 self.block_manager.allocate(
                     seq,
@@ -848,8 +920,15 @@ class Scheduler:
                 target_blocks = (
                     seq.num_cached_tokens + scheduled_tokens + self.block_size - 1
                 ) // self.block_size
-                if not self.block_manager.can_grow(seq, target_blocks):
-                    self._mark_prefill_stop("kv_capacity")
+                if not self.block_manager.can_grow(
+                    seq,
+                    target_blocks,
+                    reserve_free_blocks=reserve_free_blocks,
+                ):
+                    self._mark_kv_stop(
+                        reserve_free_blocks,
+                        self.block_manager.can_grow(seq, target_blocks),
+                    )
                     break
                 self.block_manager.grow(seq, target_blocks)
 

@@ -176,6 +176,7 @@ class BlockManager:
         seq: Sequence,
         num_blocks: int | None = None,
         num_cached_blocks: int | None = None,
+        reserve_free_blocks: int = 0,
     ) -> int:
         """Return reusable prefix blocks if enough free blocks are available.
 
@@ -196,6 +197,8 @@ class BlockManager:
             raise ValueError(
                 "num_cached_blocks must be between zero and num_blocks"
             )
+        if reserve_free_blocks < 0:
+            raise ValueError("reserve_free_blocks must be non-negative")
         cached_block_ids = self._get_cached_block_ids(seq, num_cached_blocks)
         cached_blocks_requiring_free_slots = sum(
             block_id not in self.used_block_ids for block_id in cached_block_ids
@@ -205,7 +208,9 @@ class BlockManager:
             - num_cached_blocks
             + cached_blocks_requiring_free_slots
         )
-        if len(self.free_block_ids) < num_new_blocks:
+        if num_new_blocks and (
+            len(self.free_block_ids) < num_new_blocks + reserve_free_blocks
+        ):
             return -1
         return num_cached_blocks
 
@@ -234,12 +239,20 @@ class BlockManager:
             seq.block_table.append(self._allocate_block())
         seq.num_cached_tokens = num_cached_blocks * self.block_size
 
-    def can_grow(self, seq: Sequence, num_blocks: int) -> bool:
+    def can_grow(
+        self,
+        seq: Sequence,
+        num_blocks: int,
+        reserve_free_blocks: int = 0,
+    ) -> bool:
         if not len(seq.block_table) <= num_blocks <= seq.num_blocks:
             raise ValueError(
                 f"num_blocks must be in [{len(seq.block_table)}, {seq.num_blocks}]"
             )
-        return len(self.free_block_ids) >= num_blocks - len(seq.block_table)
+        if reserve_free_blocks < 0:
+            raise ValueError("reserve_free_blocks must be non-negative")
+        growth = num_blocks - len(seq.block_table)
+        return growth == 0 or len(self.free_block_ids) >= growth + reserve_free_blocks
 
     def grow(self, seq: Sequence, num_blocks: int):
         if not self.can_grow(seq, num_blocks):

@@ -141,6 +141,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--int8-partitioned-decode-partition-size", type=int, default=512)
     parser.add_argument("--sliding-window-size", type=int, default=None)
     parser.add_argument("--enable-dynamic-chunked-prefill", action="store_true")
+    parser.add_argument("--enable-decode-kv-reservation", action="store_true")
     parser.add_argument(
         "--prefill-starvation-threshold",
         type=int,
@@ -219,6 +220,7 @@ def main() -> None:
         int8_partitioned_decode_partition_size=args.int8_partitioned_decode_partition_size,
         sliding_window_size=args.sliding_window_size,
         enable_dynamic_chunked_prefill=args.enable_dynamic_chunked_prefill,
+        enable_decode_kv_reservation=args.enable_decode_kv_reservation,
         prefill_starvation_threshold=args.prefill_starvation_threshold,
         prefill_starvation_token_budget=args.prefill_starvation_token_budget,
         preemption_policy=args.preemption_policy,
@@ -414,6 +416,7 @@ def main() -> None:
         "int8_partitioned_decode_partition_size": args.int8_partitioned_decode_partition_size,
         "sliding_window_size": args.sliding_window_size,
         "enable_dynamic_chunked_prefill": args.enable_dynamic_chunked_prefill,
+        "enable_decode_kv_reservation": args.enable_decode_kv_reservation,
         "prefill_starvation_threshold": args.prefill_starvation_threshold,
         "prefill_starvation_token_budget": args.prefill_starvation_token_budget,
         "preemption_policy": args.preemption_policy,
@@ -477,6 +480,8 @@ def main() -> None:
             prefix += f"_int8_{args.kv_dequant_backend}"
         if args.enable_dynamic_chunked_prefill:
             prefix += "_dynchunk"
+        if args.enable_decode_kv_reservation:
+            prefix += "_decode_kv_reserve"
         if args.prefill_starvation_threshold:
             prefix += (
                 f"_fair{args.prefill_starvation_threshold}"

@@ -95,6 +95,8 @@ class EngineMetricsTest(unittest.TestCase):
             prefill_stopped_by_token_budget=11,
             prefill_stopped_by_sequence_capacity=12,
             prefill_stopped_by_kv_capacity=13,
+            prefill_stopped_by_decode_kv_reservation=14,
+            decode_kv_reserve_blocks=3,
         )
         result = metrics.to_dict()
 
@@ -108,6 +110,8 @@ class EngineMetricsTest(unittest.TestCase):
         self.assertEqual(result["prefill_stopped_by_token_budget"], 11)
         self.assertEqual(result["prefill_stopped_by_sequence_capacity"], 12)
         self.assertEqual(result["prefill_stopped_by_kv_capacity"], 13)
+        self.assertEqual(result["prefill_stopped_by_decode_kv_reservation"], 14)
+        self.assertEqual(result["peak_decode_kv_reserve_blocks"], 3)
 
         metrics.reset()
         result = metrics.to_dict()
@@ -121,6 +125,8 @@ class EngineMetricsTest(unittest.TestCase):
         self.assertEqual(result["prefill_stopped_by_token_budget"], 0)
         self.assertEqual(result["prefill_stopped_by_sequence_capacity"], 0)
         self.assertEqual(result["prefill_stopped_by_kv_capacity"], 0)
+        self.assertEqual(result["prefill_stopped_by_decode_kv_reservation"], 0)
+        self.assertEqual(result["peak_decode_kv_reserve_blocks"], 0)
 
     def test_request_latency_percentiles_capture_tail_distribution(self):
         metrics = EngineMetrics()

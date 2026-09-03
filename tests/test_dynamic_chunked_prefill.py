@@ -31,6 +31,7 @@ class FakeConfig:
     enable_dynamic_chunked_prefill: bool = True
     prefill_starvation_token_budget: int = 1
     preemption_policy: str = "fcfs"
+    enable_decode_kv_reservation: bool = False
 
 
 MANAGED_MODULES = (
@@ -117,6 +118,7 @@ def make_scheduler(
     num_blocks=32,
     preemption_policy="fcfs",
     starvation_token_budget=1,
+    decode_kv_reservation=False,
     hybrid=False,
 ):
     Sequence.block_size = block_size
@@ -127,6 +129,7 @@ def make_scheduler(
             num_kvcache_blocks=num_blocks,
             preemption_policy=preemption_policy,
             prefill_starvation_token_budget=starvation_token_budget,
+            enable_decode_kv_reservation=decode_kv_reservation,
         )
     if hybrid:
         config.model_spec = SimpleNamespace(is_hybrid=True)
@@ -954,6 +957,8 @@ def test_prefill_capacity_snapshot_distinguishes_scheduler_boundaries():
         "prefill_stopped_by_token_budget": 0,
         "prefill_stopped_by_sequence_capacity": 1,
         "prefill_stopped_by_kv_capacity": 0,
+        "prefill_stopped_by_decode_kv_reservation": 0,
+        "decode_kv_reserve_blocks": 0,
     }
 
 
@@ -979,6 +984,67 @@ def test_prefill_stop_reason_resets_and_counts_token_budget_once_per_step():
     assert second.num_prefill_tokens == 1
     assert scheduler.last_prefill_stop_reason == "token_budget"
     assert scheduler.prefill_stopped_by_token_budget == 2
+
+
+def test_decode_kv_reservation_avoids_immediate_boundary_preemption():
+    def make_pressure_scheduler(enabled):
+        scheduler = make_scheduler(
+            max_tokens=2,
+            max_seqs=2,
+            block_size=4,
+            num_blocks=2,
+            decode_kv_reservation=enabled,
+        )
+        running = Sequence([1, 2, 3])
+        running.append_token(4)
+        scheduler.block_manager.allocate(running, 0)
+        running.status = SequenceStatus.RUNNING
+        running.is_prefill = False
+        running.num_cached_tokens = 3
+        scheduler.running.append(running)
+        waiting = Sequence([5, 6, 7, 8])
+        scheduler.waiting.append(waiting)
+        return scheduler, running, waiting
+
+    protected, protected_running, protected_waiting = make_pressure_scheduler(True)
+    first = protected.schedule()
+
+    assert first.decode_seqs == [protected_running]
+    assert first.prefill_seqs == []
+    assert list(protected.waiting) == [protected_waiting]
+    assert protected.last_decode_kv_reserve_blocks == 1
+    assert protected.last_prefill_stop_reason == "decode_kv_reservation"
+    assert protected.prefill_stopped_by_decode_kv_reservation == 1
+
+    protected.postprocess_mixed(first, [9])
+    second = protected.schedule()
+
+    assert second.decode_seqs == [protected_running]
+    assert protected.preemption_count == 0
+    assert len(protected_running.block_table) == 2
+
+    baseline, baseline_running, baseline_waiting = make_pressure_scheduler(False)
+    baseline_first = baseline.schedule()
+
+    assert baseline_first.decode_seqs == [baseline_running]
+    assert baseline_first.prefill_seqs == [baseline_waiting]
+    baseline.postprocess_mixed(baseline_first, [9, 10])
+    baseline.schedule()
+
+    assert baseline.preemption_count == 1
+    assert baseline_waiting in baseline.waiting
+
+
+def test_decode_kv_reservation_includes_pending_but_not_finishing_requests():
+    scheduler = make_scheduler(decode_kv_reservation=True)
+    finishing = Sequence([1, 2, 3])
+    finishing.append_token(4)
+    finishing.max_tokens = 2
+    pending = Sequence([5, 6, 7, 8])
+    pending.append_token(9)
+    scheduler.running.append(pending)
+
+    assert scheduler._next_decode_block_demand([finishing], scheduler.running) == 1
 
 
 def test_kv_pressure_workload_preempts_and_eventually_completes():

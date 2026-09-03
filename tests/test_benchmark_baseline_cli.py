@@ -23,9 +23,27 @@ def test_default_result_prefix_omits_unselected_weight_quantization():
         kv_dequant_backend="fused",
         sliding_window_size=None,
         enable_dynamic_chunked_prefill=False,
+        enable_decode_kv_reservation=False,
         enforce_eager=False,
         qwen35_moe_decode_backend="sorted",
         weight_quant_backend="auto",
     )
 
     assert benchmark_baseline.default_result_prefix(args) == "baseline"
+
+
+def test_decode_kv_reservation_is_named_in_result_prefix():
+    args = Namespace(
+        kv_cache_dtype="auto",
+        kv_dequant_backend="fused",
+        sliding_window_size=None,
+        enable_dynamic_chunked_prefill=True,
+        enable_decode_kv_reservation=True,
+        enforce_eager=False,
+        qwen35_moe_decode_backend="sorted",
+        weight_quant_backend="auto",
+    )
+
+    assert benchmark_baseline.default_result_prefix(args).endswith(
+        "dynchunk_decode-kv-reserve"
+    )
