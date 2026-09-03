@@ -123,19 +123,26 @@ class Scheduler:
             else "kv_capacity"
         )
 
-    def capacity_snapshot(self) -> dict[str, int | float | str | None]:
-        """Return scheduler-owned capacity and admission-pressure state."""
+    def _active_waiting_sequence_count(self) -> int:
+        """Count waiting requests that already own runtime capacity."""
 
-        active_waiting = sum(
+        return sum(
             bool(seq.block_table) or seq.state_slot is not None
             for seq in self.waiting
         )
-        used_sequence_slots = (
+
+    def _used_sequence_slots(self) -> int:
+        return (
             len(self.running)
             + len(self.remote_prefills)
             + len(self.remote_prefill_sources)
-            + active_waiting
+            + self._active_waiting_sequence_count()
         )
+
+    def capacity_snapshot(self) -> dict[str, int | float | str | None]:
+        """Return scheduler-owned capacity and admission-pressure state."""
+
+        used_sequence_slots = self._used_sequence_slots()
         return {
             "sequence_slots_total": self.max_num_seqs,
             "sequence_slots_used": used_sequence_slots,
@@ -256,12 +263,7 @@ class Scheduler:
             raise ValueError("remote prefill sequence must be waiting")
         if seq.block_table or seq.state_slot is not None:
             raise ValueError("remote prefill sequence already owns cache state")
-        if (
-            len(self.running)
-            + len(self.remote_prefills)
-            + len(self.remote_prefill_sources)
-            >= self.max_num_seqs
-        ):
+        if self._used_sequence_slots() >= self.max_num_seqs:
             raise RuntimeError("no sequence slot is available for remote prefill")
         target_blocks = (
             seq.num_prompt_tokens + self.block_size - 1
@@ -640,10 +642,7 @@ class Scheduler:
         # 2. Spend the remaining token and sequence budget on prefill chunks.
         # 3. Return both groups so ModelRunner can execute one mixed forward.
         decode_budget = self.max_num_batched_tokens
-        active_waiting = sum(
-            seq.state_slot is not None or bool(seq.block_table)
-            for seq in self.waiting
-        )
+        active_waiting = self._active_waiting_sequence_count()
         waiting_head_is_active = bool(self.waiting) and (
             self.waiting[0].state_slot is not None
             or bool(self.waiting[0].block_table)
@@ -699,10 +698,7 @@ class Scheduler:
             + len(self.remote_prefills)
             + len(self.remote_prefill_sources)
         )
-        active_waiting_seqs = sum(
-            seq.state_slot is not None or bool(seq.block_table)
-            for seq in self.waiting
-        )
+        active_waiting_seqs = self._active_waiting_sequence_count()
         prefill_batch_slots = max(
             self.max_num_seqs - len(decode_seqs),
             0,

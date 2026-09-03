@@ -348,6 +348,41 @@ def test_remote_prefill_reservation_counts_against_sequence_capacity():
     assert list(scheduler.waiting) == [second]
 
 
+@pytest.mark.parametrize("hybrid", [False, True])
+def test_remote_prefill_reservation_counts_partial_prefill_capacity(hybrid):
+    scheduler = make_scheduler(
+        max_tokens=4,
+        max_seqs=1,
+        block_size=4,
+        num_blocks=4,
+        hybrid=hybrid,
+    )
+    partial = Sequence(list(range(8)))
+    remote = Sequence([9, 10, 11, 12])
+    scheduler.add(partial)
+    scheduler.add(remote)
+
+    result = scheduler.schedule()
+    assert result.prefill_seqs == [partial]
+    scheduler.postprocess_mixed(result, [13])
+    assert partial in scheduler.waiting
+    assert partial.block_table
+    if hybrid:
+        assert partial.state_slot is not None
+    assert scheduler.capacity_snapshot()["sequence_slots_free"] == 0
+
+    with pytest.raises(RuntimeError, match="no sequence slot"):
+        scheduler.reserve_remote_prefill(
+            remote,
+            make_transfer("remote", tp_size=1),
+        )
+
+    assert remote in scheduler.waiting
+    assert remote.block_table == []
+    assert tuple(scheduler.remote_prefills) == ()
+    assert scheduler.capacity_snapshot()["sequence_slots_used"] == 1
+
+
 @pytest.mark.parametrize(
     ("sampling_params", "first_token_id"),
     [
