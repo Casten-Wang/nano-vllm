@@ -1015,7 +1015,7 @@ def test_heterogeneous_remote_prefill_preflight_is_read_only():
 
     result = engine.estimate_heterogeneous_remote_prefill_transfer(5, 8)
 
-    assert result is report
+    assert result == {**report, "kv_blocks": 2}
     assert result["wire_bytes"] == sum(result["source_egress_bytes"])
     assert result["wire_bytes"] == sum(result["destination_bytes"])
     assert engine.remote_prefill_capacity_snapshot() == capacity_before

@@ -33,6 +33,52 @@ class RemotePrefillDemand:
             raise ValueError("staging_bytes must be a non-negative integer")
 
 
+def demand_from_heterogeneous_transfer_preflight(
+    preflight: Mapping[str, object],
+) -> RemotePrefillDemand:
+    """Convert a verified transfer profile into decode admission pressure.
+
+    A destination must stage every byte it receives.  Source staging can be
+    smaller when replicated KV heads are read once and fanned out, so it must
+    not be used to admit destination work.
+    """
+
+    kv_blocks = preflight.get("kv_blocks")
+    wire_bytes = preflight.get("wire_bytes")
+    destination_bytes = preflight.get("destination_bytes")
+    source_egress_bytes = preflight.get("source_egress_bytes")
+    if not isinstance(destination_bytes, (tuple, list)) or not destination_bytes:
+        raise ValueError("destination_bytes must be a non-empty rank vector")
+    if not isinstance(source_egress_bytes, (tuple, list)) or not source_egress_bytes:
+        raise ValueError("source_egress_bytes must be a non-empty rank vector")
+    for name, rank_bytes in (
+        ("destination_bytes", destination_bytes),
+        ("source_egress_bytes", source_egress_bytes),
+    ):
+        if any(
+            not isinstance(value, int)
+            or isinstance(value, bool)
+            or value < 0
+            for value in rank_bytes
+        ):
+            raise ValueError(f"{name} must contain non-negative integers")
+    if (
+        not isinstance(wire_bytes, int)
+        or isinstance(wire_bytes, bool)
+        or wire_bytes < 0
+    ):
+        raise ValueError("wire_bytes must be a non-negative integer")
+    if (
+        sum(destination_bytes) != wire_bytes
+        or sum(source_egress_bytes) != wire_bytes
+    ):
+        raise ValueError("transfer rank bytes do not match wire_bytes")
+    return RemotePrefillDemand(
+        kv_blocks=kv_blocks,
+        staging_bytes=wire_bytes,
+    )
+
+
 def _capacity(snapshot: CapacitySnapshot, name: str, *, positive: bool) -> int:
     value = snapshot.get(name)
     lower_bound = 1 if positive else 0

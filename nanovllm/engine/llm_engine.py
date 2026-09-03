@@ -1005,10 +1005,11 @@ class LLMEngine:
             or destination_tp_size <= 0
         ):
             raise ValueError("destination_tp_size must be a positive integer")
-        return self.model_runner.estimate_heterogeneous_cache_transfer_for_blocks(
+        profile = self.model_runner.estimate_heterogeneous_cache_transfer_for_blocks(
             num_blocks,
             destination_tp_size,
         )
+        return {**profile, "kv_blocks": num_blocks}
 
     def _ensure_remote_prefill_staging_capacity(
         self,
