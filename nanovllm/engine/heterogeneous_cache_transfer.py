@@ -8,6 +8,8 @@ import torch
 
 from nanovllm.engine.cache_transfer import (
     TRANSFER_FORMAT_VERSION,
+    HostStagingBufferPool,
+    HostStagingLease,
     RankCacheTransfer,
 )
 from nanovllm.engine.tp_cache_reshard import (
@@ -104,6 +106,30 @@ class PeerCacheFragment:
         return sum(item.nbytes for item in self.slices)
 
 
+@dataclass(frozen=True, slots=True)
+class StagedPeerCacheFragments:
+    """Peer views backed by one exclusively owned host-staging lease."""
+
+    fragments: tuple[PeerCacheFragment, ...]
+    lease: HostStagingLease
+    staged_bytes: int
+
+    def __post_init__(self) -> None:
+        if not self.fragments:
+            raise ValueError("staged peer cache fragments must not be empty")
+        if not isinstance(self.lease, HostStagingLease):
+            raise ValueError("staged peer cache fragments require a host lease")
+        if (
+            not isinstance(self.staged_bytes, int)
+            or isinstance(self.staged_bytes, bool)
+            or self.staged_bytes <= 0
+        ):
+            raise ValueError("staged peer cache byte count must be positive")
+
+    def release(self) -> None:
+        self.lease.release()
+
+
 def _source_views(
     tensor: torch.Tensor,
     routes: tuple[TPTransferSlice, ...],
@@ -166,15 +192,6 @@ def build_qwen35_peer_cache_fragments(
         raise ValueError("source cache scale layout does not match transfer plan")
     if len(payload.recurrent_states) != len(payload.convolution_states):
         raise ValueError("source cache state layer counts do not match")
-    tensors = (
-        payload.kv_blocks,
-        *((payload.kv_scales,) if payload.kv_scales is not None else ()),
-        *payload.recurrent_states,
-        *payload.convolution_states,
-    )
-    if any(tensor.device.type != "cpu" for tensor in tensors):
-        raise ValueError("peer cache fragments require host-staged tensors")
-
     grouped: dict[int, list[PeerTensorSlice]] = {}
 
     def add(items: tuple[tuple[int, PeerTensorSlice], ...]) -> None:
@@ -243,6 +260,137 @@ def build_qwen35_peer_cache_fragments(
     if actual != expected:
         raise RuntimeError("peer cache fragments do not match capacity preflight")
     return fragments
+
+
+def stage_qwen35_peer_cache_fragments(
+    fragments: tuple[PeerCacheFragment, ...],
+    plan: Qwen35CacheTransferPlan,
+    *,
+    host_staging_pool: HostStagingBufferPool | None = None,
+) -> StagedPeerCacheFragments:
+    """Copy unique source slices once into one reusable host arena."""
+
+    if not fragments or any(
+        not isinstance(fragment, PeerCacheFragment) for fragment in fragments
+    ):
+        raise ValueError("peer cache staging requires source fragments")
+    if not isinstance(plan, Qwen35CacheTransferPlan):
+        raise ValueError("heterogeneous cache transfer plan is invalid")
+    first = fragments[0]
+    common = (
+        first.transfer_id,
+        first.src_rank,
+        first.src_tp_size,
+        first.dst_tp_size,
+        first.block_size,
+        first.cached_tokens,
+    )
+    if any(
+        (
+            fragment.transfer_id,
+            fragment.src_rank,
+            fragment.src_tp_size,
+            fragment.dst_tp_size,
+            fragment.block_size,
+            fragment.cached_tokens,
+        )
+        != common
+        for fragment in fragments
+    ):
+        raise ValueError("peer cache staging fragments are inconsistent")
+    if first.src_tp_size != len(plan.profile.source_staging_bytes):
+        raise ValueError("peer cache staging does not match transfer plan")
+
+    unique: dict[tuple[object, ...], torch.Tensor] = {}
+    item_keys: dict[int, tuple[object, ...]] = {}
+    for fragment in fragments:
+        for item in fragment.slices:
+            tensor = item.tensor
+            key = (
+                tensor.device,
+                tensor.dtype,
+                tensor.data_ptr(),
+                tuple(tensor.shape),
+                tuple(tensor.stride()),
+            )
+            unique.setdefault(key, tensor)
+            item_keys[id(item)] = key
+
+    offsets = {}
+    end = 0
+    for key, tensor in unique.items():
+        alignment = tensor.element_size()
+        end = (end + alignment - 1) // alignment * alignment
+        offsets[key] = end
+        end += tensor.numel() * tensor.element_size()
+    staged_bytes = sum(
+        tensor.numel() * tensor.element_size() for tensor in unique.values()
+    )
+    expected_staged_bytes = plan.profile.source_staging_bytes[first.src_rank]
+    if staged_bytes != expected_staged_bytes:
+        raise RuntimeError("unique source slices do not match staging preflight")
+    pin_memory = any(tensor.device.type == "cuda" for tensor in unique.values())
+    lease = (
+        host_staging_pool.acquire(end, pin_memory=pin_memory)
+        if host_staging_pool is not None
+        else HostStagingLease(
+            torch.empty(
+                end,
+                dtype=torch.uint8,
+                device="cpu",
+                pin_memory=pin_memory,
+            ),
+            None,
+        )
+    )
+    storage = lease.storage
+    if storage is None:
+        raise RuntimeError("host staging lease was released before use")
+    staged = {}
+    try:
+        cuda_devices = set()
+        for key, source in unique.items():
+            nbytes = source.numel() * source.element_size()
+            target = storage[offsets[key] : offsets[key] + nbytes]
+            target = target.view(source.dtype).reshape(source.shape)
+            target.copy_(
+                source,
+                non_blocking=source.device.type == "cuda",
+            )
+            staged[key] = target
+            if source.device.type == "cuda":
+                cuda_devices.add(source.device)
+        for device in cuda_devices:
+            torch.cuda.current_stream(device).synchronize()
+        staged_fragments = tuple(
+            PeerCacheFragment(
+                transfer_id=fragment.transfer_id,
+                src_rank=fragment.src_rank,
+                dst_rank=fragment.dst_rank,
+                src_tp_size=fragment.src_tp_size,
+                dst_tp_size=fragment.dst_tp_size,
+                block_size=fragment.block_size,
+                cached_tokens=fragment.cached_tokens,
+                slices=tuple(
+                    PeerTensorSlice(
+                        component=item.component,
+                        layer=item.layer,
+                        dst_start=item.dst_start,
+                        tensor=staged[item_keys[id(item)]],
+                    )
+                    for item in fragment.slices
+                ),
+            )
+            for fragment in fragments
+        )
+        return StagedPeerCacheFragments(
+            fragments=staged_fragments,
+            lease=lease,
+            staged_bytes=staged_bytes,
+        )
+    except BaseException:
+        lease.release()
+        raise
 
 
 def assemble_qwen35_peer_cache_fragments(

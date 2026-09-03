@@ -8,11 +8,13 @@ import torch
 
 from nanovllm.engine.cache_transfer import (
     TRANSFER_FORMAT_VERSION,
+    HostStagingBufferPool,
     RankCacheTransfer,
 )
 from nanovllm.engine.heterogeneous_cache_transfer import (
     assemble_qwen35_peer_cache_fragments,
     build_qwen35_peer_cache_fragments,
+    stage_qwen35_peer_cache_fragments,
 )
 from nanovllm.engine.cache_transfer_wire import (
     receive_peer_cache_fragment,
@@ -412,3 +414,73 @@ def test_model_runner_installs_assembled_destination_atomically():
         installed,
         transfer_id="request/attempt-1",
     )
+
+
+def test_selective_source_staging_reuses_fanout_views_and_pool():
+    plan = make_plan(with_scales=True)
+    payload = make_payload(0, 4, with_scales=True)
+    fragments = build_qwen35_peer_cache_fragments(payload, plan)
+    pool = HostStagingBufferPool()
+
+    staged = stage_qwen35_peer_cache_fragments(
+        fragments,
+        plan,
+        host_staging_pool=pool,
+    )
+
+    assert staged.staged_bytes == plan.profile.source_staging_bytes[0]
+    assert sum(fragment.nbytes for fragment in staged.fragments) == (
+        plan.profile.source_bytes[0]
+    )
+    kv_views = [
+        item.tensor
+        for fragment in staged.fragments
+        for item in fragment.slices
+        if item.component == "kv"
+    ]
+    assert len(kv_views) == 2
+    assert kv_views[0].data_ptr() == kv_views[1].data_ptr()
+    assert all(
+        item.tensor.device.type == "cpu"
+        for fragment in staged.fragments
+        for item in fragment.slices
+    )
+    assert pool.storage_stats()["leased"] == 1
+    staged.release()
+    assert pool.storage_stats()["leased"] == 0
+
+    staged_again = stage_qwen35_peer_cache_fragments(
+        fragments,
+        plan,
+        host_staging_pool=pool,
+    )
+    assert pool.storage_stats()["reuse_count"] == 1
+    staged_again.release()
+
+
+def test_selective_source_staging_omits_unused_kv_replica():
+    src_tp = 8
+    plan = build_qwen35_cache_transfer_plan(
+        src_tp_size=src_tp,
+        dst_tp_size=4,
+        total_kv_heads=2,
+        kv_bytes_per_head=2 * 2 * 2 * 4 * 2 * 4,
+        kv_scale_bytes_per_head=0,
+        recurrent_heads=32,
+        recurrent_bytes_per_head=2 * 2 * 4,
+        convolution_group_widths=(16, 16, 32),
+        convolution_bytes_per_channel=3 * 2,
+    )
+    payload = make_payload(1, src_tp, with_scales=False)
+    fragments = build_qwen35_peer_cache_fragments(payload, plan)
+
+    staged = stage_qwen35_peer_cache_fragments(fragments, plan)
+
+    assert all(
+        item.component != "kv"
+        for fragment in staged.fragments
+        for item in fragment.slices
+    )
+    assert staged.staged_bytes == plan.profile.source_staging_bytes[1]
+    assert staged.staged_bytes < payload.nbytes
+    staged.release()
