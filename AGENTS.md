@@ -225,6 +225,14 @@
   changed-file list, commit history, focused and full test results, known
   limitations, and proposed PR title and body. Submit only the reviewed commit
   SHA and text; any material change requires renewed approval.
+- Before presenting an upstream PR for approval, perform a final adversarial
+  review of the exact candidate commit. Check empty and zero-length inputs,
+  lower and upper boundaries, invalid types and values, duplicate or stale
+  state, and the relevant failure path. Run applicable tests both normally and
+  with `python -O` whenever validation could depend on `assert`; public input
+  validation must use explicit exceptions rather than removable assertions.
+  Do not submit a known-incomplete patch with the intention of fixing obvious
+  edge cases after the PR is open.
 - Keep review-ready upstream candidates local and record them for later user
   review. Waiting for that review must not block normal fork development.
 - Apply this lane to vLLM, SGLang, TensorRT-LLM, llama.cpp, LMDeploy, TGI,
