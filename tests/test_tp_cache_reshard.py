@@ -3,7 +3,11 @@ import json
 import pytest
 import torch
 
-from nanovllm.engine.cache_transfer import CacheTransferPhase
+from nanovllm.engine.cache_transfer import (
+    TRANSFER_FORMAT_VERSION,
+    CacheTransferPhase,
+    RankCacheTransfer,
+)
 from nanovllm.engine.tp_cache_reshard import (
     TPPeerTransferSession,
     TPTransferProfile,
@@ -18,6 +22,7 @@ from nanovllm.engine.tp_cache_reshard import (
     profile_tp_transfer_layout,
     reshard_kv_heads,
     reshard_qwen35_convolution_state,
+    reshard_qwen35_rank_cache_transfers,
     reshard_uniform_tensor,
 )
 
@@ -76,6 +81,106 @@ def test_qwen36_kv_cache_reshard_preserves_replicated_heads(src_tp, dst_tp):
     for actual, expected_rank in zip(destination, expected):
         torch.testing.assert_close(actual, expected_rank)
     assert all(shard.data_ptr() != global_kv.data_ptr() for shard in destination)
+
+
+@pytest.mark.parametrize("src_tp,dst_tp", [(4, 8), (8, 4)])
+@pytest.mark.parametrize("with_scales", [False, True])
+def test_qwen36_rank_cache_payload_reshard_matches_tensor_oracles(
+    src_tp,
+    dst_tp,
+    with_scales,
+):
+    global_kv = torch.arange(2 * 2 * 2 * 4 * 2 * 2).reshape(
+        2, 2, 2, 4, 2, 2
+    )
+    global_scale = torch.arange(2 * 2 * 2 * 4 * 2).reshape(2, 2, 2, 4, 2)
+    global_recurrent = torch.arange(32 * 2 * 2).reshape(32, 2, 2)
+    query = torch.arange(16 * 3).reshape(16, 3)
+    key = query + 1_000
+    value = torch.arange(32 * 3).reshape(32, 3) + 2_000
+    source_kv = make_kv_head_shards(
+        global_kv,
+        src_tp,
+        total_kv_heads=2,
+        dim=4,
+    )
+    source_scales = make_kv_head_shards(
+        global_scale,
+        src_tp,
+        total_kv_heads=2,
+        dim=4,
+    )
+    source_recurrent = make_uniform_shards(global_recurrent, src_tp, dim=0)
+    source_convolution = tuple(
+        torch.cat(parts, dim=0)
+        for parts in zip(
+            make_uniform_shards(query, src_tp, dim=0),
+            make_uniform_shards(key, src_tp, dim=0),
+            make_uniform_shards(value, src_tp, dim=0),
+        )
+    )
+    payloads = tuple(
+        RankCacheTransfer(
+            format_version=TRANSFER_FORMAT_VERSION,
+            transfer_id="request/attempt-1",
+            tensor_parallel_rank=rank,
+            tensor_parallel_size=src_tp,
+            block_size=4,
+            cached_tokens=7,
+            kv_blocks=source_kv[rank],
+            kv_scales=source_scales[rank] if with_scales else None,
+            recurrent_states=(source_recurrent[rank],),
+            convolution_states=(source_convolution[rank],),
+        )
+        for rank in range(src_tp)
+    )
+
+    destination = reshard_qwen35_rank_cache_transfers(
+        payloads,
+        dst_tp,
+        total_kv_heads=2,
+        key_channels_per_src_rank=16 // src_tp,
+        value_channels_per_src_rank=32 // src_tp,
+    )
+
+    expected_kv = make_kv_head_shards(
+        global_kv,
+        dst_tp,
+        total_kv_heads=2,
+        dim=4,
+    )
+    expected_scales = make_kv_head_shards(
+        global_scale,
+        dst_tp,
+        total_kv_heads=2,
+        dim=4,
+    )
+    expected_recurrent = make_uniform_shards(global_recurrent, dst_tp, dim=0)
+    expected_convolution = tuple(
+        torch.cat(parts, dim=0)
+        for parts in zip(
+            make_uniform_shards(query, dst_tp, dim=0),
+            make_uniform_shards(key, dst_tp, dim=0),
+            make_uniform_shards(value, dst_tp, dim=0),
+        )
+    )
+    assert len(destination) == dst_tp
+    for rank, payload in enumerate(destination):
+        assert payload.tensor_parallel_rank == rank
+        assert payload.tensor_parallel_size == dst_tp
+        torch.testing.assert_close(payload.kv_blocks, expected_kv[rank])
+        if with_scales:
+            torch.testing.assert_close(payload.kv_scales, expected_scales[rank])
+        else:
+            assert payload.kv_scales is None
+        torch.testing.assert_close(
+            payload.recurrent_states[0],
+            expected_recurrent[rank],
+        )
+        torch.testing.assert_close(
+            payload.convolution_states[0],
+            expected_convolution[rank],
+        )
 
 
 @pytest.mark.parametrize("src_tp,dst_tp", [(4, 8), (8, 4), (4, 4)])

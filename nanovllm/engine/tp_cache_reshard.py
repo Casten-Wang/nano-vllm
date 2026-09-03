@@ -13,7 +13,11 @@ import math
 
 import torch
 
-from nanovllm.engine.cache_transfer import CacheTransferPhase
+from nanovllm.engine.cache_transfer import (
+    TRANSFER_FORMAT_VERSION,
+    CacheTransferPhase,
+    RankCacheTransfer,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1077,5 +1081,125 @@ def reshard_qwen35_convolution_state(
     value_dst = reshard_uniform_tensor(value_shards, dst_tp_size, shard_dim=0)
     return tuple(
         torch.cat((query_dst[rank], key_dst[rank], value_dst[rank]), dim=0)
+        for rank in range(dst_tp_size)
+    )
+
+
+def reshard_qwen35_rank_cache_transfers(
+    payloads: Sequence[RankCacheTransfer],
+    dst_tp_size: int,
+    *,
+    total_kv_heads: int,
+    key_channels_per_src_rank: int,
+    value_channels_per_src_rank: int,
+) -> tuple[RankCacheTransfer, ...]:
+    """Build destination-rank payloads using the CPU correctness oracle."""
+
+    _validate_tp_size(dst_tp_size)
+    if not payloads or any(
+        not isinstance(payload, RankCacheTransfer) for payload in payloads
+    ):
+        raise ValueError("cache re-sharding requires source rank payloads")
+    src_tp_size = len(payloads)
+    first = payloads[0]
+    if (
+        not isinstance(first.transfer_id, str)
+        or not first.transfer_id
+        or not isinstance(first.block_size, int)
+        or isinstance(first.block_size, bool)
+        or first.block_size <= 0
+        or not isinstance(first.cached_tokens, int)
+        or isinstance(first.cached_tokens, bool)
+        or first.cached_tokens <= 0
+        or first.num_blocks
+        != (first.cached_tokens + first.block_size - 1) // first.block_size
+        or len(first.recurrent_states) != len(first.convolution_states)
+    ):
+        raise ValueError("source rank cache payload metadata is invalid")
+    common = (
+        first.transfer_id,
+        first.block_size,
+        first.cached_tokens,
+        first.num_blocks,
+        len(first.recurrent_states),
+        len(first.convolution_states),
+        first.kv_scales is not None,
+    )
+    for rank, payload in enumerate(payloads):
+        if (
+            not isinstance(payload.format_version, int)
+            or isinstance(payload.format_version, bool)
+            or payload.format_version != TRANSFER_FORMAT_VERSION
+            or not isinstance(payload.tensor_parallel_rank, int)
+            or isinstance(payload.tensor_parallel_rank, bool)
+            or payload.tensor_parallel_rank != rank
+            or not isinstance(payload.tensor_parallel_size, int)
+            or isinstance(payload.tensor_parallel_size, bool)
+            or payload.tensor_parallel_size != src_tp_size
+            or (
+                payload.transfer_id,
+                payload.block_size,
+                payload.cached_tokens,
+                payload.num_blocks,
+                len(payload.recurrent_states),
+                len(payload.convolution_states),
+                payload.kv_scales is not None,
+            )
+            != common
+        ):
+            raise ValueError("source rank cache payload metadata is inconsistent")
+        if payload.host_staging_lease is not None:
+            raise ValueError("cache re-sharding does not transfer staging leases")
+
+    destination_kv = reshard_kv_heads(
+        tuple(payload.kv_blocks for payload in payloads),
+        dst_tp_size,
+        total_kv_heads=total_kv_heads,
+        head_dim=4,
+    )
+    destination_scales = (
+        reshard_kv_heads(
+            tuple(payload.kv_scales for payload in payloads),
+            dst_tp_size,
+            total_kv_heads=total_kv_heads,
+            head_dim=4,
+        )
+        if first.kv_scales is not None
+        else (None,) * dst_tp_size
+    )
+    recurrent_by_layer = tuple(
+        reshard_uniform_tensor(
+            tuple(payload.recurrent_states[layer] for payload in payloads),
+            dst_tp_size,
+            shard_dim=0,
+        )
+        for layer in range(len(first.recurrent_states))
+    )
+    convolution_by_layer = tuple(
+        reshard_qwen35_convolution_state(
+            tuple(payload.convolution_states[layer] for payload in payloads),
+            dst_tp_size,
+            key_channels_per_src_rank=key_channels_per_src_rank,
+            value_channels_per_src_rank=value_channels_per_src_rank,
+        )
+        for layer in range(len(first.convolution_states))
+    )
+    return tuple(
+        RankCacheTransfer(
+            format_version=TRANSFER_FORMAT_VERSION,
+            transfer_id=first.transfer_id,
+            tensor_parallel_rank=rank,
+            tensor_parallel_size=dst_tp_size,
+            block_size=first.block_size,
+            cached_tokens=first.cached_tokens,
+            kv_blocks=destination_kv[rank],
+            kv_scales=destination_scales[rank],
+            recurrent_states=tuple(
+                layer[rank] for layer in recurrent_by_layer
+            ),
+            convolution_states=tuple(
+                layer[rank] for layer in convolution_by_layer
+            ),
+        )
         for rank in range(dst_tp_size)
     )
