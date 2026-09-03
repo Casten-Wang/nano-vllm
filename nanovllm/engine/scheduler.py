@@ -378,20 +378,62 @@ class Scheduler:
                     if self.prefix_cache_enabled
                     else 0
                 )
-                num_cached_blocks = self.block_manager.can_allocate(
-                    seq,
-                    num_cached_blocks=num_cached_blocks,
-                )
-                if num_cached_blocks == -1:
-                    break
-                num_tokens = seq.num_tokens - num_cached_blocks * self.block_size
+                cached_tokens = num_cached_blocks * self.block_size
+                num_tokens = seq.num_tokens - cached_tokens
             else:
+                cached_tokens = seq.num_cached_tokens
                 num_tokens = seq.num_tokens - seq.num_cached_tokens
+            if num_tokens <= 0:
+                if not seq.block_table:
+                    if (
+                        self.block_manager.can_allocate(
+                            seq,
+                            num_blocks=seq.num_blocks,
+                            num_cached_blocks=num_cached_blocks,
+                        )
+                        == -1
+                    ):
+                        break
+                    self.block_manager.allocate(
+                        seq,
+                        num_cached_blocks,
+                        num_blocks=seq.num_blocks,
+                    )
+                seq.status = SequenceStatus.RUNNING
+                self.waiting.popleft()
+                self.running.append(seq)
+                num_running += 1
+                continue
             if remaining < num_tokens and scheduled_seqs:  # only allow chunked prefill for the first seq
                 break
+            scheduled_tokens = min(num_tokens, remaining)
+            target_blocks = (
+                cached_tokens
+                + scheduled_tokens
+                + self.block_size
+                - 1
+            ) // self.block_size
             if not seq.block_table:
-                self.block_manager.allocate(seq, num_cached_blocks)
-            seq.num_scheduled_tokens = min(num_tokens, remaining)
+                target_blocks = max(target_blocks, num_cached_blocks)
+                if (
+                    self.block_manager.can_allocate(
+                        seq,
+                        num_blocks=target_blocks,
+                        num_cached_blocks=num_cached_blocks,
+                    )
+                    == -1
+                ):
+                    break
+                self.block_manager.allocate(
+                    seq,
+                    num_cached_blocks,
+                    num_blocks=target_blocks,
+                )
+            elif not self.block_manager.can_grow(seq, target_blocks):
+                break
+            else:
+                self.block_manager.grow(seq, target_blocks)
+            seq.num_scheduled_tokens = scheduled_tokens
             num_batched_tokens += seq.num_scheduled_tokens
             if seq.num_cached_tokens + seq.num_scheduled_tokens == seq.num_tokens:
                 seq.status = SequenceStatus.RUNNING

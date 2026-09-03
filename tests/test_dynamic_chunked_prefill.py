@@ -198,6 +198,70 @@ def test_legacy_scheduler_can_idle_while_remote_prefill_is_pending():
     assert scheduler.schedule() == ([], False)
 
 
+def test_legacy_chunked_prefill_allocates_kv_blocks_incrementally():
+    scheduler = make_scheduler(
+        max_tokens=4,
+        max_seqs=1,
+        block_size=4,
+        num_blocks=3,
+    )
+    scheduler.enable_dynamic_chunked_prefill = False
+    seq = Sequence(list(range(12)))
+    scheduler.add(seq)
+
+    first, is_prefill = scheduler.schedule()
+
+    assert first == [seq]
+    assert is_prefill
+    assert seq.num_scheduled_tokens == 4
+    assert len(seq.block_table) == 1
+    assert scheduler.block_manager.num_used_blocks == 1
+    scheduler.postprocess(first, [99], is_prefill=True)
+
+    second, is_prefill = scheduler.schedule()
+
+    assert second == [seq]
+    assert is_prefill
+    assert seq.num_scheduled_tokens == 4
+    assert len(seq.block_table) == 2
+    assert scheduler.block_manager.num_used_blocks == 2
+    scheduler.postprocess(second, [99], is_prefill=True)
+
+    third, is_prefill = scheduler.schedule()
+
+    assert third == [seq]
+    assert is_prefill
+    assert seq.num_scheduled_tokens == 4
+    assert len(seq.block_table) == 3
+    assert scheduler.block_manager.num_used_blocks == 3
+
+
+def test_legacy_incremental_prefill_allocates_after_cached_prefix():
+    scheduler = make_scheduler(
+        max_tokens=4,
+        max_seqs=1,
+        block_size=4,
+        num_blocks=3,
+    )
+    scheduler.enable_dynamic_chunked_prefill = False
+    original = Sequence(list(range(12)))
+    scheduler.block_manager.allocate(original, 0)
+    original.num_scheduled_tokens = len(original)
+    scheduler.block_manager.hash_blocks(original)
+    scheduler.block_manager.deallocate(original)
+    repeated = Sequence(list(range(12)))
+    scheduler.add(repeated)
+
+    scheduled, is_prefill = scheduler.schedule()
+
+    assert scheduled == [repeated]
+    assert is_prefill
+    assert repeated.num_cached_tokens == 8
+    assert repeated.num_scheduled_tokens == 4
+    assert len(repeated.block_table) == 3
+    assert scheduler.block_manager.num_used_blocks == 3
+
+
 def test_failed_remote_prefill_releases_resources_and_requeues_locally():
     scheduler = make_scheduler(
         max_tokens=8,
