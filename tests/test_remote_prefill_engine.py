@@ -179,6 +179,7 @@ def make_engine(*, tensor_parallel_size=1):
     engine.model_runner = SimpleNamespace(
         call=Mock(),
         call_rank_results=Mock(side_effect=rank_results),
+        estimate_heterogeneous_cache_transfer_for_blocks=Mock(),
     )
     engine._remote_prefill_receive_tokens = {}
     engine._remote_prefill_receive_started_at = {}
@@ -991,6 +992,74 @@ def test_remote_prefill_demand_rejects_prompt_beyond_context_limit():
 
     with pytest.raises(ValueError, match="exceeds max_model_len"):
         engine.estimate_remote_prefill_demand(33)
+
+
+def test_heterogeneous_remote_prefill_preflight_is_read_only():
+    engine = make_engine(tensor_parallel_size=4)
+    capacity_before = engine.remote_prefill_capacity_snapshot()
+    report = {
+        "source_tp_size": 4,
+        "destination_tp_size": 8,
+        "wire_bytes": 24,
+        "source_egress_bytes": (6, 6, 6, 6),
+        "source_staging_bytes": (3, 3, 3, 3),
+        "destination_bytes": (3,) * 8,
+        "source_peer_counts": (2,) * 4,
+        "destination_peer_counts": (1,) * 8,
+        "peer_bytes": (),
+        "slice_count": 8,
+    }
+    engine.model_runner.estimate_heterogeneous_cache_transfer_for_blocks.return_value = (
+        report
+    )
+
+    result = engine.estimate_heterogeneous_remote_prefill_transfer(5, 8)
+
+    assert result is report
+    assert result["wire_bytes"] == sum(result["source_egress_bytes"])
+    assert result["wire_bytes"] == sum(result["destination_bytes"])
+    assert engine.remote_prefill_capacity_snapshot() == capacity_before
+    assert engine.scheduler.is_finished()
+    engine.model_runner.estimate_heterogeneous_cache_transfer_for_blocks.assert_called_once_with(
+        2,
+        8,
+    )
+
+
+@pytest.mark.parametrize("num_prompt_tokens", [0, -1, True, 1.5])
+def test_heterogeneous_remote_prefill_preflight_rejects_invalid_prompt_lengths(
+    num_prompt_tokens,
+):
+    engine = make_engine()
+
+    with pytest.raises(ValueError, match="num_prompt_tokens must be a positive integer"):
+        engine.estimate_heterogeneous_remote_prefill_transfer(
+            num_prompt_tokens,
+            4,
+        )
+
+
+def test_heterogeneous_remote_prefill_preflight_rejects_prompt_beyond_context():
+    engine = make_engine()
+
+    with pytest.raises(ValueError, match="num_prompt_tokens exceeds max_model_len"):
+        engine.estimate_heterogeneous_remote_prefill_transfer(33, 4)
+
+
+@pytest.mark.parametrize("destination_tp_size", [0, -1, True, 1.5])
+def test_heterogeneous_remote_prefill_preflight_rejects_invalid_destination_tp(
+    destination_tp_size,
+):
+    engine = make_engine()
+
+    with pytest.raises(
+        ValueError,
+        match="destination_tp_size must be a positive integer",
+    ):
+        engine.estimate_heterogeneous_remote_prefill_transfer(
+            4,
+            destination_tp_size,
+        )
 
 
 def test_cancel_remote_prefill_reservation_releases_all_capacity():

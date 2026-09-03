@@ -950,11 +950,8 @@ class LLMEngine:
         })
         return snapshot
 
-    def estimate_remote_prefill_demand(
-        self,
-        num_prompt_tokens: int,
-    ) -> RemotePrefillDemand:
-        """Estimate decode-side resources without reserving scheduler state."""
+    def _remote_prefill_block_count(self, num_prompt_tokens: int) -> int:
+        """Validate a prompt length once for every preflight path."""
 
         if (
             not isinstance(num_prompt_tokens, int)
@@ -964,9 +961,17 @@ class LLMEngine:
             raise ValueError("num_prompt_tokens must be a positive integer")
         if num_prompt_tokens > self.config.max_model_len:
             raise ValueError("num_prompt_tokens exceeds max_model_len")
-        num_blocks = (
+        return (
             num_prompt_tokens + self.config.kvcache_block_size - 1
         ) // self.config.kvcache_block_size
+
+    def estimate_remote_prefill_demand(
+        self,
+        num_prompt_tokens: int,
+    ) -> RemotePrefillDemand:
+        """Estimate decode-side resources without reserving scheduler state."""
+
+        num_blocks = self._remote_prefill_block_count(num_prompt_tokens)
         estimates = self.model_runner.call_rank_results(
             "estimate_cache_transfer_bytes_for_blocks",
             num_blocks,
@@ -979,6 +984,30 @@ class LLMEngine:
         return RemotePrefillDemand(
             kv_blocks=num_blocks,
             staging_bytes=sum(staged_by_rank.values()),
+        )
+
+    def estimate_heterogeneous_remote_prefill_transfer(
+        self,
+        num_prompt_tokens: int,
+        destination_tp_size: int,
+    ) -> dict[str, object]:
+        """Plan heterogeneous-TP capacity without reserving or moving state.
+
+        This is a control-plane preflight for placement and admission.  It
+        does not make the current remote-prefill transport capable of moving
+        cache state between different tensor-parallel sizes.
+        """
+
+        num_blocks = self._remote_prefill_block_count(num_prompt_tokens)
+        if (
+            not isinstance(destination_tp_size, int)
+            or isinstance(destination_tp_size, bool)
+            or destination_tp_size <= 0
+        ):
+            raise ValueError("destination_tp_size must be a positive integer")
+        return self.model_runner.estimate_heterogeneous_cache_transfer_for_blocks(
+            num_blocks,
+            destination_tp_size,
         )
 
     def _ensure_remote_prefill_staging_capacity(
