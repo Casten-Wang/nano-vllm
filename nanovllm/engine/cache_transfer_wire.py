@@ -547,7 +547,7 @@ class PendingRankCacheSend:
                     remaining = self._deadline - monotonic()
                     if remaining <= 0:
                         raise TimeoutError(
-                            "cache transfer endpoint connection timed out"
+                            "cache transfer send deadline expired"
                         )
                     sleep(min(0.01, remaining))
             with self._lock:
