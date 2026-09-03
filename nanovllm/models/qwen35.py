@@ -10,6 +10,7 @@ from nanovllm.models.qwen35_attention import Qwen35Attention, Qwen35KeyBufferPoo
 from nanovllm.models.qwen35_gated_delta import Qwen35GatedDeltaNet
 from nanovllm.models.moe_dispatch import BatchedExpertWeightBufferPool
 from nanovllm.models.qwen35_moe import (
+    ResidentFP8WeightBufferPool,
     Qwen35Experts,
     Qwen35RMSNorm,
     Qwen35SparseMoeBlock,
@@ -72,6 +73,7 @@ class Qwen35Model(nn.Module):
         )
         self.full_attention_key_buffer_pool = Qwen35KeyBufferPool()
         self.moe_decode_weight_buffer_pool = BatchedExpertWeightBufferPool()
+        self.resident_fp8_weight_buffer_pool = ResidentFP8WeightBufferPool()
         for layer in self.layers:
             if isinstance(getattr(layer, "self_attn", None), Qwen35Attention):
                 layer.self_attn.key_buffer_pool = (
@@ -80,6 +82,9 @@ class Qwen35Model(nn.Module):
             if isinstance(layer.mlp.experts, Qwen35Experts):
                 layer.mlp.experts.decode_weight_buffer_pool = (
                     self.moe_decode_weight_buffer_pool
+                )
+                layer.mlp.experts.resident_weight_buffer_pool = (
+                    self.resident_fp8_weight_buffer_pool
                 )
         self.norm = Qwen35RMSNorm(
             int(config.hidden_size), eps=float(config.rms_norm_eps)

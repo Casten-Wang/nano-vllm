@@ -85,6 +85,9 @@ def load_qwen35_module():
     modules["nanovllm.models.qwen35_moe"].Qwen35SparseMoeBlock = FakeMoe
     modules["nanovllm.models.qwen35_moe"].Qwen35Experts = FakeExperts
     modules[
+        "nanovllm.models.qwen35_moe"
+    ].ResidentFP8WeightBufferPool = FakeWeightBufferPool
+    modules[
         "nanovllm.models.moe_dispatch"
     ].BatchedExpertWeightBufferPool = FakeWeightBufferPool
     saved = {name: sys.modules.get(name) for name in modules}

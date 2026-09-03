@@ -386,6 +386,7 @@ class ModelRunner:
         pools = {}
         dequant_pools = {}
         moe_weight_pools = {}
+        resident_fp8_weight_pools = {}
         qwen35_key_pools = {}
         tp_logits_stats = []
         for module in self.model.modules():
@@ -402,6 +403,9 @@ class ModelRunner:
             )
             if moe_weight_pool is not None:
                 moe_weight_pools[id(moe_weight_pool)] = moe_weight_pool
+            resident_fp8_pool = getattr(module, "resident_weight_buffer_pool", None)
+            if resident_fp8_pool is not None:
+                resident_fp8_weight_pools[id(resident_fp8_pool)] = resident_fp8_pool
             qwen35_key_pool = getattr(module, "key_buffer_pool", None)
             if qwen35_key_pool is not None:
                 qwen35_key_pools[id(qwen35_key_pool)] = qwen35_key_pool
@@ -415,6 +419,9 @@ class ModelRunner:
         moe_weight_stats = [
             pool.storage_stats() for pool in moe_weight_pools.values()
         ]
+        resident_fp8_weight_stats = [
+            pool.storage_stats() for pool in resident_fp8_weight_pools.values()
+        ]
         qwen35_key_stats = [
             pool.storage_stats() for pool in qwen35_key_pools.values()
         ]
@@ -425,6 +432,9 @@ class ModelRunner:
         )
         moe_workspace_total = sum(
             item.get("workspace_bytes", 0) for item in moe_weight_stats
+        )
+        resident_fp8_workspace_total = sum(
+            item["storage_bytes"] for item in resident_fp8_weight_stats
         )
         qwen35_key_total = sum(
             item["storage_bytes"] for item in qwen35_key_stats
@@ -445,6 +455,14 @@ class ModelRunner:
             "moe_decode_weight_pool_count": len(moe_weight_stats),
             "moe_decode_weight_buffer_bytes": moe_weight_total,
             "moe_decode_workspace_bytes": moe_workspace_total,
+            "resident_fp8_weight_pool_count": len(resident_fp8_weight_stats),
+            "resident_fp8_dequant_workspace_bytes": resident_fp8_workspace_total,
+            "resident_fp8_dequant_workspace_allocation_count": sum(
+                item["allocation_count"] for item in resident_fp8_weight_stats
+            ),
+            "resident_fp8_dequant_workspace_reuse_count": sum(
+                item["reuse_count"] for item in resident_fp8_weight_stats
+            ),
             "qwen35_key_buffer_pool_count": len(qwen35_key_stats),
             "qwen35_key_buffer_bytes": qwen35_key_total,
             "qwen35_key_buffer_allocation_count": sum(
@@ -492,6 +510,7 @@ class ModelRunner:
                 + dequant_total
                 + moe_weight_total
                 + moe_workspace_total
+                + resident_fp8_workspace_total
                 + qwen35_key_total
                 + sampler_total
                 + tp_logits_total

@@ -25,6 +25,7 @@ assert MOE_SPEC is not None and MOE_SPEC.loader is not None
 MOE_MODULE = module_from_spec(MOE_SPEC)
 MOE_SPEC.loader.exec_module(MOE_MODULE)
 Qwen35Experts = MOE_MODULE.Qwen35Experts
+ResidentFP8WeightBufferPool = MOE_MODULE.ResidentFP8WeightBufferPool
 
 
 def test_block_fp8_dequantization_handles_partial_edge_blocks():
@@ -266,6 +267,8 @@ def test_resident_fp8_experts_keep_quantized_storage_and_match_reference():
     experts._load_down_fp8_slice(
         experts.down_proj, down, scale, (0, "down"), (2, 2)
     )
+    pool = ResidentFP8WeightBufferPool()
+    experts.resident_weight_buffer_pool = pool
     hidden = torch.tensor([[0.5, 1.0, -0.5, 2.0]])
     actual = experts._forward_sorted(
         hidden,
@@ -277,6 +280,11 @@ def test_resident_fp8_experts_keep_quantized_storage_and_match_reference():
     assert experts.gate_up_proj.dtype == torch.float8_e4m3fn
     assert experts.down_proj.dtype == torch.float8_e4m3fn
     torch.testing.assert_close(actual, expected)
+    assert pool.storage_stats() == {
+        "storage_bytes": 8 * 4 * hidden.element_size(),
+        "allocation_count": 1,
+        "reuse_count": 1,
+    }
 
 
 def test_resident_fp8_experts_preserve_tp8_partial_block_scales():

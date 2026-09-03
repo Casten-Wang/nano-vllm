@@ -16,6 +16,38 @@ from nanovllm.models.moe_dispatch import (
 )
 
 
+class ResidentFP8WeightBufferPool:
+    """One bounded model-wide workspace for sequential expert dequantization."""
+
+    def __init__(self) -> None:
+        self.storage: torch.Tensor | None = None
+        self.allocation_count = 0
+        self.reuse_count = 0
+
+    def acquire(self, shape, dtype, device) -> torch.Tensor:
+        required = 1
+        for size in shape:
+            required *= size
+        if (
+            self.storage is None
+            or self.storage.dtype != dtype
+            or self.storage.device != device
+            or self.storage.numel() < required
+        ):
+            self.storage = torch.empty(required, dtype=dtype, device=device)
+            self.allocation_count += 1
+        else:
+            self.reuse_count += 1
+        return self.storage[:required].view(shape)
+
+    def storage_stats(self) -> dict[str, int]:
+        return {
+            "storage_bytes": 0 if self.storage is None else self.storage.numel() * self.storage.element_size(),
+            "allocation_count": self.allocation_count,
+            "reuse_count": self.reuse_count,
+        }
+
+
 class Qwen35RMSNorm(nn.Module):
     """Qwen3.5 RMSNorm whose checkpoint stores the residual weight delta."""
 
@@ -112,6 +144,7 @@ class Qwen35Experts(nn.Module):
         self.decode_backend = decode_backend
         self.decode_chunk_size = decode_chunk_size
         self.decode_weight_buffer_pool: BatchedExpertWeightBufferPool | None = None
+        self.resident_weight_buffer_pool: ResidentFP8WeightBufferPool | None = None
         self.tp_size = dist.get_world_size()
         self.tp_rank = dist.get_rank()
         self.local_intermediate_size = divide(intermediate_size, self.tp_size)
@@ -548,11 +581,22 @@ class Qwen35Experts(nn.Module):
         br, bc = self.fp8_block_size
         offset = self.tp_rank * self.local_intermediate_size
         if projection == "gate_up":
-            parts = []
+            shape = (2 * self.local_intermediate_size, self.hidden_size)
+            output = (
+                self.resident_weight_buffer_pool.acquire(shape, dtype, self.gate_up_proj.device)
+                if self.resident_weight_buffer_pool is not None
+                else torch.empty(shape, dtype=dtype, device=self.gate_up_proj.device)
+            )
             for index, weight in enumerate(self.gate_up_proj[expert_id].chunk(2, dim=0)):
-                parts.append(dequantize_fp8_block_weight(weight, self.gate_up_scale[expert_id, index], (br, bc), output_dtype=dtype, block_offset=(offset % br, 0)))
-            return torch.cat(parts, dim=0)
-        return dequantize_fp8_block_weight(self.down_proj[expert_id], self.down_scale[expert_id], (br, bc), output_dtype=dtype, block_offset=(0, offset % bc))
+                dequantize_fp8_block_weight(weight, self.gate_up_scale[expert_id, index], (br, bc), output_dtype=dtype, block_offset=(offset % br, 0), out=output[index * self.local_intermediate_size : (index + 1) * self.local_intermediate_size])
+            return output
+        shape = tuple(self.down_proj[expert_id].shape)
+        output = (
+            self.resident_weight_buffer_pool.acquire(shape, dtype, self.down_proj.device)
+            if self.resident_weight_buffer_pool is not None
+            else torch.empty(shape, dtype=dtype, device=self.down_proj.device)
+        )
+        return dequantize_fp8_block_weight(self.down_proj[expert_id], self.down_scale[expert_id], (br, bc), output_dtype=dtype, block_offset=(0, offset % bc), out=output)
 
 
 class Qwen35SharedExpert(nn.Module):
