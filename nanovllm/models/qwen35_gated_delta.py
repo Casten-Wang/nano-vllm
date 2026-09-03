@@ -1,4 +1,4 @@
-"""Correctness-first state primitives for Qwen3.5 Gated DeltaNet."""
+"""Correctness-first state primitives for Qwen3.6 Gated DeltaNet."""
 
 from __future__ import annotations
 
@@ -72,7 +72,7 @@ def l2_normalize(
     *,
     inplace_output: bool = False,
 ) -> torch.Tensor:
-    """Match the FLA/Qwen3.5 L2 normalization convention."""
+    """Match the FLA/Qwen3.6 L2 normalization convention."""
 
     inverse_norm = torch.rsqrt((x * x).sum(dim=-1, keepdim=True) + eps)
     if inplace_output and not torch.is_grad_enabled():
@@ -468,7 +468,7 @@ def chunk_gated_delta_rule(
     inplace_state: bool = True,
     materialize_decay_scaled_qk: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Matrix-based official Qwen3.5 prefill reference.
+    """Matrix-based official Qwen3.6 prefill reference.
 
     Work inside each chunk is parallelized into matrix operations; only the
     much shorter inter-chunk state dependency remains sequential.
@@ -882,7 +882,7 @@ class Qwen35GatedRMSNorm(nn.Module):
 
 
 class Qwen35GatedDeltaNet(nn.Module):
-    """Tensor-parallel Qwen3.5 linear-attention reference layer.
+    """Tensor-parallel Qwen3.6 linear-attention reference layer.
 
     This path prioritizes official numerical semantics. It deliberately scans
     each packed sequence independently and is the oracle for later fused
@@ -1053,12 +1053,12 @@ class Qwen35GatedDeltaNet(nn.Module):
             param.data.narrow(0, destination_offset, rows).copy_(part)
             destination_offset += rows
         if destination_offset != param.shape[0]:
-            raise ValueError("packed Qwen3.5 weight rows do not match parameter")
+            raise ValueError("packed Qwen3.6 weight rows do not match parameter")
 
     def _load_qkv(self, param: nn.Parameter, weight: torch.Tensor) -> None:
         expected = 2 * self.global_key_dim + self.global_value_dim
         if tuple(weight.shape) != (expected, self.hidden_size):
-            raise ValueError("invalid Qwen3.5 in_proj_qkv weight shape")
+            raise ValueError("invalid Qwen3.6 in_proj_qkv weight shape")
         query, key, value = weight.split(
             (self.global_key_dim, self.global_key_dim, self.global_value_dim),
             dim=0,
@@ -1072,7 +1072,7 @@ class Qwen35GatedDeltaNet(nn.Module):
         expected = 2 * self.global_key_dim + self.global_value_dim
         shape = self._slice_shape(weight)
         if shape != (expected, self.hidden_size):
-            raise ValueError("invalid Qwen3.5 in_proj_qkv weight shape")
+            raise ValueError("invalid Qwen3.6 in_proj_qkv weight shape")
         def local_parts():
             offset = 0
             for width in (
@@ -1100,7 +1100,7 @@ class Qwen35GatedDeltaNet(nn.Module):
         expected = 2 * self.global_key_dim + self.global_value_dim
         shape = self._slice_shape(weight)
         if shape != (expected, self.hidden_size):
-            raise ValueError("invalid Qwen3.5 in_proj_qkv weight shape")
+            raise ValueError("invalid Qwen3.6 in_proj_qkv weight shape")
 
         destination_offset = 0
         source_offset = 0
@@ -1127,15 +1127,15 @@ class Qwen35GatedDeltaNet(nn.Module):
             destination_offset += end - start
             source_offset += width
         if destination_offset != param.shape[0]:
-            raise ValueError("packed Qwen3.5 weight rows do not match parameter")
+            raise ValueError("packed Qwen3.6 weight rows do not match parameter")
 
     def _load_conv(self, param: nn.Parameter, weight: torch.Tensor) -> None:
         if weight.ndim != 3 or weight.shape[1] != 1:
-            raise ValueError("invalid Qwen3.5 depthwise convolution weight shape")
+            raise ValueError("invalid Qwen3.6 depthwise convolution weight shape")
         flat = weight.squeeze(1)
         expected = 2 * self.global_key_dim + self.global_value_dim
         if tuple(flat.shape) != (expected, self.conv_kernel_size):
-            raise ValueError("invalid Qwen3.5 depthwise convolution weight shape")
+            raise ValueError("invalid Qwen3.6 depthwise convolution weight shape")
         query, key, value = flat.split(
             (self.global_key_dim, self.global_key_dim, self.global_value_dim),
             dim=0,
@@ -1152,7 +1152,7 @@ class Qwen35GatedDeltaNet(nn.Module):
         expected = 2 * self.global_key_dim + self.global_value_dim
         shape = self._slice_shape(weight)
         if shape != (expected, 1, self.conv_kernel_size):
-            raise ValueError("invalid Qwen3.5 depthwise convolution weight shape")
+            raise ValueError("invalid Qwen3.6 depthwise convolution weight shape")
         def local_parts():
             offset = 0
             for width in (
@@ -1314,10 +1314,10 @@ class Qwen35GatedDeltaNet(nn.Module):
         from nanovllm.utils.context import get_context
 
         if self.state_pool is None:
-            raise RuntimeError("Qwen3.5 recurrent state cache is not allocated")
+            raise RuntimeError("Qwen3.6 recurrent state cache is not allocated")
         context = get_context()
         if context.state_slots is None:
-            raise RuntimeError("Qwen3.5 execution context has no state slots")
+            raise RuntimeError("Qwen3.6 execution context has no state slots")
         ranges = self._prefill_ranges(context)
         decode_count = (
             context.decode_token_count

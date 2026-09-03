@@ -1,4 +1,4 @@
-"""Qwen3.5 full-attention layer for the text-only runtime."""
+"""Qwen3.6-compatible full-attention layer for the text-only runtime."""
 
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ class Qwen35KeyBufferPool:
 
     def copy(self, key: torch.Tensor) -> torch.Tensor:
         if torch.is_grad_enabled():
-            raise RuntimeError("Qwen3.5 key buffer is inference-only")
+            raise RuntimeError("Qwen3.6-compatible key buffer is inference-only")
         required = key.numel()
         if (
             self.storage is None
@@ -58,7 +58,7 @@ class Qwen35KeyBufferPool:
 
 
 class Qwen35Attention(nn.Module):
-    """Full attention with Qwen3.5 query gate and partial text RoPE."""
+    """Full attention with Qwen3.6 query gate and partial text RoPE."""
 
     def __init__(self, config) -> None:
         super().__init__()

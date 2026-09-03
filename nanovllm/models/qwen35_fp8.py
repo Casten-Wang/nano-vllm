@@ -1,4 +1,4 @@
-"""Correctness-first loading helpers for official Qwen3.5 block-FP8 weights."""
+"""Correctness-first loading helpers for official Qwen3.6 block-FP8 weights."""
 
 from __future__ import annotations
 

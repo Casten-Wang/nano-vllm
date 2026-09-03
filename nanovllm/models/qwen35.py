@@ -1,4 +1,4 @@
-"""Text-only Qwen3.5 MoE runtime."""
+"""Text-only Qwen3.6-compatible MoE runtime."""
 
 from __future__ import annotations
 
@@ -39,7 +39,9 @@ class Qwen35DecoderLayer(nn.Module):
         elif self.layer_type == "full_attention":
             self.self_attn = Qwen35Attention(config)
         else:
-            raise ValueError(f"unsupported Qwen3.5 layer type: {self.layer_type}")
+            raise ValueError(
+                f"unsupported Qwen3.6-compatible layer type: {self.layer_type}"
+            )
         self.mlp = Qwen35SparseMoeBlock(config)
         self.input_layernorm = Qwen35RMSNorm(
             int(config.hidden_size), eps=float(config.rms_norm_eps)

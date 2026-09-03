@@ -1,4 +1,4 @@
-"""Qwen3.5 MoE layers shared by the text-only runtime."""
+"""Qwen3.6-compatible MoE layers shared by the text-only runtime."""
 
 from __future__ import annotations
 
@@ -49,7 +49,7 @@ class ResidentFP8WeightBufferPool:
 
 
 class Qwen35RMSNorm(nn.Module):
-    """Qwen3.5 RMSNorm whose checkpoint stores the residual weight delta."""
+    """Qwen3.6 RMSNorm whose checkpoint stores the residual weight delta."""
 
     def __init__(self, hidden_size: int, eps: float = 1e-6) -> None:
         super().__init__()
