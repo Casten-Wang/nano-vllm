@@ -882,6 +882,15 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
                     }
                     for rank in range(4)
                 ],
+                "runtime_buffer_storage_by_rank": [
+                    {
+                        "rank": rank,
+                        "moe_decode_host_route_sync_count": 40,
+                        "moe_prefill_host_route_sync_count": 40,
+                        "moe_batched_dispatch_count": 0,
+                    }
+                    for rank in range(4)
+                ],
             },
             "median": {
                 "output_throughput_tok_s": 10,
@@ -927,6 +936,15 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
                         "rank": rank,
                         "total_bytes_local_rank": 500,
                         "rotary_cache_bytes_local_rank": 4096,
+                    }
+                    for rank in range(4)
+                ],
+                "runtime_buffer_storage_by_rank": [
+                    {
+                        "rank": rank,
+                        "moe_decode_host_route_sync_count": 0,
+                        "moe_prefill_host_route_sync_count": 40,
+                        "moe_batched_dispatch_count": 40,
                     }
                     for rank in range(4)
                 ],
@@ -1624,6 +1642,13 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     assert runtime["throughput_speedup"] == 2.0
     assert runtime["tpot_speedup"] == 2.0
     assert runtime["peak_memory_delta_mib"] == 4
+    assert runtime["decode_host_sync_eliminated"]
+    assert runtime["baseline_decode_host_syncs_by_rank"] == {
+        rank: 40 for rank in range(4)
+    }
+    assert runtime["candidate_decode_host_syncs_by_rank"] == {
+        rank: 0 for rank in range(4)
+    }
     assert runtime["promotion"]["promote_to_default"]
     assert report["graph_safe_moe"]["runtime_by_tp"]["tp4"]["int8"][
         "promotion"
@@ -1887,6 +1912,9 @@ def test_runtime_promotion_rejects_unstable_or_regressing_candidate():
         tpot_speedup=1.10,
         peak_memory_delta_mib=4.0,
         max_coefficient_of_variation=0.06,
+        baseline_decode_host_sync_observed=True,
+        candidate_decode_host_sync_eliminated=True,
+        candidate_batched_dispatch_observed=True,
     )
 
     assert not result["promote_to_default"]

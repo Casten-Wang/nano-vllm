@@ -143,6 +143,14 @@ class Qwen35Experts(nn.Module):
         self.num_experts = num_experts
         self.decode_backend = decode_backend
         self.decode_chunk_size = decode_chunk_size
+        self.sorted_dispatch_count = 0
+        self.sorted_decode_dispatch_count = 0
+        self.sorted_prefill_dispatch_count = 0
+        self.batched_dispatch_count = 0
+        self.host_route_sync_count = 0
+        self.host_route_sync_items = 0
+        self.decode_host_route_sync_count = 0
+        self.prefill_host_route_sync_count = 0
         self.decode_weight_buffer_pool: BatchedExpertWeightBufferPool | None = None
         self.resident_weight_buffer_pool: ResidentFP8WeightBufferPool | None = None
         self.tp_size = dist.get_world_size()
@@ -218,6 +226,18 @@ class Qwen35Experts(nn.Module):
             "weight_bytes": weight_bytes,
             "scale_bytes": scale_bytes,
             "total_bytes": weight_bytes + scale_bytes,
+        }
+
+    def dispatch_stats(self) -> dict[str, int]:
+        return {
+            "sorted_dispatch_count": self.sorted_dispatch_count,
+            "sorted_decode_dispatch_count": self.sorted_decode_dispatch_count,
+            "sorted_prefill_dispatch_count": self.sorted_prefill_dispatch_count,
+            "batched_dispatch_count": self.batched_dispatch_count,
+            "host_route_sync_count": self.host_route_sync_count,
+            "host_route_sync_items": self.host_route_sync_items,
+            "decode_host_route_sync_count": self.decode_host_route_sync_count,
+            "prefill_host_route_sync_count": self.prefill_host_route_sync_count,
         }
 
     def _load_gate_up(
@@ -444,6 +464,7 @@ class Qwen35Experts(nn.Module):
         if self.decode_backend == "batched" and (
             is_decode or decode_token_count == hidden_states.shape[0]
         ):
+            self.batched_dispatch_count += 1
             output = batched_expert_dispatch(
                 hidden_states,
                 topk_ids,
@@ -461,6 +482,7 @@ class Qwen35Experts(nn.Module):
                 dist.all_reduce(output)
             return output
         if self.decode_backend == "batched" and decode_token_count:
+            self.batched_dispatch_count += 1
             # Both partitions fully initialize their output: batched dispatch
             # overwrites the decode prefix and the sorted path clears its
             # prefill slice before accumulating routes. Avoid zeroing the
@@ -486,12 +508,14 @@ class Qwen35Experts(nn.Module):
                 topk_ids[decode_token_count:],
                 topk_weights[decode_token_count:],
                 output=output[decode_token_count:],
+                is_decode=False,
             )
         else:
             output = self._forward_sorted(
                 hidden_states,
                 topk_ids,
                 topk_weights,
+                is_decode=is_decode,
             )
         if reduce_output and self.tp_size > 1:
             dist.all_reduce(output)
@@ -504,7 +528,15 @@ class Qwen35Experts(nn.Module):
         topk_weights: torch.Tensor,
         *,
         output: torch.Tensor | None = None,
+        is_decode: bool | None = None,
     ) -> torch.Tensor:
+        if is_decode is None:
+            is_decode = hidden_states.shape[0] == 1
+        self.sorted_dispatch_count += 1
+        if is_decode:
+            self.sorted_decode_dispatch_count += 1
+        else:
+            self.sorted_prefill_dispatch_count += 1
         if output is None:
             output = torch.zeros_like(hidden_states)
         else:
@@ -517,6 +549,12 @@ class Qwen35Experts(nn.Module):
             routes = torch.stack(
                 (topk_ids[0, route_order], route_order), dim=1
             ).cpu().tolist()
+            self.host_route_sync_count += 1
+            self.host_route_sync_items += len(routes)
+            if is_decode:
+                self.decode_host_route_sync_count += 1
+            else:
+                self.prefill_host_route_sync_count += 1
             for expert_id, route_index in routes:
                 gate_up_weight = (
                     self._resident_weight("gate_up", expert_id, hidden_states.dtype)
@@ -566,6 +604,12 @@ class Qwen35Experts(nn.Module):
         # Copy only active expert metadata in one host synchronization. Decode
         # batches commonly route to far fewer than all 256 experts.
         groups = torch.stack((active_experts, counts), dim=1).cpu().tolist()
+        self.host_route_sync_count += 1
+        self.host_route_sync_items += len(groups)
+        if is_decode:
+            self.decode_host_route_sync_count += 1
+        else:
+            self.prefill_host_route_sync_count += 1
         offset = 0
         for expert_id, count in groups:
             end = offset + count

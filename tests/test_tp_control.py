@@ -847,6 +847,16 @@ class HybridStateContextTest(unittest.TestCase):
                     int8_dequant_pool=None,
                     decode_weight_buffer_pool=None,
                     key_buffer_pool=None,
+                    dispatch_stats=lambda: {
+                        "sorted_dispatch_count": 11,
+                        "sorted_decode_dispatch_count": 5,
+                        "sorted_prefill_dispatch_count": 6,
+                        "batched_dispatch_count": 13,
+                        "host_route_sync_count": 17,
+                        "host_route_sync_items": 19,
+                        "decode_host_route_sync_count": 7,
+                        "prefill_host_route_sync_count": 10,
+                    },
                     tp_logits_storage_stats=lambda: {
                         "local_bytes": 20,
                         "gathered_bytes": 28,
@@ -880,6 +890,14 @@ class HybridStateContextTest(unittest.TestCase):
         self.assertEqual(stats["moe_decode_weight_pool_count"], 1)
         self.assertEqual(stats["moe_decode_weight_buffer_bytes"], 16)
         self.assertEqual(stats["moe_decode_workspace_bytes"], 12)
+        self.assertEqual(stats["moe_sorted_dispatch_count"], 11)
+        self.assertEqual(stats["moe_sorted_decode_dispatch_count"], 5)
+        self.assertEqual(stats["moe_sorted_prefill_dispatch_count"], 6)
+        self.assertEqual(stats["moe_batched_dispatch_count"], 13)
+        self.assertEqual(stats["moe_host_route_sync_count"], 17)
+        self.assertEqual(stats["moe_host_route_sync_items"], 19)
+        self.assertEqual(stats["moe_decode_host_route_sync_count"], 7)
+        self.assertEqual(stats["moe_prefill_host_route_sync_count"], 10)
         self.assertEqual(stats["qwen35_key_buffer_pool_count"], 1)
         self.assertEqual(stats["qwen35_key_buffer_bytes"], 12)
         self.assertEqual(stats["qwen35_key_buffer_allocation_count"], 1)

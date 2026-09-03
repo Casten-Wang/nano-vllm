@@ -328,6 +328,26 @@ def test_batched_single_token_decode_matches_sorted_backend():
         actual = batched_experts(hidden, topk_ids, topk_weights)
 
     torch.testing.assert_close(actual, expected)
+    assert sorted_experts.dispatch_stats() == {
+        "sorted_dispatch_count": 1,
+        "sorted_decode_dispatch_count": 1,
+        "sorted_prefill_dispatch_count": 0,
+        "batched_dispatch_count": 0,
+        "host_route_sync_count": 1,
+        "host_route_sync_items": 2,
+        "decode_host_route_sync_count": 1,
+        "prefill_host_route_sync_count": 0,
+    }
+    assert batched_experts.dispatch_stats() == {
+        "sorted_dispatch_count": 0,
+        "sorted_decode_dispatch_count": 0,
+        "sorted_prefill_dispatch_count": 0,
+        "batched_dispatch_count": 1,
+        "host_route_sync_count": 0,
+        "host_route_sync_items": 0,
+        "decode_host_route_sync_count": 0,
+        "prefill_host_route_sync_count": 0,
+    }
 
 
 def test_batched_decode_does_not_allocate_discarded_wrapper_output():
@@ -594,6 +614,12 @@ def test_mixed_batched_backend_only_splits_decode_prefix():
     assert batched.call_count == 1
     assert torch.equal(batched.call_args.args[0], hidden[:2])
     assert batched.call_args.kwargs["output"].data_ptr() == actual[:2].data_ptr()
+    stats = mixed_experts.dispatch_stats()
+    assert stats["batched_dispatch_count"] == 1
+    assert stats["sorted_decode_dispatch_count"] == 0
+    assert stats["sorted_prefill_dispatch_count"] == 1
+    assert stats["decode_host_route_sync_count"] == 0
+    assert stats["prefill_host_route_sync_count"] == 1
 
 
 def test_mixed_batched_backend_does_not_zero_full_output_twice():

@@ -390,6 +390,7 @@ class ModelRunner:
         resident_fp8_storage_stats = []
         qwen35_key_pools = {}
         tp_logits_stats = []
+        moe_dispatch_stats = []
         for module in self.model.modules():
             pool = getattr(module, "int8_partitioned_decode_pool", None)
             if pool is not None:
@@ -418,6 +419,9 @@ class ModelRunner:
             logits_stats = getattr(module, "tp_logits_storage_stats", None)
             if logits_stats is not None:
                 tp_logits_stats.append(logits_stats())
+            dispatch_stats = getattr(module, "dispatch_stats", None)
+            if dispatch_stats is not None:
+                moe_dispatch_stats.append(dispatch_stats())
         stats = [pool.storage_stats() for pool in pools.values()]
         dequant_stats = [
             pool.storage_stats() for pool in dequant_pools.values()
@@ -461,6 +465,34 @@ class ModelRunner:
             "moe_decode_weight_pool_count": len(moe_weight_stats),
             "moe_decode_weight_buffer_bytes": moe_weight_total,
             "moe_decode_workspace_bytes": moe_workspace_total,
+            "moe_sorted_dispatch_count": sum(
+                item["sorted_dispatch_count"] for item in moe_dispatch_stats
+            ),
+            "moe_sorted_decode_dispatch_count": sum(
+                item["sorted_decode_dispatch_count"]
+                for item in moe_dispatch_stats
+            ),
+            "moe_sorted_prefill_dispatch_count": sum(
+                item["sorted_prefill_dispatch_count"]
+                for item in moe_dispatch_stats
+            ),
+            "moe_batched_dispatch_count": sum(
+                item["batched_dispatch_count"] for item in moe_dispatch_stats
+            ),
+            "moe_host_route_sync_count": sum(
+                item["host_route_sync_count"] for item in moe_dispatch_stats
+            ),
+            "moe_host_route_sync_items": sum(
+                item["host_route_sync_items"] for item in moe_dispatch_stats
+            ),
+            "moe_decode_host_route_sync_count": sum(
+                item["decode_host_route_sync_count"]
+                for item in moe_dispatch_stats
+            ),
+            "moe_prefill_host_route_sync_count": sum(
+                item["prefill_host_route_sync_count"]
+                for item in moe_dispatch_stats
+            ),
             "resident_fp8_weight_pool_count": len(resident_fp8_weight_stats),
             "resident_fp8_dequant_workspace_bytes": resident_fp8_workspace_total,
             "resident_fp8_dequant_workspace_allocation_count": sum(

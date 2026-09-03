@@ -691,6 +691,9 @@ def evaluate_moe_runtime_candidate(
     tpot_speedup: float,
     peak_memory_delta_mib: float,
     max_coefficient_of_variation: float,
+    baseline_decode_host_sync_observed: bool,
+    candidate_decode_host_sync_eliminated: bool,
+    candidate_batched_dispatch_observed: bool,
 ) -> dict:
     checks = {
         "output_parity": output_digest_matches,
@@ -703,6 +706,15 @@ def evaluate_moe_runtime_candidate(
         "tpot_speedup": tpot_speedup >= MOE_RUNTIME_MIN_TPOT_SPEEDUP,
         "peak_memory": (
             peak_memory_delta_mib <= MOE_RUNTIME_MAX_PEAK_EXTRA_MIB
+        ),
+        "baseline_decode_host_sync_observed": (
+            baseline_decode_host_sync_observed
+        ),
+        "candidate_decode_host_sync_eliminated": (
+            candidate_decode_host_sync_eliminated
+        ),
+        "candidate_batched_dispatch_observed": (
+            candidate_batched_dispatch_observed
         ),
     }
     return {
@@ -793,6 +805,43 @@ def summarize_moe_runtime(rows: list[dict]) -> dict[str, dict]:
             candidate_median["peak_torch_allocated_mib"]
             - baseline_median["peak_torch_allocated_mib"]
         )
+        baseline_rank_stats = baseline.get("storage", {}).get(
+            "runtime_buffer_storage_by_rank", []
+        )
+        candidate_rank_stats = candidate.get("storage", {}).get(
+            "runtime_buffer_storage_by_rank", []
+        )
+        expected_ranks = set(range(key[0]))
+        baseline_decode_syncs = {
+            item.get("rank"): item.get("moe_decode_host_route_sync_count")
+            for item in baseline_rank_stats
+        }
+        candidate_decode_syncs = {
+            item.get("rank"): item.get("moe_decode_host_route_sync_count")
+            for item in candidate_rank_stats
+        }
+        candidate_batched_dispatches = {
+            item.get("rank"): item.get("moe_batched_dispatch_count")
+            for item in candidate_rank_stats
+        }
+        baseline_sync_observed = (
+            set(baseline_decode_syncs) == expected_ranks
+            and all(
+                value is not None and value > 0
+                for value in baseline_decode_syncs.values()
+            )
+        )
+        candidate_sync_eliminated = (
+            set(candidate_decode_syncs) == expected_ranks
+            and all(value == 0 for value in candidate_decode_syncs.values())
+        )
+        candidate_batched_observed = (
+            set(candidate_batched_dispatches) == expected_ranks
+            and all(
+                value is not None and value > 0
+                for value in candidate_batched_dispatches.values()
+            )
+        )
         by_kv = comparisons.setdefault(tp_name, {})
         if key[2] in by_kv:
             raise ValueError(
@@ -810,12 +859,21 @@ def summarize_moe_runtime(rows: list[dict]) -> dict[str, dict]:
             "tpot_speedup": tpot_speedup,
             "peak_memory_delta_mib": peak_memory_delta_mib,
             "max_coefficient_of_variation": max_cv,
+            "baseline_decode_host_syncs_by_rank": baseline_decode_syncs,
+            "candidate_decode_host_syncs_by_rank": candidate_decode_syncs,
+            "candidate_batched_dispatches_by_rank": candidate_batched_dispatches,
+            "decode_host_sync_eliminated": (
+                baseline_sync_observed and candidate_sync_eliminated
+            ),
             "promotion": evaluate_moe_runtime_candidate(
                 output_digest_matches=output_digest_matches,
                 throughput_speedup=throughput_speedup,
                 tpot_speedup=tpot_speedup,
                 peak_memory_delta_mib=peak_memory_delta_mib,
                 max_coefficient_of_variation=max_cv,
+                baseline_decode_host_sync_observed=baseline_sync_observed,
+                candidate_decode_host_sync_eliminated=candidate_sync_eliminated,
+                candidate_batched_dispatch_observed=candidate_batched_observed,
             ),
         }
     return comparisons
