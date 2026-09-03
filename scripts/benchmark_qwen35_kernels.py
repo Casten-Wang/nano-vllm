@@ -2313,6 +2313,52 @@ def benchmark_vocab_gather_layout(args, device, dtype) -> dict:
     return result
 
 
+def benchmark_tp_greedy_candidate_pack(args, device, dtype) -> dict:
+    local_values = torch.randn(
+        args.sampling_batch,
+        device=device,
+        dtype=dtype,
+    )
+    local_ids = torch.arange(
+        args.sampling_batch,
+        device=device,
+        dtype=torch.int64,
+    ) % (args.vocab_size // args.tp_size)
+    vocab_start = args.vocab_size // args.tp_size
+    workspace = torch.empty(
+        args.sampling_batch,
+        2,
+        device=device,
+        dtype=torch.float32,
+    )
+
+    def reference():
+        return (
+            torch.stack(
+                (local_values.float(), local_ids.add(vocab_start).float()),
+                dim=-1,
+            ),
+        )
+
+    def candidate():
+        workspace[:, 0].copy_(local_values)
+        workspace[:, 1].copy_(local_ids)
+        workspace[:, 1].add_(vocab_start)
+        return (workspace,)
+
+    result = compare(
+        reference,
+        candidate,
+        device=device,
+        warmup=args.warmup,
+        iterations=args.iterations,
+        repeats=args.repeats,
+    )
+    result["candidate_reuses_workspace"] = True
+    result["workspace_bytes"] = workspace.numel() * workspace.element_size()
+    return result
+
+
 def benchmark_beta_gate(args, device, dtype, local_value_heads: int) -> dict:
     hidden = torch.randn(
         args.router_tokens,
@@ -3720,6 +3766,11 @@ def main() -> None:
                 dtype,
             ),
             "vocab_gather_layout": benchmark_vocab_gather_layout(
+                args,
+                device,
+                dtype,
+            ),
+            "tp_greedy_candidate_pack": benchmark_tp_greedy_candidate_pack(
                 args,
                 device,
                 dtype,

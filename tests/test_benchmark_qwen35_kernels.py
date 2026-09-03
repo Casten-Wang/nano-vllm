@@ -427,6 +427,27 @@ def test_vocab_gather_layout_benchmark_tracks_avoided_full_copy():
     assert all(item["max_abs_error"] == 0 for item in result["errors"])
 
 
+def test_tp_greedy_candidate_pack_benchmark_reuses_workspace():
+    args = SimpleNamespace(
+        sampling_batch=3,
+        vocab_size=16,
+        tp_size=4,
+        warmup=0,
+        iterations=1,
+        repeats=1,
+    )
+
+    result = MODULE.benchmark_tp_greedy_candidate_pack(
+        args,
+        torch.device("cpu"),
+        torch.bfloat16,
+    )
+
+    assert result["candidate_reuses_workspace"]
+    assert result["workspace_bytes"] == 3 * 2 * 4
+    assert all(item["max_abs_error"] == 0 for item in result["errors"])
+
+
 def test_decode_convolution_benchmark_tracks_reused_state():
     args = SimpleNamespace(
         decode_batch=4,
