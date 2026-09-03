@@ -80,6 +80,51 @@ class HeaderSlice:
         return self.metadata["dtype"]
 
 
+SAFETENSORS_TORCH_DTYPES = {
+    "F8_E4M3": torch.float8_e4m3fn,
+    "F8_E5M2": torch.float8_e5m2,
+    "F16": torch.float16,
+    "BF16": torch.bfloat16,
+    "F32": torch.float32,
+}
+
+
+class TrackingHeaderSlice(HeaderSlice):
+    """Header-backed meta slice that records every requested payload region."""
+
+    def __init__(self, metadata: dict) -> None:
+        super().__init__(metadata)
+        try:
+            dtype = SAFETENSORS_TORCH_DTYPES[self.get_dtype()]
+        except KeyError as error:
+            raise ValueError(
+                f"unsupported tracked safetensors dtype: {self.get_dtype()}"
+            ) from error
+        self.tensor = torch.empty(self.get_shape(), device="meta", dtype=dtype)
+        self.requested_numel = 0
+        self.requested_regions = []
+
+    def __getitem__(self, key):
+        result = self.tensor[key]
+        self.requested_numel += result.numel()
+        keys = key if isinstance(key, tuple) else (key,)
+        keys += (slice(None),) * (self.tensor.ndim - len(keys))
+        region = []
+        for dimension, item in zip(self.tensor.shape, keys):
+            if isinstance(item, slice):
+                start, stop, step = item.indices(dimension)
+                if step != 1:
+                    raise ValueError("tracked loader slices must be contiguous")
+                region.append((start, stop))
+            elif isinstance(item, int):
+                index = item if item >= 0 else dimension + item
+                region.append((index, index + 1))
+            else:
+                raise ValueError("unsupported tracked loader index")
+        self.requested_regions.append(tuple(region))
+        return result
+
+
 class HeaderCheckpoint:
     def __init__(self, headers: dict[str, dict]) -> None:
         self.headers = headers
@@ -492,6 +537,146 @@ def audit_model_headers(model, headers: dict[str, dict]) -> dict:
     }
 
 
+def audit_fp8_loader_coverage(
+    model,
+    headers: dict[str, dict],
+    block_size: tuple[int, int],
+) -> dict:
+    """Execute FP8 slice loaders on meta tensors and account for their reads."""
+
+    packed_mapping = getattr(model, "packed_modules_mapping", {})
+    map_name = getattr(model, "map_weight_name", lambda name: name)
+    resolve_checkpoint_parameter = getattr(
+        model, "resolve_checkpoint_parameter", None
+    )
+    expected = {
+        name for name, _ in model.named_parameters(remove_duplicate=False)
+    }
+    checked = tp_local = mapped_source_bytes = 0
+    requested_fp8_bytes = requested_scale_bytes = 0
+    local_bf16_temporary_bytes = non_aligned_shards = 0
+    skipped, unexpected, errors, fallbacks = [], [], [], []
+
+    for source_name, metadata in sorted(headers.items()):
+        if (
+            source_name != "weight"
+            and not source_name.endswith(".weight")
+        ) or not metadata.get("dtype", "").startswith("F8_"):
+            continue
+        checked += 1
+        scale_name = f"{source_name}_scale_inv"
+        scale_metadata = headers.get(scale_name)
+        if scale_metadata is None:
+            errors.append({"source": source_name, "error": "missing FP8 scale"})
+            continue
+        mapped = map_name(source_name)
+        if mapped is None:
+            skipped.append(source_name)
+            continue
+        packed = (
+            resolve_checkpoint_parameter(mapped)
+            if resolve_checkpoint_parameter is not None
+            else None
+        )
+        if packed is None:
+            packed = resolve_packed_parameter(mapped, packed_mapping)
+        target = packed[0] if packed is not None else mapped
+        if target not in expected:
+            unexpected.append({"source": source_name, "mapped": target})
+            continue
+
+        weight = TrackingHeaderSlice(metadata)
+        scale = TrackingHeaderSlice(scale_metadata)
+        source_weight_bytes = weight.tensor.numel() * weight.tensor.element_size()
+        source_scale_bytes = scale.tensor.numel() * scale.tensor.element_size()
+        mapped_source_bytes += source_weight_bytes + source_scale_bytes
+        parameter = model.get_parameter(target)
+        loader_name = (
+            "fp8_packed_safetensors_loader"
+            if packed is not None
+            else "fp8_safetensors_loader"
+        )
+        loader = getattr(parameter, loader_name, None)
+        if loader is None:
+            fallbacks.append(
+                {
+                    "source": source_name,
+                    "mapped": target,
+                    "reason": f"missing {loader_name}",
+                    "full_bf16_temporary_bytes": weight.tensor.numel() * 2,
+                }
+            )
+            requested_fp8_bytes += source_weight_bytes
+            requested_scale_bytes += source_scale_bytes
+            local_bf16_temporary_bytes += weight.tensor.numel() * 2
+            continue
+        try:
+            if packed is None:
+                loader(parameter, weight, scale, block_size)
+            else:
+                loader(parameter, weight, scale, packed[1], block_size)
+        except (AssertionError, IndexError, RuntimeError, ValueError) as error:
+            errors.append(
+                {"source": source_name, "mapped": target, "error": str(error)}
+            )
+            continue
+
+        tp_local += 1
+        requested_fp8_bytes += weight.requested_numel * weight.tensor.element_size()
+        requested_scale_bytes += scale.requested_numel * scale.tensor.element_size()
+        local_bf16_temporary_bytes += weight.requested_numel * 2
+        for region in weight.requested_regions:
+            if any(
+                start % block != 0 or (end != size and end % block != 0)
+                for (start, end), size, block in zip(
+                    region, weight.tensor.shape, block_size
+                )
+            ):
+                non_aligned_shards += 1
+
+    requested_payload_bytes = requested_fp8_bytes + requested_scale_bytes
+    skipped_by_prefix = {
+        prefix: sum(name.startswith(prefix) for name in skipped)
+        for prefix in ALLOWED_TEXT_ONLY_SKIP_PREFIXES
+    }
+    unclassified_skipped = [
+        name
+        for name in skipped
+        if not name.startswith(ALLOWED_TEXT_ONLY_SKIP_PREFIXES)
+    ]
+    return {
+        "fp8_weight_count": checked,
+        "tp_local_loader_count": tp_local,
+        "full_dequant_fallback_count": len(fallbacks),
+        "full_dequant_fallbacks": fallbacks,
+        "skipped_fp8_weight_count": len(skipped),
+        "skipped_fp8_by_prefix": skipped_by_prefix,
+        "unclassified_skipped_fp8_weights": unclassified_skipped,
+        "unexpected_fp8_weights": unexpected,
+        "loader_errors": errors,
+        "mapped_source_bytes": mapped_source_bytes,
+        "requested_fp8_weight_bytes": requested_fp8_bytes,
+        "requested_scale_bytes": requested_scale_bytes,
+        "requested_payload_bytes": requested_payload_bytes,
+        "avoided_payload_bytes": mapped_source_bytes - requested_payload_bytes,
+        "requested_payload_fraction": (
+            requested_payload_bytes / mapped_source_bytes
+            if mapped_source_bytes
+            else 0.0
+        ),
+        "estimated_local_bf16_temporary_bytes": local_bf16_temporary_bytes,
+        "non_aligned_local_slice_count": non_aligned_shards,
+        "valid": (
+            checked > 0
+            and tp_local == checked - len(skipped)
+            and not fallbacks
+            and not unexpected
+            and not errors
+            and not unclassified_skipped
+        ),
+    }
+
+
 def parse_tp_sizes(value: str) -> tuple[int, ...]:
     sizes = tuple(int(item.strip()) for item in value.split(",") if item.strip())
     if not sizes or any(size <= 0 for size in sizes):
@@ -606,7 +791,7 @@ def main() -> None:
         model_dtype_bytes = torch.empty((), dtype=model_dtype).element_size()
         results = {}
         for tp_size in args.tp_sizes:
-            executable_layout = quantization.format == "gptq_int4"
+            executable_layout = quantization.format in ("gptq_int4", "fp8_block")
             model = instantiate_meta_model(
                 str(model_dir),
                 tp_size,
@@ -614,7 +799,7 @@ def main() -> None:
             )
             result = audit_model_headers(
                 model,
-                headers if executable_layout else logical_headers,
+                headers if quantization.format == "gptq_int4" else logical_headers,
             )
             result.update(
                 cache_storage_metadata(model_spec, tp_size, model_dtype_bytes)
@@ -631,6 +816,12 @@ def main() -> None:
                         "quantized headers; payload loading is not validated"
                     )
                     result["checkpoint_loading"] = None
+                if quantization.format == "fp8_block":
+                    result["fp8_loader_coverage"] = audit_fp8_loader_coverage(
+                        model,
+                        headers,
+                        quantization.weight_block_size,
+                    )
                 result["quantized_tp_layout"] = audit_quantized_tp_layout(
                     unstacked_logical_headers,
                     quantization,
@@ -641,6 +832,9 @@ def main() -> None:
                     and result["quantized_tp_layout"]["valid"]
                     and quantization_audit["valid"]
                     and expert_layout_audit["valid"]
+                    and (
+                        result.get("fp8_loader_coverage", {}).get("valid", True)
+                    )
                 )
             results[f"tp{tp_size}"] = result
 

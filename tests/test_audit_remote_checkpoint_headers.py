@@ -58,6 +58,74 @@ def test_header_only_audit_counts_lazy_payload_slice():
     }
 
 
+def test_fp8_loader_coverage_executes_and_accounts_for_local_slice():
+    model = torch.nn.Module()
+    model.weight = torch.nn.Parameter(
+        torch.empty(2, 4, device="meta", dtype=torch.bfloat16)
+    )
+
+    def load_fp8(parameter, weight, scale, block_size):
+        from nanovllm.models.qwen35_fp8 import dequantize_fp8_block_weight_slice
+
+        parameter.data.copy_(
+            dequantize_fp8_block_weight_slice(
+                weight,
+                scale,
+                block_size,
+                (0, 2),
+                (0, 4),
+                output_dtype=parameter.dtype,
+            )
+        )
+
+    model.weight.fp8_safetensors_loader = load_fp8
+    headers = {
+        "weight": {"dtype": "F8_E4M3", "shape": [4, 4]},
+        "weight_scale_inv": {"dtype": "BF16", "shape": [2, 2]},
+    }
+
+    result = MODULE.audit_fp8_loader_coverage(model, headers, (2, 2))
+
+    assert result["valid"]
+    assert result["fp8_weight_count"] == 1
+    assert result["tp_local_loader_count"] == 1
+    assert result["full_dequant_fallbacks"] == []
+    assert result["mapped_source_bytes"] == 24
+    assert result["requested_payload_bytes"] == 12
+    assert result["estimated_local_bf16_temporary_bytes"] == 16
+
+
+def test_fp8_loader_coverage_reports_full_dequant_fallback():
+    model = torch.nn.Linear(4, 4, bias=False, device="meta")
+    headers = {
+        "weight": {"dtype": "F8_E4M3", "shape": [4, 4]},
+        "weight_scale_inv": {"dtype": "BF16", "shape": [2, 2]},
+    }
+
+    result = MODULE.audit_fp8_loader_coverage(model, headers, (2, 2))
+
+    assert not result["valid"]
+    assert result["full_dequant_fallback_count"] == 1
+    assert result["full_dequant_fallbacks"][0]["source"] == "weight"
+
+
+def test_fp8_loader_coverage_rejects_unclassified_skip():
+    class SkippingModel(torch.nn.Module):
+        @staticmethod
+        def map_weight_name(_name):
+            return None
+
+    headers = {
+        "audio.weight": {"dtype": "F8_E4M3", "shape": [4, 4]},
+        "audio.weight_scale_inv": {"dtype": "BF16", "shape": [2, 2]},
+    }
+
+    result = MODULE.audit_fp8_loader_coverage(SkippingModel(), headers, (2, 2))
+
+    assert not result["valid"]
+    assert result["unclassified_skipped_fp8_weights"] == ["audio.weight"]
+
+
 def test_header_only_audit_reports_shape_error():
     model = torch.nn.Linear(2, 3, bias=False, device="meta")
     headers = {"weight": {"dtype": "F32", "shape": [4, 2]}}
