@@ -58,6 +58,27 @@ reviewable steps.
 
 ## Researching established runtimes
 
+This fork is developed as an AI-infrastructure **framework** project. The main
+engineering story is how requests, scheduling, memory, model state, parallel
+workers, cache transfer, failures, and metrics fit together. Kernel work remains
+important, but it should normally support a framework-level goal instead of
+becoming an isolated collection of micro-optimizations.
+
+For every substantial framework change, keep a local interview-ready record of
+the workload and problem; before/after architecture; control-plane and
+data-plane flow; state ownership and lifetime; concurrency invariant; failure
+and fallback behavior; TP4/TP8 implications; correctness tests; reproducible
+performance evidence; rejected alternatives; and remaining limitations. For a
+kernel change, also identify its caller, launch/synchronization behavior,
+CUDA-Graph constraints, and measured end-to-end effect.
+
+When two tasks have comparable value, prioritize scheduler and request
+lifecycle, memory and cache management, distributed execution, PD
+disaggregation, serving reliability, configuration contracts, and
+observability over a standalone kernel tweak. Use kernel work when profiling
+shows that it limits one of those framework goals or when it provides a reusable
+runtime primitive.
+
 Before implementing an inference optimization, select the relevant primary
 implementations from this research matrix:
 

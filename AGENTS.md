@@ -97,6 +97,39 @@
 
 ## Optimization Tracks
 
+### AI Infra framework focus
+
+- Treat this repository primarily as an AI-infrastructure framework project,
+  aligned with framework-engineering internship work. Kernel optimization is
+  supporting evidence, not the sole identity of the project.
+- Prioritize framework-level ownership and interactions: request admission and
+  lifecycle, continuous batching, preemption and fairness, KV/recurrent-state
+  lifecycle, memory-capacity accounting, tensor/expert/pipeline parallelism,
+  CUDA Graph orchestration, prefill/decode placement and transfer, failure
+  recovery, configuration contracts, observability, and reproducible
+  evaluation.
+- Prefer changes that establish a reusable invariant or a clean boundary
+  between scheduler, model runner, cache manager, communication layer, and
+  model implementation. Keep abstractions proportional to nano-vllm's size;
+  framework depth does not justify importing production-framework complexity
+  without a measured need.
+- Evaluate kernels and tensor-level optimizations in system context. In
+  addition to isolated latency, explain which framework path invokes the
+  kernel, tensor ownership and lifetime, synchronization and stream behavior,
+  batching assumptions, graph-capture compatibility, fallback behavior, and
+  end-to-end effect on TTFT, TPOT, throughput, or capacity.
+- For each substantial framework change, preserve an interview-ready technical
+  record covering: problem and workload; architecture before and after;
+  control-plane and data-plane flow; state ownership; concurrency invariant;
+  failure and fallback semantics; multi-GPU implications; tests and benchmark
+  evidence; rejected alternatives; limitations; and the next experiment.
+- When choosing between similarly valuable tasks, prefer framework work over a
+  standalone micro-kernel: scheduling, memory management, cache lifecycle,
+  distributed execution, PD disaggregation, serving reliability, and
+  observability have priority. Pursue a kernel task first when profiling shows
+  it blocks a framework-level target or when it creates a reusable runtime
+  primitive.
+
 - Maintain three explicit optimization tracks: memory/VRAM efficiency,
   scheduling, and prefill/decode disaggregation. Every experiment must name
   its baseline, target workload, success metrics, correctness oracle, and
@@ -211,3 +244,8 @@
   this fork even when upstream historically merged patches without them.
 - Large model support and experimental optimizations remain fork features until
   an independently useful component can be proposed against current upstream.
+- Prefer upstream candidates that demonstrate framework-engineering judgment:
+  an explicit ownership or capacity invariant, a request/state transition, a
+  concurrency or failure boundary, or measurable system behavior. Small fixes
+  remain desirable, but avoid accumulating unrelated cosmetic changes merely
+  to increase PR count.
