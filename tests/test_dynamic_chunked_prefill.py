@@ -685,6 +685,38 @@ def test_fairness_reserve_accounts_for_unbound_prefix_cache_hits():
     assert scheduler.block_manager.prefix_cache_queries == 1
 
 
+def test_fairness_reserve_backfills_decode_when_prefill_cannot_allocate():
+    scheduler = make_scheduler(
+        max_tokens=8,
+        max_seqs=9,
+        block_size=4,
+        num_blocks=8,
+        starvation_token_budget=4,
+    )
+    scheduler.prefill_starvation_threshold = 1
+    scheduler.current_prefill_starvation_steps = 1
+    running = []
+    for token in range(8):
+        seq = Sequence([token + 1] * 4)
+        scheduler.block_manager.allocate(seq, 0)
+        seq.status = SequenceStatus.RUNNING
+        seq.is_prefill = False
+        seq.num_cached_tokens = len(seq)
+        scheduler.running.append(seq)
+        running.append(seq)
+    waiting = Sequence([99] * 4)
+    scheduler.waiting.append(waiting)
+
+    result = scheduler.schedule()
+
+    assert result.decode_seqs == running
+    assert result.prefill_seqs == []
+    assert result.num_decode_tokens == scheduler.max_num_batched_tokens
+    assert list(scheduler.waiting) == [waiting]
+    assert waiting.block_table == []
+    assert scheduler.preemption_count == 0
+
+
 def test_kv_pressure_workload_preempts_and_eventually_completes():
     scheduler = make_scheduler(
         max_tokens=2048,

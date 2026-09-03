@@ -389,17 +389,35 @@ class Scheduler:
         prefill_slots = max(self.max_num_seqs - active_decode_seqs, 0)
         running_before_prefill = len(self.running)
         prefill_seqs = self.schedule_prefill_with_budget(prefill_budget, prefill_slots)
+        # Remove requests admitted by this prefill step before considering
+        # decode backfill. They have not been postprocessed yet and therefore
+        # must never be selected for decode in the same scheduler step.
+        newly_admitted = []
+        while len(self.running) > running_before_prefill:
+            newly_admitted.append(self.running.pop())
+        newly_admitted.reverse()
+        unused_tokens = (
+            self.max_num_batched_tokens
+            - len(decode_seqs)
+            - sum(seq.num_scheduled_tokens for seq in prefill_seqs)
+        )
+        if unused_tokens > 0 and self.running:
+            # A fairness reserve can go unused when prefill admission fails
+            # under KV pressure. Reclaim only that unused budget for older
+            # runnable decode requests instead of returning a partial batch.
+            decode_seqs.extend(
+                self.schedule_decode_first(
+                    unused_tokens,
+                    allow_preemption=False,
+                )
+            )
         if decode_seqs:
             # Rotate decoded requests behind unscheduled running requests, but
             # keep them ahead of requests admitted by prefill in this step.
             # Otherwise a newly admitted request jumps the FCFS queue and may
             # cause an older request at the tail to be selected for preemption.
-            newly_admitted = []
-            while len(self.running) > running_before_prefill:
-                newly_admitted.append(self.running.pop())
-            newly_admitted.reverse()
             self.running.extend(decode_seqs)
-            self.running.extend(newly_admitted)
+        self.running.extend(newly_admitted)
         if not decode_seqs and not prefill_seqs:
             if self.remote_prefills:
                 return ScheduleResult(prefill_seqs=[], decode_seqs=[])
@@ -415,6 +433,8 @@ class Scheduler:
     def schedule_decode_first(
         self,
         token_budget: int | None = None,
+        *,
+        allow_preemption: bool = True,
     ) -> list[Sequence]:
         if token_budget is None:
             token_budget = self.max_num_batched_tokens
@@ -428,6 +448,9 @@ class Scheduler:
         ):
             seq = self.running.popleft()
             while not self.block_manager.can_append(seq):
+                if not allow_preemption:
+                    self.running.appendleft(seq)
+                    return scheduled_seqs
                 victim = self.select_preemption_victim(seq)
                 self.preempt(victim)
                 if victim is seq:
