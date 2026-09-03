@@ -47,6 +47,7 @@ class EngineMetrics:
     remote_prefill_receive_failed: int = 0
     remote_prefill_receive_timed_out: int = 0
     remote_prefill_receive_cancelled: int = 0
+    remote_prefill_reservation_timed_out: int = 0
     remote_prefill_receive_time: float = 0.0
     max_remote_prefill_receive_time: float = 0.0
     remote_prefill_poll_calls: int = 0
@@ -114,6 +115,7 @@ class EngineMetrics:
         self.remote_prefill_receive_failed = 0
         self.remote_prefill_receive_timed_out = 0
         self.remote_prefill_receive_cancelled = 0
+        self.remote_prefill_reservation_timed_out = 0
         self.remote_prefill_receive_time = 0.0
         self.max_remote_prefill_receive_time = 0.0
         self.remote_prefill_poll_calls = 0
@@ -275,6 +277,14 @@ class EngineMetrics:
             raise ValueError("remote prefill poll request count must be positive")
         self.remote_prefill_poll_calls += 1
         self.remote_prefill_requests_polled += request_count
+
+    def record_remote_prefill_reservation_timeout(
+        self,
+        request_count: int = 1,
+    ) -> None:
+        if request_count <= 0:
+            raise ValueError("expired reservation count must be positive")
+        self.remote_prefill_reservation_timed_out += request_count
 
     def record_remote_prefill_receive_finished(
         self,
@@ -493,6 +503,9 @@ class EngineMetrics:
             "remote_prefill_receive_failed": self.remote_prefill_receive_failed,
             "remote_prefill_receive_timed_out": self.remote_prefill_receive_timed_out,
             "remote_prefill_receive_cancelled": self.remote_prefill_receive_cancelled,
+            "remote_prefill_reservation_timed_out": (
+                self.remote_prefill_reservation_timed_out
+            ),
             "remote_prefill_receive_time_s": self.remote_prefill_receive_time,
             "avg_remote_prefill_receive_time_s": self.avg_remote_prefill_receive_time,
             "max_remote_prefill_receive_time_s": self.max_remote_prefill_receive_time,

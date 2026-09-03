@@ -809,6 +809,10 @@ class LLMEngine:
                 transfer_id,
                 None,
             )
+        if fallback:
+            self.metrics.record_remote_prefill_reservation_timeout(
+                len(fallback)
+            )
         return fallback
 
     def send_remote_prefill(

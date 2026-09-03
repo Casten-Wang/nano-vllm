@@ -188,6 +188,24 @@ class EngineMetricsTest(unittest.TestCase):
         self.assertEqual(metrics.to_dict()["remote_prefill_receive_started"], 0)
         self.assertEqual(metrics.to_dict()["remote_prefill_poll_calls"], 0)
 
+    def test_remote_prefill_reservation_timeout_is_counted_separately(self):
+        metrics = EngineMetrics()
+
+        metrics.record_remote_prefill_reservation_timeout(2)
+
+        result = metrics.to_dict()
+        self.assertEqual(result["remote_prefill_reservation_timed_out"], 2)
+        self.assertEqual(result["remote_prefill_receive_started"], 0)
+        self.assertEqual(result["remote_prefill_receive_timed_out"], 0)
+        with self.assertRaisesRegex(ValueError, "positive"):
+            metrics.record_remote_prefill_reservation_timeout(0)
+
+        metrics.reset()
+        self.assertEqual(
+            metrics.to_dict()["remote_prefill_reservation_timed_out"],
+            0,
+        )
+
     def test_remote_prefill_backpressure_metrics_track_each_direction(self):
         metrics = EngineMetrics()
 

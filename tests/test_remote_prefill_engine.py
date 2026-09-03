@@ -272,6 +272,7 @@ def test_unstarted_receive_timeout_releases_engine_staging_reservation():
         "staging_bytes_free"
     ]
     assert capacity_after["waiting_requests"] == 1
+    assert engine.metrics.to_dict()["remote_prefill_reservation_timed_out"] == 1
 
 
 def test_reservation_poll_leaves_active_receive_owned_by_engine():
