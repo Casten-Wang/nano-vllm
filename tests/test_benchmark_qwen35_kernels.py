@@ -527,7 +527,10 @@ def test_decode_convolution_benchmark_tracks_reused_state():
     assert result["reused_projection_output_mib"] == 4 * 6 * 2 / 1024 / 1024
     assert result["candidate_reuses_projection_output"]
     assert result["candidate_timing_includes_input_refresh_copy"]
-    assert all(item["max_abs_error"] == 0 for item in result["errors"])
+    # The allocating reduction and in-place accumulation use different
+    # floating-point reduction orders. Keep this aligned with the rental
+    # summarizer's BF16 buffer-reuse correctness threshold.
+    assert all(item["max_abs_error"] <= 0.05 for item in result["errors"])
 
 
 def test_router_benchmark_reuses_selected_logits_for_probabilities():
