@@ -77,6 +77,19 @@ def write_gptq_summary_inputs(root, run_id, *, backend="triton"):
             "quantization_format": "gptq_int4",
             "qwen35_moe_decode_backend": "sorted",
             "enforce_eager": True,
+            "storage": {
+                "runtime_buffer_storage_by_rank": [
+                    {
+                        "gptq_expert_workspace_pool_count": 1,
+                        "gptq_expert_workspace_bytes": (
+                            64 * (2 * (512 // tp) + 2048) * 2
+                        ),
+                        "gptq_expert_workspace_allocation_count": 1,
+                        "gptq_expert_workspace_reuse_count": 40,
+                    }
+                    for _ in range(tp)
+                ]
+            },
             "repeat_output_digests_match": True,
             "execution_paths_valid": True,
             "generation_valid": True,
@@ -90,6 +103,7 @@ def write_gptq_summary_inputs(root, run_id, *, backend="triton"):
     write(
         root / f"gptq/performance/{gptq_run_id}_matrix_summary.json",
         {
+            "workload": {"max_num_seqs": 64},
             "all_execution_paths_valid": True,
             "all_generation_valid": True,
             "all_repeat_output_digests_match": True,
@@ -616,12 +630,32 @@ def test_optional_gptq_summary_requires_actual_triton_execution(tmp_path):
     assert report["tensor_parallel_sizes"] == [4, 8]
     assert report["best_throughput"]["tensor_parallel_size"] == 8
     assert report["lowest_peak_memory"]["tensor_parallel_size"] == 8
+    assert report["workspace"]["valid"]
+    assert report["workspace"]["by_tp"]["tp4"][
+        "expected_bytes_per_rank"
+    ] == 64 * (2 * 128 + 2048) * 2
 
     write_gptq_summary_inputs(tmp_path, "run", backend="reference")
     invalid = MODULE.summarize_optional_gptq(tmp_path, "run")
     assert not invalid["valid"]
     assert not invalid["performance_valid"]
     assert not invalid["quality_valid"]
+
+
+def test_optional_gptq_summary_rejects_workspace_without_runtime_reuse(tmp_path):
+    write_gptq_summary_inputs(tmp_path, "run")
+    path = tmp_path / "gptq/performance/run-gptq_matrix_summary.json"
+    performance = json.loads(path.read_text())
+    performance["runs"][0]["storage"]["runtime_buffer_storage_by_rank"][0][
+        "gptq_expert_workspace_reuse_count"
+    ] = 0
+    write(path, performance)
+
+    report = MODULE.summarize_optional_gptq(tmp_path, "run")
+
+    assert not report["workspace"]["by_tp"]["tp4"]["valid"]
+    assert not report["performance_valid"]
+    assert not report["valid"]
 
 
 def write_attention_case(

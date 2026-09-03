@@ -180,6 +180,68 @@ def checkpoint_manifest_matches_remote(local: dict, remote: dict) -> bool:
     )
 
 
+def summarize_gptq_workspace(
+    performance_runs: list[dict],
+    max_rows: int,
+) -> dict:
+    """Require the shared GPTQ decode workspace on every measured rank."""
+
+    if (
+        not isinstance(max_rows, int)
+        or isinstance(max_rows, bool)
+        or max_rows <= 0
+    ):
+        return {"valid": False, "by_tp": {}}
+    by_tp = {}
+    for row in performance_runs:
+        tp_size = row.get("tensor_parallel_size")
+        if not isinstance(tp_size, int) or tp_size <= 0 or 512 % tp_size:
+            continue
+        expected_bytes = max_rows * (2 * (512 // tp_size) + 2048) * 2
+        ranks = row.get("storage", {}).get(
+            "runtime_buffer_storage_by_rank", []
+        )
+        valid = (
+            len(ranks) == tp_size
+            and all(
+                item.get("gptq_expert_workspace_pool_count") == 1
+                and item.get("gptq_expert_workspace_bytes") == expected_bytes
+                and item.get("gptq_expert_workspace_allocation_count") == 1
+                and item.get("gptq_expert_workspace_reuse_count", 0) > 0
+                for item in ranks
+            )
+        )
+        entry = by_tp.setdefault(
+            f"tp{tp_size}",
+            {
+                "valid": True,
+                "expected_bytes_per_rank": expected_bytes,
+                "run_count": 0,
+                "bytes_by_rank_by_run": [],
+                "allocation_count_by_rank_by_run": [],
+                "reuse_count_by_rank_by_run": [],
+            },
+        )
+        entry["valid"] = entry["valid"] and valid
+        entry["run_count"] += 1
+        entry["bytes_by_rank_by_run"].append(
+            [item.get("gptq_expert_workspace_bytes") for item in ranks]
+        )
+        entry["allocation_count_by_rank_by_run"].append(
+            [
+                item.get("gptq_expert_workspace_allocation_count")
+                for item in ranks
+            ]
+        )
+        entry["reuse_count_by_rank_by_run"].append(
+            [item.get("gptq_expert_workspace_reuse_count") for item in ranks]
+        )
+    return {
+        "valid": bool(by_tp) and all(item["valid"] for item in by_tp.values()),
+        "by_tp": by_tp,
+    }
+
+
 def summarize_optional_gptq(run_dir: Path, run_id: str) -> dict:
     """Validate and summarize the optional GPTQ rental stages."""
 
@@ -200,6 +262,10 @@ def summarize_optional_gptq(run_dir: Path, run_id: str) -> dict:
     tp_names = {
         f"tp{row.get('tensor_parallel_size')}" for row in performance_runs
     }
+    gptq_workspace = summarize_gptq_workspace(
+        performance_runs,
+        performance.get("workload", {}).get("max_num_seqs", 0),
+    )
     audit_valid = (
         audit.get("valid") is True
         and audit.get("repo") == OFFICIAL_GPTQ_CHECKPOINT_REPO
@@ -229,6 +295,7 @@ def summarize_optional_gptq(run_dir: Path, run_id: str) -> dict:
         and performance.get("all_execution_paths_valid") is True
         and performance.get("all_generation_valid") is True
         and performance.get("all_repeat_output_digests_match") is True
+        and gptq_workspace["valid"]
         and all(
             row.get("requested_weight_quant_backend") == "auto"
             and row.get("weight_quant_backend") == "triton"
@@ -281,6 +348,7 @@ def summarize_optional_gptq(run_dir: Path, run_id: str) -> dict:
         "local_checkpoint_matches_official": local_checkpoint_valid,
         "memory_preflight_valid": memory_valid,
         "performance_valid": performance_valid,
+        "workspace": gptq_workspace,
         "quality_valid": quality_valid,
         "bf16_vs_gptq_quality_valid": checkpoint_quality_valid,
         "official_checkpoint": {
