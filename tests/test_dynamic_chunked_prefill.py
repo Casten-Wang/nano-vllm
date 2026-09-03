@@ -1446,7 +1446,8 @@ def test_abort_rejects_remote_prefill_without_mutating_transfer_state():
     assert scheduler.aborted_requests == 0
 
 
-def test_randomized_dynamic_scheduler_preserves_hard_capacity_invariants():
+@pytest.mark.parametrize("hybrid", [False, True])
+def test_randomized_dynamic_scheduler_preserves_hard_capacity_invariants(hybrid):
     for seed in range(200):
         rng = random.Random(seed)
         max_seqs = rng.randint(1, 6)
@@ -1460,7 +1461,7 @@ def test_randomized_dynamic_scheduler_preserves_hard_capacity_invariants():
             starvation_token_budget=rng.randint(1, max_tokens),
             preemption_policy=rng.choice(("fcfs", "min_recompute")),
             decode_kv_reservation=rng.choice((False, True)),
-            hybrid=True,
+            hybrid=hybrid,
         )
         scheduler.prefill_starvation_threshold = rng.randint(0, 4)
         requests = [
@@ -1486,15 +1487,27 @@ def test_randomized_dynamic_scheduler_preserves_hard_capacity_invariants():
                 for seq in scheduler.waiting
             )
             assert len(scheduler.running) + active_waiting <= max_seqs
-            assert scheduler.state_manager.num_used_slots <= max_seqs
+            if scheduler.state_manager is not None:
+                assert scheduler.state_manager.num_used_slots <= max_seqs
             assert scheduler.block_manager.num_used_blocks <= num_blocks
+            owners = list(scheduler.waiting) + list(scheduler.running)
+            block_ref_counts = [0] * num_blocks
+            for seq in owners:
+                for block_id in seq.block_table:
+                    block_ref_counts[block_id] += 1
+            for block, owner_count in zip(
+                scheduler.block_manager.blocks,
+                block_ref_counts,
+            ):
+                assert block.ref_count == owner_count
             scheduler.postprocess_mixed(result, [1] * len(result.seqs))
         else:
             raise AssertionError(f"scheduler did not drain for seed {seed}")
 
         assert scheduler.is_finished()
         assert scheduler.block_manager.num_used_blocks == 0
-        assert scheduler.state_manager.num_used_slots == 0
+        if scheduler.state_manager is not None:
+            assert scheduler.state_manager.num_used_slots == 0
 
 
 if __name__ == "__main__":
