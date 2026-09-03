@@ -106,6 +106,41 @@ def validate_initial_cache_capacity(
     return available_bytes - required_bytes
 
 
+def validate_allocated_recurrent_state(
+    *,
+    num_slots: int,
+    expected_layers: int,
+    recurrent_bytes_per_sequence: int,
+    convolution_bytes_per_sequence: int,
+    stats: dict,
+) -> None:
+    """Ensure capacity planning matches the state tensors actually allocated."""
+
+    expected = {
+        "layer_count": expected_layers,
+        "recurrent_bytes_local_rank": (
+            num_slots * recurrent_bytes_per_sequence
+        ),
+        "convolution_bytes_local_rank": (
+            num_slots * convolution_bytes_per_sequence
+        ),
+    }
+    mismatches = {
+        name: (value, stats.get(name))
+        for name, value in expected.items()
+        if stats.get(name) != value
+    }
+    if mismatches:
+        details = ", ".join(
+            f"{name}: expected {expected_value}, allocated {actual_value}"
+            for name, (expected_value, actual_value) in mismatches.items()
+        )
+        raise RuntimeError(
+            "recurrent state cache allocation does not match capacity plan: "
+            + details
+        )
+
+
 class ModelRunner:
 
     def __init__(
@@ -1093,6 +1128,17 @@ class ModelRunner:
                 f"allocated {allocated_layers} recurrent state layers, expected "
                 f"{len(model_spec.linear_attention_layers)}"
             )
+        validate_allocated_recurrent_state(
+            num_slots=num_state_slots,
+            expected_layers=len(model_spec.linear_attention_layers),
+            recurrent_bytes_per_sequence=(
+                cache_plan.recurrent_bytes_per_sequence
+            ),
+            convolution_bytes_per_sequence=(
+                cache_plan.convolution_bytes_per_sequence
+            ),
+            stats=self.get_recurrent_state_stats(),
+        )
 
     def allocate_float_kv_cache(self):
         config = self.config

@@ -172,6 +172,9 @@ model_runner_module = load_model_runner_module()
 ModelRunner = model_runner_module.ModelRunner
 CONTROL_STATUS_SIZE = model_runner_module.CONTROL_STATUS_SIZE
 validate_initial_cache_capacity = model_runner_module.validate_initial_cache_capacity
+validate_allocated_recurrent_state = (
+    model_runner_module.validate_allocated_recurrent_state
+)
 
 
 def make_runner(rank: int, events):
@@ -183,6 +186,53 @@ def make_runner(rank: int, events):
 
 
 class TPControlTest(unittest.TestCase):
+    def test_allocated_recurrent_state_must_match_capacity_plan(self):
+        validate_allocated_recurrent_state(
+            num_slots=3,
+            expected_layers=30,
+            recurrent_bytes_per_sequence=100,
+            convolution_bytes_per_sequence=20,
+            stats={
+                "layer_count": 30,
+                "recurrent_bytes_local_rank": 300,
+                "convolution_bytes_local_rank": 60,
+            },
+        )
+
+    def test_allocated_recurrent_state_rejects_byte_drift(self):
+        with self.assertRaisesRegex(
+            RuntimeError,
+            r"recurrent_bytes_local_rank: expected 300, allocated 298",
+        ):
+            validate_allocated_recurrent_state(
+                num_slots=3,
+                expected_layers=30,
+                recurrent_bytes_per_sequence=100,
+                convolution_bytes_per_sequence=20,
+                stats={
+                    "layer_count": 30,
+                    "recurrent_bytes_local_rank": 298,
+                    "convolution_bytes_local_rank": 60,
+                },
+            )
+
+    def test_allocated_recurrent_state_rejects_layer_drift(self):
+        with self.assertRaisesRegex(
+            RuntimeError,
+            r"layer_count: expected 30, allocated 29",
+        ):
+            validate_allocated_recurrent_state(
+                num_slots=3,
+                expected_layers=30,
+                recurrent_bytes_per_sequence=100,
+                convolution_bytes_per_sequence=20,
+                stats={
+                    "layer_count": 29,
+                    "recurrent_bytes_local_rank": 300,
+                    "convolution_bytes_local_rank": 60,
+                },
+            )
+
     def test_kv_block_override_caps_synchronized_capacity(self):
         runner = object.__new__(ModelRunner)
         runner.rank = 0
