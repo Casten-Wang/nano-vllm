@@ -155,6 +155,51 @@ def test_host_export_preserves_order_tail_scales_and_states():
     torch.testing.assert_close(payload.convolution_states[0], convolution[0])
 
 
+def test_host_export_does_not_materialize_unused_block_index(monkeypatch):
+    source = make_float_cache()
+
+    monkeypatch.setattr(
+        torch,
+        "tensor",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("host export must not allocate a block-index tensor")
+        ),
+    )
+
+    payload = export_rank_cache(
+        source,
+        None,
+        [3, 1],
+        transfer_id="request-host-index/attempt-1",
+        tensor_parallel_rank=0,
+        tensor_parallel_size=1,
+        block_size=2,
+        cached_tokens=3,
+        to_host=True,
+    )
+
+    torch.testing.assert_close(payload.kv_blocks[:, :, 0], source[:, :, 3])
+    torch.testing.assert_close(payload.kv_blocks[:, :, 1, :1], source[:, :, 1, :1])
+
+
+@pytest.mark.parametrize("block_ids", [[], [0, 0], [-1], [4]])
+def test_host_export_validates_block_ids_without_materializing_index(block_ids):
+    source = make_float_cache()
+
+    with pytest.raises(ValueError, match="block"):
+        export_rank_cache(
+            source,
+            None,
+            block_ids,
+            transfer_id="request-host-invalid/attempt-1",
+            tensor_parallel_rank=0,
+            tensor_parallel_size=1,
+            block_size=2,
+            cached_tokens=max(len(block_ids), 1) * 2,
+            to_host=True,
+        )
+
+
 def test_transfer_byte_estimate_matches_int8_payload_with_hybrid_state():
     source = torch.arange(2 * 1 * 3 * 2 * 1 * 2, dtype=torch.int8).view(
         2, 1, 3, 2, 1, 2

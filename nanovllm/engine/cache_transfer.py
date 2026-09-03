@@ -144,18 +144,26 @@ def _validate_cache_layout(
         raise ValueError("floating-point KV cache must not include INT8 scales")
 
 
-def _block_index(
+def _validate_block_ids(
     block_ids: list[int],
     *,
     total_blocks: int,
-    device: torch.device,
-) -> torch.Tensor:
+) -> None:
     if not block_ids:
         raise ValueError("cache transfer requires at least one KV block")
     if len(block_ids) != len(set(block_ids)):
         raise ValueError("cache transfer block ids must be unique")
     if min(block_ids) < 0 or max(block_ids) >= total_blocks:
         raise ValueError("cache transfer block id is out of bounds")
+
+
+def _block_index(
+    block_ids: list[int],
+    *,
+    total_blocks: int,
+    device: torch.device,
+) -> torch.Tensor:
+    _validate_block_ids(block_ids, total_blocks=total_blocks)
     return torch.tensor(block_ids, dtype=torch.int64, device=device)
 
 
@@ -326,11 +334,7 @@ def export_rank_cache(
         raise ValueError(
             "cache transfer block count does not match cached token count"
         )
-    index = _block_index(
-        block_ids,
-        total_blocks=kv_cache.shape[2],
-        device=kv_cache.device,
-    )
+    _validate_block_ids(block_ids, total_blocks=kv_cache.shape[2])
     valid_last_block_tokens = cached_tokens % block_size
     if to_host:
         kv_blocks = _export_blocks_to_host(
@@ -360,6 +364,11 @@ def export_rank_cache(
         for device in cuda_devices:
             torch.cuda.current_stream(device).synchronize()
     else:
+        index = torch.tensor(
+            block_ids,
+            dtype=torch.int64,
+            device=kv_cache.device,
+        )
         kv_blocks = kv_cache.index_select(2, index).clone()
         kv_scales = (
             kv_scale.index_select(2, index).clone()
