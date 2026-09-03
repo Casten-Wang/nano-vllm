@@ -1,3 +1,6 @@
+import socket
+from threading import Thread
+
 import pytest
 import torch
 
@@ -8,6 +11,11 @@ from nanovllm.engine.cache_transfer import (
 from nanovllm.engine.heterogeneous_cache_transfer import (
     build_qwen35_peer_cache_fragments,
 )
+from nanovllm.engine.cache_transfer_wire import (
+    receive_peer_cache_fragment,
+    receive_rank_cache_transfer,
+    send_peer_cache_fragment,
+)
 from nanovllm.engine.tp_cache_reshard import (
     build_qwen35_cache_transfer_plan,
 )
@@ -15,15 +23,24 @@ from nanovllm.engine.tp_cache_reshard import (
 
 def make_payload(rank: int, tp_size: int, *, with_scales: bool):
     kv = torch.arange(2 * 2 * 2 * 4 * 1 * 2).reshape(2, 2, 2, 4, 1, 2)
-    scale = torch.arange(2 * 2 * 2 * 4).reshape(2, 2, 2, 4, 1)
+    kv = kv.to(torch.int8 if with_scales else torch.float32)
+    scale = torch.arange(2 * 2 * 2 * 4, dtype=torch.float16).reshape(
+        2, 2, 2, 4, 1
+    )
     recurrent_heads = 32 // tp_size
     convolution_channels = 64 // tp_size
-    recurrent = torch.arange(recurrent_heads * 2 * 2).reshape(
+    recurrent = torch.arange(
+        recurrent_heads * 2 * 2,
+        dtype=torch.float32,
+    ).reshape(
         recurrent_heads,
         2,
         2,
     )
-    convolution = torch.arange(convolution_channels * 3).reshape(
+    convolution = torch.arange(
+        convolution_channels * 3,
+        dtype=torch.bfloat16,
+    ).reshape(
         convolution_channels,
         3,
     )
@@ -41,6 +58,39 @@ def make_payload(rank: int, tp_size: int, *, with_scales: bool):
     )
 
 
+def make_plan(*, with_scales: bool):
+    return build_qwen35_cache_transfer_plan(
+        src_tp_size=4,
+        dst_tp_size=8,
+        total_kv_heads=2,
+        kv_bytes_per_head=(
+            2 * 2 * 2 * 4 * 2 * (1 if with_scales else 4)
+        ),
+        kv_scale_bytes_per_head=(2 * 2 * 2 * 4 * 2 if with_scales else 0),
+        recurrent_heads=32,
+        recurrent_bytes_per_head=2 * 2 * 4,
+        convolution_group_widths=(16, 16, 32),
+        convolution_bytes_per_channel=3 * 2,
+    )
+
+
+class MemorySocket:
+    def __init__(self):
+        self.data = bytearray()
+        self.offset = 0
+
+    def sendall(self, data):
+        self.data.extend(data)
+
+    def recv_into(self, target):
+        size = min(len(target), len(self.data) - self.offset)
+        if size <= 0:
+            return 0
+        target[:size] = self.data[self.offset : self.offset + size]
+        self.offset += size
+        return size
+
+
 @pytest.mark.parametrize("src_tp,dst_tp", [(4, 8), (8, 4)])
 @pytest.mark.parametrize("with_scales", [False, True])
 def test_source_rank_fragments_match_peer_capacity_without_copying(
@@ -52,12 +102,14 @@ def test_source_rank_fragments_match_peer_capacity_without_copying(
         src_tp_size=src_tp,
         dst_tp_size=dst_tp,
         total_kv_heads=2,
-        kv_bytes_per_head=2 * 2 * 2 * 4 * 2 * 8,
-        kv_scale_bytes_per_head=(2 * 2 * 2 * 4 * 8 if with_scales else 0),
+        kv_bytes_per_head=(
+            2 * 2 * 2 * 4 * 2 * (1 if with_scales else 4)
+        ),
+        kv_scale_bytes_per_head=(2 * 2 * 2 * 4 * 2 if with_scales else 0),
         recurrent_heads=32,
-        recurrent_bytes_per_head=2 * 2 * 8,
+        recurrent_bytes_per_head=2 * 2 * 4,
         convolution_group_widths=(16, 16, 32),
-        convolution_bytes_per_channel=3 * 8,
+        convolution_bytes_per_channel=3 * 2,
     )
     all_fragments = []
     for rank in range(src_tp):
@@ -106,3 +158,83 @@ def test_source_rank_fragments_reject_scale_plan_mismatch():
             make_payload(0, 4, with_scales=False),
             plan,
         )
+
+
+@pytest.mark.parametrize("with_scales", [False, True])
+def test_peer_fragment_socket_round_trip(with_scales):
+    fragment = build_qwen35_peer_cache_fragments(
+        make_payload(0, 4, with_scales=with_scales),
+        make_plan(with_scales=with_scales),
+    )[0]
+    sender, receiver = socket.socketpair()
+    failures = []
+
+    def send():
+        try:
+            send_peer_cache_fragment(sender, fragment)
+        except BaseException as exc:
+            failures.append(exc)
+        finally:
+            sender.close()
+
+    thread = Thread(target=send)
+    thread.start()
+    received = receive_peer_cache_fragment(
+        receiver,
+        expected_transfer_id=fragment.transfer_id,
+        expected_src_rank=fragment.src_rank,
+        expected_dst_rank=fragment.dst_rank,
+        expected_payload_bytes=fragment.nbytes,
+    )
+    receiver.close()
+    thread.join()
+
+    assert not failures
+    assert received.nbytes == fragment.nbytes
+    assert len(received.slices) == len(fragment.slices)
+    for actual, expected in zip(received.slices, fragment.slices):
+        assert (
+            actual.component,
+            actual.layer,
+            actual.dst_start,
+        ) == (
+            expected.component,
+            expected.layer,
+            expected.dst_start,
+        )
+        torch.testing.assert_close(actual.tensor, expected.tensor)
+    assert len({
+        item.tensor.untyped_storage().data_ptr() for item in received.slices
+    }) == 1
+
+
+def test_peer_fragment_wire_enforces_limit_and_distinct_magic():
+    fragment = build_qwen35_peer_cache_fragments(
+        make_payload(0, 4, with_scales=False),
+        make_plan(with_scales=False),
+    )[0]
+    wire = MemorySocket()
+    send_peer_cache_fragment(wire, fragment)
+
+    with pytest.raises(ValueError, match="configured byte limit"):
+        receive_peer_cache_fragment(
+            wire,
+            max_payload_bytes=fragment.nbytes - 1,
+        )
+
+    wire.offset = 0
+    with pytest.raises(ValueError, match="unsupported cache transfer wire format"):
+        receive_rank_cache_transfer(wire)
+
+
+def test_peer_fragment_wire_rejects_corrupted_payload():
+    fragment = build_qwen35_peer_cache_fragments(
+        make_payload(0, 4, with_scales=True),
+        make_plan(with_scales=True),
+    )[0]
+    wire = MemorySocket()
+    send_peer_cache_fragment(wire, fragment)
+    wire.data[-1] ^= 0xFF
+
+    with pytest.raises(ValueError, match="checksum mismatch"):
+        receive_peer_cache_fragment(wire)

@@ -18,6 +18,10 @@ from nanovllm.engine.cache_transfer import (
     RankCacheTransfer,
     TRANSFER_FORMAT_VERSION,
 )
+from nanovllm.engine.heterogeneous_cache_transfer import (
+    PeerCacheFragment,
+    PeerTensorSlice,
+)
 
 
 WIRE_MAGIC = b"NVCT"
@@ -29,6 +33,8 @@ DEFAULT_MAX_PAYLOAD_BYTES = 16 * 1024**3
 _CHUNK_BYTES = 1024 * 1024
 _TRANSFER_ACK = b"\x01"
 _TRANSFER_NACK = b"\x00"
+PEER_WIRE_MAGIC = b"NVHP"
+PEER_WIRE_VERSION = 1
 
 _DTYPE_TO_NAME = {
     torch.float16: "float16",
@@ -109,6 +115,59 @@ def send_rank_cache_transfer(sock, payload: RankCacheTransfer) -> int:
     digest = hashlib.sha256()
     _send_bytes(sock, header, digest)
     for _, tensor in tensors:
+        _send_bytes(sock, _byte_view(tensor), digest)
+    sock.sendall(digest.digest())
+    return WIRE_HEADER.size + len(header) + body_bytes + WIRE_DIGEST_BYTES
+
+
+def send_peer_cache_fragment(sock, fragment: PeerCacheFragment) -> int:
+    """Stream one heterogeneous-TP peer fragment with bounded scratch space."""
+
+    descriptors = []
+    body_bytes = 0
+    for item in fragment.slices:
+        tensor = item.tensor
+        if tensor.dtype not in _DTYPE_TO_NAME or tensor.ndim == 0:
+            raise ValueError("peer cache fragment tensor layout is unsupported")
+        nbytes = tensor.numel() * tensor.element_size()
+        body_bytes += nbytes
+        descriptors.append({
+            "component": item.component,
+            "layer": item.layer,
+            "dst_start": item.dst_start,
+            "dtype": _DTYPE_TO_NAME[tensor.dtype],
+            "shape": list(tensor.shape),
+            "nbytes": nbytes,
+        })
+    header = json.dumps(
+        {
+            "transfer_id": fragment.transfer_id,
+            "src_rank": fragment.src_rank,
+            "dst_rank": fragment.dst_rank,
+            "src_tp_size": fragment.src_tp_size,
+            "dst_tp_size": fragment.dst_tp_size,
+            "block_size": fragment.block_size,
+            "cached_tokens": fragment.cached_tokens,
+            "slices": descriptors,
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    if len(header) > MAX_HEADER_BYTES:
+        raise ValueError("peer cache fragment wire header is too large")
+
+    sock.sendall(
+        WIRE_HEADER.pack(
+            PEER_WIRE_MAGIC,
+            PEER_WIRE_VERSION,
+            len(header),
+            body_bytes,
+        )
+    )
+    digest = hashlib.sha256()
+    _send_bytes(sock, header, digest)
+    for item in fragment.slices:
+        tensor = _host_tensor(item.tensor)
         _send_bytes(sock, _byte_view(tensor), digest)
     sock.sendall(digest.digest())
     return WIRE_HEADER.size + len(header) + body_bytes + WIRE_DIGEST_BYTES
@@ -336,6 +395,158 @@ def receive_rank_cache_transfer(
         if lease is not None:
             lease.release()
         raise
+
+
+def receive_peer_cache_fragment(
+    sock,
+    *,
+    max_payload_bytes: int = DEFAULT_MAX_PAYLOAD_BYTES,
+    expected_transfer_id: str | None = None,
+    expected_src_rank: int | None = None,
+    expected_dst_rank: int | None = None,
+    expected_payload_bytes: int | None = None,
+) -> PeerCacheFragment:
+    """Receive and verify one heterogeneous-TP peer fragment."""
+
+    if (
+        not isinstance(max_payload_bytes, int)
+        or isinstance(max_payload_bytes, bool)
+        or max_payload_bytes <= 0
+    ):
+        raise ValueError("max_payload_bytes must be positive")
+    prefix = _recv_bytes(sock, WIRE_HEADER.size)
+    magic, wire_version, header_bytes, body_bytes = WIRE_HEADER.unpack(prefix)
+    if magic != PEER_WIRE_MAGIC or wire_version != PEER_WIRE_VERSION:
+        raise ValueError("unsupported peer cache fragment wire format")
+    if header_bytes <= 0 or header_bytes > MAX_HEADER_BYTES:
+        raise ValueError("peer cache fragment wire header size is invalid")
+    if body_bytes > max_payload_bytes:
+        raise ValueError("peer cache fragment exceeds configured byte limit")
+
+    digest = hashlib.sha256()
+    raw_header = _recv_bytes(sock, header_bytes, digest)
+    try:
+        header = json.loads(raw_header)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("peer cache fragment wire header is invalid") from exc
+    if not isinstance(header, dict):
+        raise ValueError("peer cache fragment wire header is invalid")
+    transfer_id = header.get("transfer_id")
+    integer_names = (
+        "src_rank",
+        "dst_rank",
+        "src_tp_size",
+        "dst_tp_size",
+        "block_size",
+        "cached_tokens",
+    )
+    integers = {name: header.get(name) for name in integer_names}
+    if (
+        not isinstance(transfer_id, str)
+        or not transfer_id
+        or any(
+            not isinstance(value, int) or isinstance(value, bool)
+            for value in integers.values()
+        )
+    ):
+        raise ValueError("peer cache fragment wire metadata is invalid")
+    expectations = (
+        ("transfer id", transfer_id, expected_transfer_id),
+        ("source rank", integers["src_rank"], expected_src_rank),
+        ("destination rank", integers["dst_rank"], expected_dst_rank),
+        ("payload byte count", body_bytes, expected_payload_bytes),
+    )
+    for name, actual, expected in expectations:
+        if expected is not None and actual != expected:
+            raise ValueError(f"peer cache fragment wire {name} does not match")
+
+    descriptors = header.get("slices")
+    if not isinstance(descriptors, list) or not descriptors:
+        raise ValueError("peer cache fragment wire descriptors are invalid")
+    parsed = []
+    keys = set()
+    described_body_bytes = 0
+    for descriptor in descriptors:
+        if not isinstance(descriptor, dict):
+            raise ValueError("peer cache fragment wire descriptor is invalid")
+        component = descriptor.get("component")
+        layer = descriptor.get("layer")
+        dst_start = descriptor.get("dst_start")
+        dtype = _NAME_TO_DTYPE.get(descriptor.get("dtype"))
+        shape = descriptor.get("shape")
+        nbytes = descriptor.get("nbytes")
+        key = (component, layer, dst_start)
+        if (
+            component not in {"kv", "kv_scale", "recurrent", "convolution"}
+            or not isinstance(layer, int)
+            or isinstance(layer, bool)
+            or not isinstance(dst_start, int)
+            or isinstance(dst_start, bool)
+            or dst_start < 0
+            or key in keys
+            or dtype is None
+            or not isinstance(shape, list)
+            or not shape
+            or any(
+                not isinstance(dim, int) or isinstance(dim, bool) or dim <= 0
+                for dim in shape
+            )
+            or not isinstance(nbytes, int)
+            or isinstance(nbytes, bool)
+            or nbytes <= 0
+        ):
+            raise ValueError("peer cache fragment wire descriptor is invalid")
+        expected_nbytes = dtype.itemsize
+        for dimension in shape:
+            expected_nbytes *= dimension
+        if nbytes != expected_nbytes:
+            raise ValueError("peer cache fragment tensor byte size is invalid")
+        keys.add(key)
+        described_body_bytes += nbytes
+        if described_body_bytes > body_bytes:
+            raise ValueError("peer cache fragment wire body size is inconsistent")
+        parsed.append((component, layer, dst_start, dtype, shape, nbytes))
+    if described_body_bytes != body_bytes:
+        raise ValueError("peer cache fragment wire body size is inconsistent")
+
+    storage_descriptors = [
+        (f"slice/{index}", dtype, shape, nbytes)
+        for index, (_component, _layer, _dst_start, dtype, shape, nbytes)
+        in enumerate(parsed)
+    ]
+    offsets, storage_bytes = _aligned_storage_offsets(storage_descriptors)
+    storage = torch.empty(storage_bytes, dtype=torch.uint8)
+    slices = []
+    for descriptor, offset in zip(parsed, offsets):
+        component, layer, dst_start, dtype, shape, nbytes = descriptor
+        tensor_storage = storage[offset : offset + nbytes]
+        storage_view = _byte_view(tensor_storage)
+        _recv_exact(sock, storage_view)
+        digest.update(storage_view)
+        slices.append(
+            PeerTensorSlice(
+                component=component,
+                layer=layer,
+                dst_start=dst_start,
+                tensor=tensor_storage.view(dtype).reshape(shape),
+            )
+        )
+    received_digest = _recv_bytes(sock, WIRE_DIGEST_BYTES)
+    if not hmac.compare_digest(digest.digest(), received_digest):
+        raise ValueError("peer cache fragment checksum mismatch")
+    fragment = PeerCacheFragment(
+        transfer_id=transfer_id,
+        src_rank=integers["src_rank"],
+        dst_rank=integers["dst_rank"],
+        src_tp_size=integers["src_tp_size"],
+        dst_tp_size=integers["dst_tp_size"],
+        block_size=integers["block_size"],
+        cached_tokens=integers["cached_tokens"],
+        slices=tuple(slices),
+    )
+    if fragment.nbytes != body_bytes:
+        raise ValueError("peer cache fragment byte count changed after decode")
+    return fragment
 
 
 class RankCacheReceiver:
