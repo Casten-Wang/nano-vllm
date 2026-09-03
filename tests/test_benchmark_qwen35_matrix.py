@@ -597,6 +597,7 @@ def test_checkpoint_audit_covers_selected_tp_sizes():
     assert command[1].endswith("scripts/audit_checkpoint_mapping.py")
     assert command[command.index("--model") + 1] == "/models/qwen35"
     assert command[command.index("--tp-sizes") + 1] == "4,8"
+    assert command[command.index("--weight-quant-backend") + 1] == "auto"
     assert "--require-shards" in command
     assert "--verify-shard-hashes" in command
     assert command[command.index("--output") + 1].endswith(

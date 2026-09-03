@@ -334,6 +334,11 @@ def summarize_optional_fp8_audit(
     runtime_storage_by_tp = {}
     for row in performance_runs:
         tp_size = row.get("tensor_parallel_size")
+        tp_key = f"tp{tp_size}"
+        expected_storage = results.get(tp_key, {}).get(
+            "resident_fp8_expert_storage",
+            {},
+        )
         rank_stats = row.get("storage", {}).get(
             "runtime_buffer_storage_by_rank",
             [],
@@ -344,7 +349,31 @@ def summarize_optional_fp8_audit(
             == set(range(tp_size))
         )
         if runtime_backend == "resident":
-            valid = ranks_complete and all(
+            expected_storage_valid = all(
+                isinstance(expected_storage.get(key), int)
+                and expected_storage[key] > 0
+                for key in (
+                    "layer_count",
+                    "weight_bytes",
+                    "scale_bytes",
+                    "dequant_workspace_pool_count",
+                    "dequant_workspace_bytes",
+                )
+            )
+            matches_audit = expected_storage_valid and all(
+                item.get("resident_fp8_expert_layer_count")
+                == expected_storage["layer_count"]
+                and item.get("resident_fp8_expert_weight_bytes")
+                == expected_storage["weight_bytes"]
+                and item.get("resident_fp8_expert_scale_bytes")
+                == expected_storage["scale_bytes"]
+                and item.get("resident_fp8_weight_pool_count")
+                == expected_storage["dequant_workspace_pool_count"]
+                and item.get("resident_fp8_dequant_workspace_bytes")
+                == expected_storage["dequant_workspace_bytes"]
+                for item in rank_stats
+            )
+            valid = ranks_complete and matches_audit and all(
                 item.get("resident_fp8_expert_layer_count", 0) > 0
                 and item.get("resident_fp8_expert_weight_bytes", 0) > 0
                 and item.get("resident_fp8_expert_scale_bytes", 0) > 0
@@ -359,7 +388,17 @@ def summarize_optional_fp8_audit(
                 for item in rank_stats
             )
         else:
-            valid = ranks_complete and all(
+            expected_storage_valid = all(
+                expected_storage.get(key) == 0
+                for key in (
+                    "layer_count",
+                    "weight_bytes",
+                    "scale_bytes",
+                    "dequant_workspace_pool_count",
+                    "dequant_workspace_bytes",
+                )
+            )
+            matches_audit = expected_storage_valid and all(
                 item.get("resident_fp8_expert_layer_count") == 0
                 and item.get("resident_fp8_expert_weight_bytes") == 0
                 and item.get("resident_fp8_expert_scale_bytes") == 0
@@ -367,15 +406,23 @@ def summarize_optional_fp8_audit(
                 and item.get("resident_fp8_dequant_workspace_bytes") == 0
                 for item in rank_stats
             )
-        tp_key = f"tp{tp_size}"
+            valid = ranks_complete and matches_audit
         summary = runtime_storage_by_tp.setdefault(
             tp_key,
-            {"valid": True, "configurations": []},
+            {
+                "valid": True,
+                "matches_header_audit": True,
+                "configurations": [],
+            },
         )
         summary["valid"] = summary["valid"] and valid
+        summary["matches_header_audit"] = (
+            summary["matches_header_audit"] and matches_audit
+        )
         summary["configurations"].append(
             {
                 "valid": valid,
+                "matches_header_audit": matches_audit,
                 "recurrent_state_dtype": row.get("recurrent_state_dtype"),
                 "kv_cache_dtype": row.get("kv_cache_dtype"),
                 "qwen35_moe_decode_backend": row.get(

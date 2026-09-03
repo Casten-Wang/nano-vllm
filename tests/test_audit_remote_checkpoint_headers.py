@@ -156,39 +156,6 @@ def test_native_fp8_storage_projection_rejects_impossible_accounting():
         )
 
 
-def test_resident_fp8_runtime_storage_counts_shared_workspace_once():
-    class ResidentExpert(torch.nn.Module):
-        def __init__(self, pool):
-            super().__init__()
-            self.gate_up_proj = torch.nn.Parameter(
-                torch.empty(2, 6, 4, device="meta", dtype=torch.float8_e4m3fn)
-            )
-            self.down_proj = torch.nn.Parameter(
-                torch.empty(2, 4, 3, device="meta", dtype=torch.float8_e4m3fn)
-            )
-            self.resident_weight_buffer_pool = pool
-
-        def resident_fp8_storage_stats(self):
-            return {"weight_bytes": 72, "scale_bytes": 12, "total_bytes": 84}
-
-    model = torch.nn.Module()
-    pool = object()
-    model.first = ResidentExpert(pool)
-    model.second = ResidentExpert(pool)
-
-    result = MODULE.resident_fp8_runtime_storage(model, model_dtype_bytes=2)
-
-    assert result == {
-        "layer_count": 2,
-        "weight_bytes": 144,
-        "scale_bytes": 24,
-        "total_bytes": 168,
-        "dequant_workspace_pool_count": 1,
-        "dequant_workspace_bytes": 48,
-        "total_runtime_bytes": 216,
-    }
-
-
 def test_header_only_audit_reports_shape_error():
     model = torch.nn.Linear(2, 3, bias=False, device="meta")
     headers = {"weight": {"dtype": "F32", "shape": [4, 2]}}

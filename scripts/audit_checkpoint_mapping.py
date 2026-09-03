@@ -354,6 +354,48 @@ def parameter_storage_bytes(model: torch.nn.Module) -> int:
     )
 
 
+def resident_fp8_runtime_storage(model, model_dtype_bytes: int) -> dict[str, int]:
+    """Account for resident expert parameters, scales, and shared workspaces."""
+
+    resident_stats = []
+    workspace_elements_by_pool: dict[int, int] = {}
+    for module in model.modules():
+        storage_stats = getattr(module, "resident_fp8_storage_stats", None)
+        if storage_stats is None:
+            continue
+        item = storage_stats()
+        if not item["total_bytes"]:
+            continue
+        resident_stats.append(item)
+        pool = getattr(module, "resident_weight_buffer_pool", None)
+        if pool is None:
+            raise ValueError("resident FP8 expert has no shared dequant workspace")
+        expert_count = int(module.gate_up_proj.shape[0])
+        if expert_count <= 0:
+            raise ValueError("resident FP8 expert count must be positive")
+        workspace_elements = max(
+            module.gate_up_proj.numel() // expert_count,
+            module.down_proj.numel() // expert_count,
+        )
+        pool_id = id(pool)
+        workspace_elements_by_pool[pool_id] = max(
+            workspace_elements_by_pool.get(pool_id, 0),
+            workspace_elements,
+        )
+    weight_bytes = sum(item["weight_bytes"] for item in resident_stats)
+    scale_bytes = sum(item["scale_bytes"] for item in resident_stats)
+    workspace_bytes = sum(workspace_elements_by_pool.values()) * model_dtype_bytes
+    return {
+        "layer_count": len(resident_stats),
+        "weight_bytes": weight_bytes,
+        "scale_bytes": scale_bytes,
+        "total_bytes": weight_bytes + scale_bytes,
+        "dequant_workspace_pool_count": len(workspace_elements_by_pool),
+        "dequant_workspace_bytes": workspace_bytes,
+        "total_runtime_bytes": weight_bytes + scale_bytes + workspace_bytes,
+    }
+
+
 def cache_storage_metadata(model_spec, tp_size: int, model_dtype_bytes: int) -> dict:
     fp32_state = plan_cache_memory(
         model_spec,
@@ -487,6 +529,11 @@ def main() -> None:
         help="Stream every local shard once and record its SHA-256 identity.",
     )
     parser.add_argument(
+        "--weight-quant-backend",
+        choices=("auto", "reference", "resident", "triton"),
+        default="auto",
+    )
+    parser.add_argument(
         "--output",
         type=Path,
         default=Path("benchmark_results/checkpoint_mapping_audit.json"),
@@ -512,9 +559,25 @@ def main() -> None:
             args.model,
             tp_size,
             model_spec.quantization,
+            args.weight_quant_backend,
         )
         result = audit_checkpoint_mapping(model, args.model)
         result["local_parameter_bytes"] = parameter_storage_bytes(model)
+        if model_spec.quantization.format == "fp8_block":
+            resident_storage = resident_fp8_runtime_storage(
+                model,
+                model_dtype_bytes,
+            )
+            result["fp8_runtime_backend"] = args.weight_quant_backend
+            result["resident_fp8_expert_storage"] = resident_storage
+            result["local_parameter_and_resident_scale_bytes"] = (
+                result["local_parameter_bytes"]
+                + resident_storage["scale_bytes"]
+            )
+            result["local_parameter_and_resident_runtime_bytes"] = (
+                result["local_parameter_and_resident_scale_bytes"]
+                + resident_storage["dequant_workspace_bytes"]
+            )
         result.update(cache_storage_metadata(model_spec, tp_size, model_dtype_bytes))
         results[f"tp{tp_size}"] = result
         del model

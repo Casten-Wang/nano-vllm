@@ -212,6 +212,8 @@ def checkpoint_audit_command(args: argparse.Namespace) -> list[str]:
         "--tp-sizes",
         ",".join(str(size) for size in args.tp_sizes),
         "--require-shards",
+        "--weight-quant-backend",
+        getattr(args, "weight_quant_backend", "auto"),
         "--output",
         str(Path(args.result_dir) / "checkpoint_mapping_audit.json"),
     ]

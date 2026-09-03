@@ -150,6 +150,21 @@ def write_fp8_summary_inputs(
                 "tp4": {
                     "valid": True,
                     "local_parameter_bytes": 1000,
+                    "resident_fp8_expert_storage": {
+                        "layer_count": 40 if backend == "resident" else 0,
+                        "weight_bytes": 1_000_000 if backend == "resident" else 0,
+                        "scale_bytes": 10_000 if backend == "resident" else 0,
+                        "total_bytes": 1_010_000 if backend == "resident" else 0,
+                        "dequant_workspace_pool_count": (
+                            1 if backend == "resident" else 0
+                        ),
+                        "dequant_workspace_bytes": (
+                            65_536 if backend == "resident" else 0
+                        ),
+                        "total_runtime_bytes": (
+                            1_075_536 if backend == "resident" else 0
+                        ),
+                    },
                     "quantized_tp_layout": {
                         "valid": True,
                         "requires_partial_unit_loader": False,
@@ -159,6 +174,21 @@ def write_fp8_summary_inputs(
                 "tp8": {
                     "valid": True,
                     "local_parameter_bytes": 500,
+                    "resident_fp8_expert_storage": {
+                        "layer_count": 40 if backend == "resident" else 0,
+                        "weight_bytes": 1_000_000 if backend == "resident" else 0,
+                        "scale_bytes": 10_000 if backend == "resident" else 0,
+                        "total_bytes": 1_010_000 if backend == "resident" else 0,
+                        "dequant_workspace_pool_count": (
+                            1 if backend == "resident" else 0
+                        ),
+                        "dequant_workspace_bytes": (
+                            65_536 if backend == "resident" else 0
+                        ),
+                        "total_runtime_bytes": (
+                            1_075_536 if backend == "resident" else 0
+                        ),
+                    },
                     "quantized_tp_layout": {
                         "valid": True,
                         "requires_partial_unit_loader": True,
@@ -408,6 +438,7 @@ def test_optional_fp8_summary_accepts_resident_execution_without_native_claim(tm
     assert report["runtime_backend"] == "resident"
     assert report["runtime_storage_valid"]
     assert report["runtime_storage_by_tp"]["tp8"]["valid"]
+    assert report["runtime_storage_by_tp"]["tp8"]["matches_header_audit"]
     assert not report["native_fp8"]
     assert "on-demand" in report["scope"]
     assert report["performance_comparison_valid"]
@@ -438,6 +469,27 @@ def test_optional_fp8_summary_accepts_resident_execution_without_native_claim(tm
     assert not invalid["runtime_storage_valid"]
     assert not invalid["performance_valid"]
     assert not invalid["valid"]
+
+    write_fp8_summary_inputs(
+        tmp_path,
+        "run",
+        backend="resident",
+        requested_backend="resident",
+    )
+    audit_path = tmp_path / "fp8/official_checkpoint_header_audit.json"
+    audit = json.loads(audit_path.read_text())
+    audit["results"]["tp4"]["resident_fp8_expert_storage"][
+        "dequant_workspace_bytes"
+    ] += 1
+    write(audit_path, audit)
+    mismatch = MODULE.summarize_optional_fp8_audit(
+        tmp_path, "run", fp8_baseline_rows()
+    )
+    assert not mismatch["runtime_storage_by_tp"]["tp4"][
+        "matches_header_audit"
+    ]
+    assert not mismatch["runtime_storage_valid"]
+    assert not mismatch["valid"]
 
 
 def test_resident_fp8_summary_rejects_missing_or_regressed_bf16_comparison(tmp_path):
