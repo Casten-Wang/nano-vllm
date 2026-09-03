@@ -920,6 +920,15 @@ class HybridStateContextTest(unittest.TestCase):
                 "configured_sampling_chunk_rows": 32,
             },
         )
+        runner._cache_send_staging_pool = SimpleNamespace(
+            storage_stats=lambda: {
+                "storage_bytes": 96,
+                "allocation_count": 2,
+                "reuse_count": 4,
+                "transient_allocation_count": 1,
+                "leased": 0,
+            }
+        )
 
         stats = runner.get_runtime_buffer_stats()
 
@@ -935,6 +944,13 @@ class HybridStateContextTest(unittest.TestCase):
         self.assertEqual(stats["gptq_expert_workspace_bytes"], 36)
         self.assertEqual(stats["gptq_expert_workspace_allocation_count"], 1)
         self.assertEqual(stats["gptq_expert_workspace_reuse_count"], 15)
+        self.assertEqual(stats["pd_send_host_staging_bytes"], 96)
+        self.assertEqual(stats["pd_send_host_staging_allocation_count"], 2)
+        self.assertEqual(stats["pd_send_host_staging_reuse_count"], 4)
+        self.assertEqual(
+            stats["pd_send_host_staging_transient_allocation_count"], 1
+        )
+        self.assertEqual(stats["pd_send_host_staging_leased"], 0)
         self.assertEqual(stats["moe_sorted_dispatch_count"], 11)
         self.assertEqual(stats["moe_sorted_decode_dispatch_count"], 5)
         self.assertEqual(stats["moe_sorted_prefill_dispatch_count"], 6)

@@ -130,6 +130,7 @@ class ModelRunner:
         self.worker_control_failed = False
         self._pending_cache_receives = {}
         self._pending_cache_sends = {}
+        self._cache_send_staging_pool = None
         self._resources_released = False
         self.execution_stats = ExecutionStats()
         self.execution_stats_enabled = False
@@ -489,6 +490,18 @@ class ModelRunner:
         sampler_runtime_stats = self.sampler.runtime_stats()
         sampler_total = sum(sampler_stats.values())
         tp_logits_total = sum(item["total_bytes"] for item in tp_logits_stats)
+        host_staging_pool = getattr(self, "_cache_send_staging_pool", None)
+        host_staging_stats = (
+            host_staging_pool.storage_stats()
+            if host_staging_pool is not None
+            else {
+                "storage_bytes": 0,
+                "allocation_count": 0,
+                "reuse_count": 0,
+                "transient_allocation_count": 0,
+                "leased": 0,
+            }
+        )
         return {
             "int8_partitioned_decode_pool_count": len(stats),
             "int8_partitioned_workspace_bytes": sum(
@@ -612,6 +625,17 @@ class ModelRunner:
                 item["top_k_full_gather_avoided_bytes"]
                 for item in tp_logits_stats
             ),
+            "pd_send_host_staging_bytes": host_staging_stats["storage_bytes"],
+            "pd_send_host_staging_allocation_count": host_staging_stats[
+                "allocation_count"
+            ],
+            "pd_send_host_staging_reuse_count": host_staging_stats[
+                "reuse_count"
+            ],
+            "pd_send_host_staging_transient_allocation_count": (
+                host_staging_stats["transient_allocation_count"]
+            ),
+            "pd_send_host_staging_leased": host_staging_stats["leased"],
             "total_bytes_local_rank": (
                 partitioned_total
                 + dequant_total
@@ -1238,6 +1262,7 @@ class ModelRunner:
         *,
         transfer_id: str,
         to_host: bool = False,
+        host_staging_pool=None,
     ):
         """Create the rank-local tensor payload needed by a decode worker."""
 
@@ -1256,7 +1281,15 @@ class ModelRunner:
             recurrent_states=recurrent,
             convolution_states=convolution,
             to_host=to_host,
+            host_staging_pool=host_staging_pool,
         )
+
+    def _host_staging_pool(self):
+        from nanovllm.engine.cache_transfer import HostStagingBufferPool
+
+        if getattr(self, "_cache_send_staging_pool", None) is None:
+            self._cache_send_staging_pool = HostStagingBufferPool()
+        return self._cache_send_staging_pool
 
     def estimate_sequence_cache_bytes(self, seq: Sequence) -> dict:
         """Estimate rank-local host staging bytes without copying tensors."""
@@ -1362,11 +1395,14 @@ class ModelRunner:
             send_rank_cache_to_endpoint,
         )
 
+        if timeout_s <= 0:
+            raise ValueError("cache transfer endpoint timeout must be positive")
         host, port = self._rank_cache_endpoint(endpoints)
         payload = self.export_sequence_cache(
             seq,
             transfer_id=transfer_id,
             to_host=True,
+            host_staging_pool=self._host_staging_pool(),
         )
         sent_bytes = send_rank_cache_to_endpoint(
             host,
@@ -1389,18 +1425,25 @@ class ModelRunner:
 
         if transfer_id in self._pending_cache_sends:
             raise ValueError("cache send id is already active")
+        if timeout_s <= 0:
+            raise ValueError("cache transfer endpoint timeout must be positive")
         host, port = self._rank_cache_endpoint(endpoints)
         payload = self.export_sequence_cache(
             seq,
             transfer_id=transfer_id,
             to_host=True,
+            host_staging_pool=self._host_staging_pool(),
         )
-        send = PendingRankCacheSend(
-            host,
-            port,
-            payload,
-            timeout_s=timeout_s,
-        )
+        try:
+            send = PendingRankCacheSend(
+                host,
+                port,
+                payload,
+                timeout_s=timeout_s,
+            )
+        except BaseException:
+            payload.release_host_staging()
+            raise
         self._pending_cache_sends[transfer_id] = send
         try:
             send.start()

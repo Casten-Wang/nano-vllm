@@ -1,4 +1,5 @@
 import socket
+from dataclasses import replace
 from threading import Thread
 from time import monotonic, sleep
 from types import SimpleNamespace
@@ -333,7 +334,7 @@ def test_model_runner_rank_endpoint_exports_receives_and_installs():
     source.world_size = 1
     exported_to_host = []
     source.export_sequence_cache = (
-        lambda seq, transfer_id, to_host=False: (
+        lambda seq, transfer_id, to_host=False, **_kwargs: (
             exported_to_host.append(to_host) or payload
         )
     )
@@ -536,7 +537,8 @@ def test_model_runner_async_send_waits_for_receiver_ack():
     port = probe.getsockname()[1]
     probe.close()
     endpoints = [("127.0.0.1", port)]
-    payload = make_payload()
+    lease = Mock()
+    payload = replace(make_payload(), host_staging_lease=lease)
     source = object.__new__(ModelRunner)
     source.rank = 0
     source.world_size = 1
@@ -563,6 +565,7 @@ def test_model_runner_async_send_waits_for_receiver_ack():
         "staged_bytes": 0,
     }
     assert source._pending_cache_sends[payload.transfer_id].staged_bytes == 0
+    lease.release.assert_called_once_with()
 
     receiver.finish(accepted=True)
     send_poll = source.poll_sequence_cache_send(payload.transfer_id)
@@ -574,6 +577,45 @@ def test_model_runner_async_send_waits_for_receiver_ack():
     assert result["rank"] == 0
     assert result["sent_bytes"] > 0
     assert payload.transfer_id not in source._pending_cache_sends
+
+
+def test_pending_send_releases_unstarted_staging():
+    lease = Mock()
+    send = PendingRankCacheSend(
+        "127.0.0.1",
+        1,
+        replace(make_payload(), host_staging_lease=lease),
+    )
+
+    send.finish()
+
+    lease.release.assert_called_once_with()
+
+
+def test_pending_send_releases_staging_when_connection_times_out():
+    probe = socket.socket()
+    probe.bind(("127.0.0.1", 0))
+    host, port = probe.getsockname()
+    probe.close()
+    lease = Mock()
+    send = PendingRankCacheSend(
+        host,
+        port,
+        replace(make_payload(), host_staging_lease=lease),
+        timeout_s=0.05,
+    )
+    send.start()
+    deadline = monotonic() + 1.0
+    state, error = send.poll()
+    while state == "sending" and monotonic() < deadline:
+        sleep(0.001)
+        state, error = send.poll()
+
+    assert state == "failed"
+    assert "deadline expired" in error
+    assert send.staged_bytes == 0
+    lease.release.assert_called_once_with()
+    send.finish()
 
 
 def test_model_runner_batches_send_states_in_one_result():

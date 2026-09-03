@@ -4,11 +4,98 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum, auto
+from threading import Lock
 
 import torch
 
 
 TRANSFER_FORMAT_VERSION = 1
+
+
+class HostStagingLease:
+    """Exclusive ownership of one contiguous host staging allocation."""
+
+    def __init__(
+        self,
+        storage: torch.Tensor,
+        pool: "HostStagingBufferPool | None",
+    ) -> None:
+        self.storage: torch.Tensor | None = storage
+        self._pool = pool
+
+    def release(self) -> None:
+        storage = self.storage
+        if storage is None:
+            return
+        self.storage = None
+        pool = self._pool
+        self._pool = None
+        if pool is not None:
+            pool._release(storage)
+
+
+class HostStagingBufferPool:
+    """Retain one largest-fit host buffer without aliasing concurrent sends."""
+
+    def __init__(self) -> None:
+        self._lock = Lock()
+        self._storage: torch.Tensor | None = None
+        self._leased = False
+        self.allocation_count = 0
+        self.reuse_count = 0
+        self.transient_allocation_count = 0
+
+    def acquire(self, size: int, *, pin_memory: bool) -> HostStagingLease:
+        if not isinstance(size, int) or isinstance(size, bool) or size <= 0:
+            raise ValueError("host staging size must be a positive integer")
+        with self._lock:
+            storage = self._storage
+            compatible = (
+                storage is not None
+                and storage.numel() >= size
+                and storage.is_pinned() == pin_memory
+            )
+            if not self._leased:
+                if not compatible:
+                    storage = torch.empty(
+                        size,
+                        dtype=torch.uint8,
+                        device="cpu",
+                        pin_memory=pin_memory,
+                    )
+                    self._storage = storage
+                    self.allocation_count += 1
+                else:
+                    self.reuse_count += 1
+                self._leased = True
+                return HostStagingLease(storage, self)
+
+            self.transient_allocation_count += 1
+        storage = torch.empty(
+            size,
+            dtype=torch.uint8,
+            device="cpu",
+            pin_memory=pin_memory,
+        )
+        return HostStagingLease(storage, None)
+
+    def _release(self, storage: torch.Tensor) -> None:
+        with self._lock:
+            if not self._leased or storage is not self._storage:
+                raise RuntimeError("host staging pool lease is invalid")
+            self._leased = False
+
+    def storage_stats(self) -> dict[str, int]:
+        with self._lock:
+            return {
+                "storage_bytes": (
+                    0 if self._storage is None else self._storage.numel()
+                ),
+                "allocation_count": self.allocation_count,
+                "reuse_count": self.reuse_count,
+                "transient_allocation_count": self.transient_allocation_count,
+                "leased": int(self._leased),
+            }
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,6 +112,7 @@ class RankCacheTransfer:
     kv_scales: torch.Tensor | None
     recurrent_states: tuple[torch.Tensor, ...]
     convolution_states: tuple[torch.Tensor, ...]
+    host_staging_lease: HostStagingLease | None = None
 
     @property
     def num_blocks(self) -> int:
@@ -39,6 +127,10 @@ class RankCacheTransfer:
             *self.convolution_states,
         )
         return sum(tensor.numel() * tensor.element_size() for tensor in tensors)
+
+    def release_host_staging(self) -> None:
+        if self.host_staging_lease is not None:
+            self.host_staging_lease.release()
 
 
 class CacheTransferPhase(Enum):
@@ -238,7 +330,8 @@ def _validate_state_pairs(
 
 def _allocate_host_staging_views(
     specs: list[tuple[torch.Tensor, tuple[int, ...]]],
-) -> list[torch.Tensor]:
+    pool: HostStagingBufferPool | None = None,
+) -> tuple[list[torch.Tensor], HostStagingLease]:
     """Allocate one aligned host storage for heterogeneous D2H tensors."""
 
     offsets = []
@@ -251,19 +344,30 @@ def _allocate_host_staging_views(
         for dimension in shape:
             elements *= dimension
         end += elements * tensor.element_size()
-    storage = torch.empty(
-        end,
-        dtype=torch.uint8,
-        device="cpu",
-        pin_memory=any(tensor.device.type == "cuda" for tensor, _ in specs),
+    pin_memory = any(tensor.device.type == "cuda" for tensor, _ in specs)
+    lease = (
+        pool.acquire(end, pin_memory=pin_memory)
+        if pool is not None
+        else HostStagingLease(
+            torch.empty(
+                end,
+                dtype=torch.uint8,
+                device="cpu",
+                pin_memory=pin_memory,
+            ),
+            None,
+        )
     )
+    storage = lease.storage
+    if storage is None:
+        raise RuntimeError("host staging lease was released before use")
     views = []
     for (tensor, shape), offset in zip(specs, offsets):
         nbytes = tensor.element_size()
         for dimension in shape:
             nbytes *= dimension
         views.append(storage[offset : offset + nbytes].view(tensor.dtype).view(shape))
-    return views
+    return views, lease
 
 
 def _export_blocks_to_host(
@@ -333,6 +437,7 @@ def export_rank_cache(
     recurrent_states: tuple[torch.Tensor, ...] = (),
     convolution_states: tuple[torch.Tensor, ...] = (),
     to_host: bool = False,
+    host_staging_pool: HostStagingBufferPool | None = None,
 ) -> RankCacheTransfer:
     """Copy one request's rank-local state in logical block order."""
 
@@ -351,6 +456,7 @@ def export_rank_cache(
         )
     _validate_block_ids(block_ids, total_blocks=kv_cache.shape[2])
     valid_last_block_tokens = cached_tokens % block_size
+    staging_lease = None
     if to_host:
         kv_shape = (*kv_cache.shape[:2], len(block_ids), *kv_cache.shape[3:])
         specs = [(kv_cache, tuple(kv_shape))]
@@ -363,41 +469,49 @@ def export_rank_cache(
             specs.append((kv_scale, tuple(scale_shape)))
         specs.extend((tensor, tuple(tensor.shape)) for tensor in recurrent_states)
         specs.extend((tensor, tuple(tensor.shape)) for tensor in convolution_states)
-        staging_views = iter(_allocate_host_staging_views(specs))
-        kv_blocks = _export_blocks_to_host(
-            kv_cache,
-            block_ids,
-            valid_last_block_tokens=valid_last_block_tokens,
-            staging=next(staging_views),
+        allocated_views, staging_lease = _allocate_host_staging_views(
+            specs,
+            host_staging_pool,
         )
-        kv_scales = (
-            _export_blocks_to_host(
-                kv_scale,
+        staging_views = iter(allocated_views)
+        try:
+            kv_blocks = _export_blocks_to_host(
+                kv_cache,
                 block_ids,
                 valid_last_block_tokens=valid_last_block_tokens,
                 staging=next(staging_views),
             )
-            if kv_scale is not None
-            else None
-        )
-        exported_recurrent = _export_states_to_host(
-            recurrent_states,
-            tuple(next(staging_views) for _ in recurrent_states),
-        )
-        exported_convolution = _export_states_to_host(
-            convolution_states,
-            tuple(next(staging_views) for _ in convolution_states),
-        )
-        copied_tensors = [kv_cache, *recurrent_states, *convolution_states]
-        if kv_scale is not None:
-            copied_tensors.append(kv_scale)
-        cuda_devices = {
-            tensor.device
-            for tensor in copied_tensors
-            if tensor.device.type == "cuda"
-        }
-        for device in cuda_devices:
-            torch.cuda.current_stream(device).synchronize()
+            kv_scales = (
+                _export_blocks_to_host(
+                    kv_scale,
+                    block_ids,
+                    valid_last_block_tokens=valid_last_block_tokens,
+                    staging=next(staging_views),
+                )
+                if kv_scale is not None
+                else None
+            )
+            exported_recurrent = _export_states_to_host(
+                recurrent_states,
+                tuple(next(staging_views) for _ in recurrent_states),
+            )
+            exported_convolution = _export_states_to_host(
+                convolution_states,
+                tuple(next(staging_views) for _ in convolution_states),
+            )
+            copied_tensors = [kv_cache, *recurrent_states, *convolution_states]
+            if kv_scale is not None:
+                copied_tensors.append(kv_scale)
+            cuda_devices = {
+                tensor.device
+                for tensor in copied_tensors
+                if tensor.device.type == "cuda"
+            }
+            for device in cuda_devices:
+                torch.cuda.current_stream(device).synchronize()
+        except BaseException:
+            staging_lease.release()
+            raise
     else:
         index = torch.tensor(
             block_ids,
@@ -432,6 +546,7 @@ def export_rank_cache(
         kv_scales=kv_scales,
         recurrent_states=exported_recurrent,
         convolution_states=exported_convolution,
+        host_staging_lease=staging_lease,
     )
 
 

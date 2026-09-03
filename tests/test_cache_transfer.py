@@ -7,6 +7,7 @@ import torch
 from nanovllm.engine.cache_transfer import (
     CacheTransferPhase,
     CacheTransferSession,
+    HostStagingBufferPool,
     RankCacheTransfer,
     estimate_rank_cache_transfer_bytes,
     export_rank_cache,
@@ -226,6 +227,86 @@ def test_host_export_allocates_one_storage_for_complete_payload(monkeypatch):
     assert len(allocations) == 1
     assert allocations[0][1]["dtype"] == torch.uint8
     assert payload.nbytes == 288
+
+
+def test_host_export_reuses_released_staging_storage():
+    source = make_float_cache()
+    pool = HostStagingBufferPool()
+    first = export_rank_cache(
+        source,
+        None,
+        [3, 1],
+        transfer_id="request-host-pool/attempt-1",
+        tensor_parallel_rank=0,
+        tensor_parallel_size=1,
+        block_size=2,
+        cached_tokens=3,
+        to_host=True,
+        host_staging_pool=pool,
+    )
+    first_ptr = first.kv_blocks.untyped_storage().data_ptr()
+    first.release_host_staging()
+    first.release_host_staging()
+
+    second = export_rank_cache(
+        source,
+        None,
+        [2],
+        transfer_id="request-host-pool/attempt-2",
+        tensor_parallel_rank=0,
+        tensor_parallel_size=1,
+        block_size=2,
+        cached_tokens=2,
+        to_host=True,
+        host_staging_pool=pool,
+    )
+
+    assert second.kv_blocks.untyped_storage().data_ptr() == first_ptr
+    assert pool.storage_stats() == {
+        "storage_bytes": first.nbytes,
+        "allocation_count": 1,
+        "reuse_count": 1,
+        "transient_allocation_count": 0,
+        "leased": 1,
+    }
+    second.release_host_staging()
+
+
+def test_host_staging_pool_never_aliases_concurrent_payloads():
+    source = make_float_cache()
+    pool = HostStagingBufferPool()
+    first = export_rank_cache(
+        source,
+        None,
+        [3, 1],
+        transfer_id="request-host-pool/attempt-1",
+        tensor_parallel_rank=0,
+        tensor_parallel_size=1,
+        block_size=2,
+        cached_tokens=3,
+        to_host=True,
+        host_staging_pool=pool,
+    )
+    second = export_rank_cache(
+        source,
+        None,
+        [2, 0],
+        transfer_id="request-host-pool/attempt-2",
+        tensor_parallel_rank=0,
+        tensor_parallel_size=1,
+        block_size=2,
+        cached_tokens=3,
+        to_host=True,
+        host_staging_pool=pool,
+    )
+
+    assert (
+        first.kv_blocks.untyped_storage().data_ptr()
+        != second.kv_blocks.untyped_storage().data_ptr()
+    )
+    assert pool.storage_stats()["transient_allocation_count"] == 1
+    second.release_host_staging()
+    first.release_host_staging()
 
 
 @pytest.mark.parametrize("block_ids", [[], [0, 0], [-1], [4]])
