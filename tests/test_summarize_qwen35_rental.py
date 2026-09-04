@@ -2603,6 +2603,12 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     )
     assert report["performance"]["best_throughput"]["label"] == "batched"
     assert report["performance"]["lowest_peak_memory"]["label"] == "sorted"
+    assert report["performance"]["host_input_preparation"] == {
+        "available": False,
+        "valid": False,
+        "runs": [],
+    }
+    assert report["evidence"]["host_input_preparation_valid"]
     state_access = report["performance"]["recurrent_state_access"]
     assert state_access["all_configurations_valid"]
     assert len(state_access["by_configuration"]["tp4"]) == 6
@@ -3318,6 +3324,69 @@ def test_buffer_reuse_summary_preserves_failed_accuracy_evidence():
     assert not summary["valid"]
     assert summary["max_abs_error"] == 0.051
     assert summary["peak_extra_mib_delta"] == -1.0
+
+
+def test_host_input_preparation_summary_preserves_all_configurations():
+    runs = []
+    for label, tp_size, average_s in (
+        ("tp4", 4, 0.002),
+        ("tp8", 8, 0.001),
+    ):
+        runs.append(
+            {
+                "label": label,
+                "tensor_parallel_size": tp_size,
+                "weight_quant_backend": "auto",
+                "kv_cache_dtype": "auto",
+                "median": {
+                    "host_decode_preparation_call_count": 32,
+                    "host_decode_preparation_total_time_s": average_s * 32,
+                    "host_decode_preparation_max_time_s": average_s * 2,
+                    "host_decode_preparation_average_time_s": average_s,
+                },
+                "coefficient_of_variation": {
+                    "host_decode_preparation_average_time_s": 0.05,
+                },
+            }
+        )
+
+    summary = MODULE.summarize_host_input_preparation(runs)
+
+    assert summary["available"]
+    assert summary["valid"]
+    assert [row["label"] for row in summary["runs"]] == ["tp4", "tp8"]
+    assert summary["runs"][1]["steps"]["decode"] == {
+        "call_count": 32,
+        "total_time_s": 0.032,
+        "max_time_s": 0.002,
+        "average_time_s": 0.001,
+        "average_time_cv": 0.05,
+        "valid": True,
+    }
+
+
+def test_host_input_preparation_summary_is_optional_but_rejects_partial_data():
+    assert MODULE.summarize_host_input_preparation([{"median": {}}]) == {
+        "available": False,
+        "valid": False,
+        "runs": [],
+    }
+
+    summary = MODULE.summarize_host_input_preparation(
+        [
+            {
+                "label": "broken",
+                "median": {
+                    "host_prefill_preparation_call_count": 1,
+                    "host_prefill_preparation_total_time_s": 0.1,
+                },
+            }
+        ]
+    )
+
+    assert summary["available"]
+    assert not summary["valid"]
+    assert not summary["runs"][0]["steps"]["prefill"]["valid"]
 
 
 def test_buffer_reuse_summary_rejects_peak_memory_regression():

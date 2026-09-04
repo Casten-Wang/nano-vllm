@@ -501,6 +501,68 @@ def summarize_optional_gptq(
     }
 
 
+def summarize_host_input_preparation(performance_runs: list[dict]) -> dict:
+    """Preserve per-configuration host preparation timing evidence."""
+
+    rows = []
+    any_metrics = False
+    for run in performance_runs:
+        median = run.get("median", {})
+        variation = run.get("coefficient_of_variation", {})
+        by_step = {}
+        row_valid = True
+        for step_kind in ("prefill", "decode", "mixed"):
+            names = {
+                metric: f"host_{step_kind}_preparation_{metric}"
+                for metric in (
+                    "call_count",
+                    "total_time_s",
+                    "max_time_s",
+                    "average_time_s",
+                )
+            }
+            values = {
+                metric: median.get(name)
+                for metric, name in names.items()
+            }
+            if all(value is None for value in values.values()):
+                continue
+            any_metrics = True
+            values_valid = all(
+                isinstance(value, (int, float))
+                and not isinstance(value, bool)
+                and math.isfinite(value)
+                and value >= 0
+                for value in values.values()
+            )
+            values_valid = (
+                values_valid
+                and values["call_count"] > 0
+                and values["max_time_s"] <= values["total_time_s"]
+            )
+            row_valid = row_valid and values_valid
+            by_step[step_kind] = {
+                **values,
+                "average_time_cv": variation.get(names["average_time_s"]),
+                "valid": values_valid,
+            }
+        rows.append(
+            {
+                "label": run.get("label"),
+                "tensor_parallel_size": run.get("tensor_parallel_size"),
+                "weight_quant_backend": run.get("weight_quant_backend"),
+                "kv_cache_dtype": run.get("kv_cache_dtype"),
+                "steps": by_step,
+                "valid": row_valid and bool(by_step),
+            }
+        )
+    return {
+        "available": any_metrics,
+        "valid": any_metrics and all(row["valid"] for row in rows),
+        "runs": rows if any_metrics else [],
+    }
+
+
 def summarize_optional_fp8_audit(
     run_dir: Path,
     run_id: str | None = None,
@@ -3392,6 +3454,9 @@ def summarize(run_dir: Path, run_id: str) -> dict:
     recurrent_state_access = summarize_recurrent_state_access(
         performance["runs"]
     )
+    host_input_preparation = summarize_host_input_preparation(
+        performance["runs"]
+    )
 
     kernels = {}
     normalization = {}
@@ -4472,6 +4537,10 @@ def summarize(run_dir: Path, run_id: str) -> dict:
         ),
         "performance_generation_valid": performance["all_generation_valid"],
         "performance_output_parity": performance["all_output_digests_match"],
+        "host_input_preparation_valid": (
+            not host_input_preparation["available"]
+            or host_input_preparation["valid"]
+        ),
         "moe_runtime_output_parity": all(
             item["output_digest_matches"]
             for by_kv in moe_runtime.values()
@@ -4627,6 +4696,7 @@ def summarize(run_dir: Path, run_id: str) -> dict:
             "best_throughput": best_throughput,
             "lowest_peak_memory": lowest_memory,
             "recurrent_state_access": recurrent_state_access,
+            "host_input_preparation": host_input_preparation,
         },
         "memory": {
             "by_tp": memory_by_tp,
