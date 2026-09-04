@@ -284,6 +284,23 @@ def test_receive_rejects_wrong_cache_fingerprint_before_payload_allocation():
     assert pool.storage_stats()["allocation_count"] == 0
 
 
+def test_receive_rejects_wrong_token_fingerprint_before_payload_allocation():
+    sink = BufferSocket()
+    send_rank_cache_transfer(sink, make_payload())
+    source = BufferSocket(sink.data)
+    pool = HostStagingBufferPool()
+
+    with pytest.raises(ValueError, match="token fingerprint does not match"):
+        receive_rank_cache_transfer(
+            source,
+            host_staging_pool=pool,
+            expected_token_fingerprint="another-prompt",
+        )
+
+    assert source.offset < len(source.data)
+    assert pool.storage_stats()["allocation_count"] == 0
+
+
 @pytest.mark.parametrize(
     ("name", "value"),
     [
@@ -602,6 +619,7 @@ def test_model_runner_async_receive_polls_then_installs_before_ack():
         endpoints,
         2.0,
         expected_cached_tokens=payload.cached_tokens,
+        expected_token_fingerprint=payload.token_fingerprint,
     ) == {"rank": 0, "started": 1}
     sender_result = []
     sender_thread = Thread(
@@ -695,6 +713,7 @@ def test_model_runner_async_receive_nacks_payload_smaller_than_preflight():
         2.0,
         expected_payload_bytes=[payload.nbytes + 1],
         expected_cached_tokens=payload.cached_tokens,
+        expected_token_fingerprint=payload.token_fingerprint,
     )
     sender_errors = []
 

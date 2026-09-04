@@ -224,6 +224,7 @@ def receive_rank_cache_transfer(
     expected_block_size: int | None = None,
     expected_cached_tokens: int | None = None,
     expected_cache_fingerprint: str | None = None,
+    expected_token_fingerprint: str | None = None,
     expected_payload_bytes: int | None = None,
 ) -> RankCacheTransfer:
     """Receive and verify one payload into newly owned CPU tensors."""
@@ -293,6 +294,7 @@ def receive_rank_cache_transfer(
         ("block size", block_size, expected_block_size),
         ("cached token count", cached_tokens, expected_cached_tokens),
         ("fingerprint", cache_fingerprint, expected_cache_fingerprint),
+        ("token fingerprint", token_fingerprint, expected_token_fingerprint),
         ("payload byte count", body_bytes, expected_payload_bytes),
     )
     for name, actual, expected in expectations:
@@ -421,6 +423,8 @@ def receive_peer_cache_fragment(
     expected_src_rank: int | None = None,
     expected_dst_rank: int | None = None,
     expected_cache_fingerprint: str | None = None,
+    expected_token_fingerprint: str | None = None,
+    expected_cached_tokens: int | None = None,
     expected_payload_bytes: int | None = None,
 ) -> PeerCacheFragment:
     """Receive and verify one heterogeneous-TP peer fragment."""
@@ -473,6 +477,12 @@ def receive_peer_cache_fragment(
         ("source rank", integers["src_rank"], expected_src_rank),
         ("destination rank", integers["dst_rank"], expected_dst_rank),
         ("fingerprint", cache_fingerprint, expected_cache_fingerprint),
+        ("token fingerprint", token_fingerprint, expected_token_fingerprint),
+        (
+            "cached token count",
+            integers["cached_tokens"],
+            expected_cached_tokens,
+        ),
         ("payload byte count", body_bytes, expected_payload_bytes),
     )
     for name, actual, expected in expectations:
@@ -587,6 +597,7 @@ class RankCacheReceiver:
         expected_block_size: int | None = None,
         expected_cached_tokens: int | None = None,
         expected_cache_fingerprint: str | None = None,
+        expected_token_fingerprint: str | None = None,
         expected_payload_bytes: int | None = None,
     ) -> None:
         if not isinstance(host, str) or not host:
@@ -606,6 +617,7 @@ class RankCacheReceiver:
             "expected_block_size": expected_block_size,
             "expected_cached_tokens": expected_cached_tokens,
             "expected_cache_fingerprint": expected_cache_fingerprint,
+            "expected_token_fingerprint": expected_token_fingerprint,
             "expected_payload_bytes": expected_payload_bytes,
         }
         self._listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -680,6 +692,7 @@ class PendingRankCacheReceive:
         expected_block_size: int | None = None,
         expected_cached_tokens: int | None = None,
         expected_cache_fingerprint: str | None = None,
+        expected_token_fingerprint: str | None = None,
         expected_payload_bytes: int | None = None,
     ) -> None:
         self._receiver = RankCacheReceiver(
@@ -694,6 +707,7 @@ class PendingRankCacheReceive:
             expected_block_size=expected_block_size,
             expected_cached_tokens=expected_cached_tokens,
             expected_cache_fingerprint=expected_cache_fingerprint,
+            expected_token_fingerprint=expected_token_fingerprint,
             expected_payload_bytes=expected_payload_bytes,
         )
         self._timeout_s = timeout_s
@@ -834,6 +848,8 @@ class PendingPeerCacheReceiveGroup:
         dst_rank: int,
         dst_tp_size: int,
         expected_cache_fingerprint: str | None = None,
+        expected_token_fingerprint: str | None = None,
+        expected_cached_tokens: int | None = None,
         expected_peer_bytes: dict[int, int],
         timeout_s: float = 30.0,
         max_payload_bytes: int = DEFAULT_MAX_PAYLOAD_BYTES,
@@ -853,6 +869,21 @@ class PendingPeerCacheReceiveGroup:
             or not expected_cache_fingerprint
         ):
             raise ValueError("peer cache receiver fingerprint must not be empty")
+        if expected_token_fingerprint is not None and (
+            not isinstance(expected_token_fingerprint, str)
+            or not expected_token_fingerprint
+        ):
+            raise ValueError(
+                "peer cache receiver token fingerprint must not be empty"
+            )
+        if expected_cached_tokens is not None and (
+            not isinstance(expected_cached_tokens, int)
+            or isinstance(expected_cached_tokens, bool)
+            or expected_cached_tokens <= 0
+        ):
+            raise ValueError(
+                "peer cache receiver cached token count must be positive"
+            )
         if (
             not isinstance(dst_rank, int)
             or isinstance(dst_rank, bool)
@@ -886,6 +917,8 @@ class PendingPeerCacheReceiveGroup:
         self._dst_rank = dst_rank
         self._dst_tp_size = dst_tp_size
         self._expected_cache_fingerprint = expected_cache_fingerprint
+        self._expected_token_fingerprint = expected_token_fingerprint
+        self._expected_cached_tokens = expected_cached_tokens
         self._expected_peer_bytes = dict(expected_peer_bytes)
         self._timeout_s = timeout_s
         self._max_payload_bytes = max_payload_bytes
@@ -956,6 +989,8 @@ class PendingPeerCacheReceiveGroup:
                 expected_transfer_id=self._transfer_id,
                 expected_dst_rank=self._dst_rank,
                 expected_cache_fingerprint=self._expected_cache_fingerprint,
+                expected_token_fingerprint=self._expected_token_fingerprint,
+                expected_cached_tokens=self._expected_cached_tokens,
             )
             expected_bytes = self._expected_peer_bytes.get(fragment.src_rank)
             if expected_bytes is None:

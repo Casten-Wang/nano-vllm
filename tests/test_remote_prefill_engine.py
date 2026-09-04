@@ -4,6 +4,7 @@ from unittest.mock import Mock, call
 
 import pytest
 
+from nanovllm.engine.cache_transfer import build_token_fingerprint
 from nanovllm.engine.llm_engine import (
     LLMEngine,
     MAX_RETAINED_REMOTE_PREFILL_ERRORS,
@@ -745,7 +746,7 @@ def test_expired_reservation_cannot_start_heterogeneous_receive():
     [
         (False, False, "receive_sequence_cache_from_endpoint", 4),
         (False, True, "start_sequence_cache_receive", 3),
-        (True, True, "start_heterogeneous_sequence_cache_receive", 5),
+        (True, True, "start_heterogeneous_sequence_cache_receive", 6),
     ],
 )
 def test_receive_timeout_is_bounded_by_reservation_deadline(
@@ -1053,6 +1054,13 @@ def test_engine_async_receive_commits_only_after_all_ranks_are_ready():
         [("127.0.0.1", 20001), ("127.0.0.1", 20002)],
     )
     assert started_id == seq_id
+    start_call = next(
+        item
+        for item in engine.model_runner.call_rank_results.call_args_list
+        if item.args[0] == "start_sequence_cache_receive"
+    )
+    assert start_call.args[0] == "start_sequence_cache_receive"
+    assert start_call.args[7] == build_token_fingerprint([1, 2, 3, 4], 4)
     assert engine.poll_remote_prefill_receive("request/attempt-1") is None
     assert not engine.scheduler.running
 
@@ -1086,6 +1094,13 @@ def test_heterogeneous_receive_commits_only_after_all_destination_ranks_install(
         9,
         [("127.0.0.1", 20001), ("127.0.0.1", 20002)],
     ) == seq_id
+    start_call = next(
+        item
+        for item in engine.model_runner.call_rank_results.call_args_list
+        if item.args[0] == "start_heterogeneous_sequence_cache_receive"
+    )
+    assert start_call.args[0] == "start_heterogeneous_sequence_cache_receive"
+    assert start_call.args[5] == build_token_fingerprint([1, 2, 3, 4], 4)
     assert engine.poll_remote_prefill_receive("request/attempt-1") is None
     assert not engine.scheduler.running
 

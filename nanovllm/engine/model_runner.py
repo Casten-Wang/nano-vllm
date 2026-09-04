@@ -1824,6 +1824,7 @@ class ModelRunner:
         bind_endpoints: list[tuple[str, int]],
         source_tp_size: int,
         expected_cached_tokens: int,
+        expected_token_fingerprint: str,
         timeout_s: float = 30.0,
         max_payload_bytes: int = 16 * 1024**3,
     ) -> dict:
@@ -1868,6 +1869,8 @@ class ModelRunner:
             dst_rank=self.rank,
             dst_tp_size=self.world_size,
             expected_cache_fingerprint=_runner_cache_fingerprint(self),
+            expected_token_fingerprint=expected_token_fingerprint,
+            expected_cached_tokens=expected_cached_tokens,
             expected_peer_bytes=expected_peer_bytes,
             timeout_s=timeout_s,
             max_payload_bytes=max_payload_bytes,
@@ -2304,6 +2307,9 @@ class ModelRunner:
             expected_block_size=self.block_size,
             expected_cached_tokens=seq.num_prompt_tokens,
             expected_cache_fingerprint=_runner_cache_fingerprint(self),
+            expected_token_fingerprint=_sequence_token_fingerprint(
+                seq, seq.num_prompt_tokens
+            ),
             expected_payload_bytes=expected_bytes,
         ) as receiver:
             payload = receiver.receive(
@@ -2329,6 +2335,7 @@ class ModelRunner:
         max_payload_bytes: int = 16 * 1024**3,
         expected_payload_bytes: list[int] | None = None,
         expected_cached_tokens: int | None = None,
+        expected_token_fingerprint: str | None = None,
     ) -> dict:
         """Start rank-local TCP receive without touching CUDA state."""
 
@@ -2364,6 +2371,7 @@ class ModelRunner:
             expected_block_size=self.block_size,
             expected_cached_tokens=expected_cached_tokens,
             expected_cache_fingerprint=_runner_cache_fingerprint(self),
+            expected_token_fingerprint=expected_token_fingerprint,
             expected_payload_bytes=(
                 None
                 if expected_payload_bytes is None

@@ -253,6 +253,32 @@ def test_peer_fragment_wire_rejects_corrupted_payload():
         receive_peer_cache_fragment(wire)
 
 
+def test_peer_fragment_rejects_wrong_prompt_before_payload_allocation(monkeypatch):
+    fragment = build_qwen35_peer_cache_fragments(
+        make_payload(0, 4, with_scales=False),
+        make_plan(with_scales=False),
+    )[0]
+    wire = MemorySocket()
+    send_peer_cache_fragment(wire, fragment)
+    original_empty = torch.empty
+    allocations = []
+
+    def tracked_empty(*args, **kwargs):
+        allocations.append((args, kwargs))
+        return original_empty(*args, **kwargs)
+
+    monkeypatch.setattr(torch, "empty", tracked_empty)
+    with pytest.raises(ValueError, match="token fingerprint does not match"):
+        receive_peer_cache_fragment(
+            wire,
+            expected_token_fingerprint="another-prompt",
+            expected_cached_tokens=fragment.cached_tokens,
+        )
+
+    assert wire.offset < len(wire.data)
+    assert allocations == []
+
+
 @pytest.mark.parametrize("src_tp,dst_tp", [(4, 8), (8, 4)])
 @pytest.mark.parametrize("with_scales", [False, True])
 def test_destination_assembly_matches_direct_tensor_routes(
@@ -778,6 +804,8 @@ def test_multi_peer_receiver_defers_ack_until_atomic_assembly():
         transfer_id="request/attempt-1",
         dst_rank=0,
         dst_tp_size=dst_tp,
+        expected_token_fingerprint="legacy-unscoped",
+        expected_cached_tokens=7,
         expected_peer_bytes=expected_peer_bytes,
         timeout_s=2.0,
     )
@@ -882,6 +910,7 @@ def test_model_runner_installs_before_acknowledging_peer_receivers():
             endpoints,
             4,
             7,
+            "prompt-fingerprint",
         )
 
     assert started == {
@@ -897,6 +926,8 @@ def test_model_runner_installs_before_acknowledging_peer_receivers():
         dst_rank=0,
         dst_tp_size=8,
         expected_cache_fingerprint="legacy-unscoped",
+        expected_token_fingerprint="prompt-fingerprint",
+        expected_cached_tokens=7,
         expected_peer_bytes={
             src_rank: byte_count
             for src_rank, dst_rank, byte_count in plan.profile.peer_bytes

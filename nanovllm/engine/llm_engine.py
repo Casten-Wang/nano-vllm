@@ -15,6 +15,7 @@ from nanovllm.engine.scheduler import ScheduleResult, Scheduler
 from nanovllm.engine.cache_transfer import (
     CacheTransferPhase,
     CacheTransferSession,
+    build_token_fingerprint,
     validate_cache_transfer_id,
     validate_cache_transfer_payload_limit,
     validate_cache_transfer_timeout,
@@ -652,6 +653,10 @@ class LLMEngine:
         seq, reservation_timeout_s = (
             self._require_live_remote_prefill_reservation(transfer_id)
         )
+        expected_token_fingerprint = build_token_fingerprint(
+            seq.token_ids,
+            seq.num_prompt_tokens,
+        )
         timeout_s = min(timeout_s, reservation_timeout_s)
         expected_by_rank = self._remote_prefill_receive_expected_bytes[
             transfer_id
@@ -673,6 +678,7 @@ class LLMEngine:
                 max_payload_bytes,
                 [expected_by_rank[rank] for rank in range(self.config.tensor_parallel_size)],
                 seq.num_prompt_tokens,
+                expected_token_fingerprint,
             )
             _validate_rank_results(
                 rank_results,
@@ -761,6 +767,10 @@ class LLMEngine:
         seq, reservation_timeout_s = (
             self._require_live_remote_prefill_reservation(transfer_id)
         )
+        expected_token_fingerprint = build_token_fingerprint(
+            seq.token_ids,
+            seq.num_prompt_tokens,
+        )
         timeout_s = min(timeout_s, reservation_timeout_s)
         staged_bytes = self._remote_prefill_receive_reserved_staged_bytes[transfer_id]
         receive_started_at = perf_counter()
@@ -771,6 +781,7 @@ class LLMEngine:
                 bind_endpoints,
                 source_sizes[transfer_id],
                 seq.num_prompt_tokens,
+                expected_token_fingerprint,
                 timeout_s,
                 max_payload_bytes,
             )
