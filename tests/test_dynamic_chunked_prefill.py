@@ -1299,6 +1299,8 @@ def test_min_recompute_can_reclaim_partial_waiting_prefill():
     assert partial.num_cached_tokens == 0
     assert scheduler.preemption_count == 1
     assert scheduler.preempted_token_progress == 4
+    assert partial.num_preemptions == 1
+    assert partial.preempted_token_progress == 4
 
 
 def test_prefill_pressure_reclaims_another_partial_waiting_request():

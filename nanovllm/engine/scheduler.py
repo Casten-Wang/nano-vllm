@@ -1041,6 +1041,8 @@ class Scheduler:
             self.state_manager.release(seq.seq_id)
             seq.state_slot = None
         self.waiting.appendleft(seq)
+        seq.num_preemptions += 1
+        seq.preempted_token_progress += discarded_tokens
         self.preemption_count += 1
         self.preempted_token_progress += discarded_tokens
         self.max_preempted_token_progress = max(

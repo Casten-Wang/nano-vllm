@@ -40,6 +40,11 @@ class Sequence:
         self.arrival_time: float | None = None
         self.first_token_time: float | None = None
         self.finish_time: float | None = None
+        # Scheduler-owned attribution. These counters stay on the request so
+        # tail-latency samples can be connected to the pressure that caused
+        # them instead of relying only on engine-wide totals.
+        self.num_preemptions = 0
+        self.preempted_token_progress = 0
         self.temperature = sampling_params.temperature
         self.top_k = sampling_params.top_k
         self.top_p = sampling_params.top_p

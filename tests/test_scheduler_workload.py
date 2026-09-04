@@ -199,6 +199,8 @@ class FakeEngine:
                 "seq_id": seq_id,
                 "prompt_tokens": len(prompt),
                 "output_tokens": actual,
+                "preemption_count": seq_id,
+                "preempted_token_progress": seq_id * 8,
                 "ttft_s": float(seq_id + 1),
                 "tpot_s": 0.5,
                 "latency_s": float(seq_id + 2),
@@ -252,6 +254,8 @@ def test_replay_injects_at_logical_steps_and_preserves_raw_evidence():
     assert result["step_samples"][0]["admitted_request_ids"] == ["first"]
     assert result["step_samples"][1]["admitted_request_ids"] == ["second"]
     assert result["request_samples"][1]["completion_step"] == 3
+    assert result["request_samples"][1]["preemption_count"] == 1
+    assert result["request_samples"][1]["preempted_token_progress"] == 8
     assert result["output_token_ids"]["request_count"] == 2
     assert result["output_token_ids"]["token_count"] == 8
     assert len(result["output_token_ids"]["digest"]) == 64

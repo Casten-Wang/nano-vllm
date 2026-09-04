@@ -422,6 +422,10 @@ def replay_scheduler_workload(
                 "input_tokens": request.input_len,
                 "requested_output_tokens": request.output_len,
                 "output_tokens": len(token_ids),
+                "preemption_count": int(metric.get("preemption_count", 0)),
+                "preempted_token_progress": int(
+                    metric.get("preempted_token_progress", 0)
+                ),
                 "ttft_s": metric["ttft_s"],
                 "tpot_s": metric["tpot_s"],
                 "latency_s": metric["latency_s"],

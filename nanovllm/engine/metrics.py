@@ -267,6 +267,8 @@ class EngineMetrics:
                 "seq_id": seq.seq_id,
                 "prompt_tokens": seq.num_prompt_tokens,
                 "output_tokens": num_output_tokens,
+                "preemption_count": seq.num_preemptions,
+                "preempted_token_progress": seq.preempted_token_progress,
                 "ttft_s": ttft,
                 "tpot_s": tpot,
                 "latency_s": latency,
