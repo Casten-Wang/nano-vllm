@@ -228,6 +228,36 @@ def commands(args: argparse.Namespace) -> list[tuple[str, list[str]]]:
             )
             result.append(
                 (
+                    f"pd-export-bounded-{profile_name}-tp{tp_size}",
+                    [
+                        sys.executable,
+                        str(CACHE_EXPORT_SCRIPT),
+                        "--memory-preflight",
+                        str(root / "preflight" / "memory_preflight.json"),
+                        "--tp-size",
+                        str(tp_size),
+                        "--kv-dtype",
+                        kv_dtype,
+                        "--state-dtype",
+                        state_dtype,
+                        "--warmup",
+                        "2",
+                        "--repeats",
+                        "10",
+                        "--max-cached-bytes",
+                        "0",
+                        "--output",
+                        str(
+                            root
+                            / "pd_export_bounded"
+                            / f"tp{tp_size}"
+                            / f"{profile_name}.json"
+                        ),
+                    ],
+                )
+            )
+            result.append(
+                (
                     f"pd-transfer-{profile_name}-tp{tp_size}",
                     [
                         sys.executable,

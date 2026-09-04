@@ -1995,6 +1995,27 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
                 "limitations": ["synthetic export benchmark"],
             },
         )
+        bounded_export = json.loads(
+            (
+                tmp_path / f"pd_export/tp4/{profile_name}.json"
+            ).read_text()
+        )
+        bounded_export["profile"]["max_cached_bytes"] = 0
+        bounded_pool = bounded_export["candidate_direct_host_staging"][
+            "host_staging_pool"
+        ]
+        bounded_pool.update({
+            "max_cached_bytes": 0,
+            "storage_bytes": 0,
+            "allocation_count": 0,
+            "reuse_count": 0,
+            "expected_reuse_count": 0,
+            "transient_allocation_count": 12,
+        })
+        write(
+            tmp_path / f"pd_export_bounded/tp4/{profile_name}.json",
+            bounded_export,
+        )
 
     report = MODULE.summarize(tmp_path, run_id)
 
@@ -2032,11 +2053,15 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     assert report["evidence"]["kv_storage_matches_preflight"]
     assert report["evidence"]["pd_transfer_baseline_valid"]
     assert report["evidence"]["pd_export_memory_evidence"]
+    assert report["evidence"]["pd_export_retention_bound_evidence"]
     assert report["pd_export"]["by_tp"]["tp4"]["int8-model"]["valid"]
     assert report["pd_export"]["by_tp"]["tp4"]["int8-model"][
         "candidate_host_layout"
     ]["storage_count"] == 1
     assert report["pd_export"]["by_tp"]["tp4"]["int8-model"][
+        "host_staging_pool"
+    ]["valid"]
+    assert report["pd_export"]["bounded_by_tp"]["tp4"]["int8-model"][
         "host_staging_pool"
     ]["valid"]
     assert report["pd_transfer"]["by_tp"]["tp4"]["int8-model"]["valid"]

@@ -2266,6 +2266,7 @@ def summarize_pd_export(
     expected_components: dict,
     expected_allocated_tokens: int,
     expected_cached_tokens: int,
+    expected_max_cached_bytes: int | None = None,
 ) -> dict:
     profile = result.get("profile", {})
     reference = result.get("reference_gpu_gather_then_host_copy", {})
@@ -2284,15 +2285,28 @@ def summarize_pd_export(
         and repeats > 0
         else None
     )
+    attempts = (
+        warmup + repeats
+        if expected_reuse_count is not None
+        else None
+    )
+    cacheable = (
+        expected_max_cached_bytes is None
+        or expected_components["total"] <= expected_max_cached_bytes
+    )
     staging_pool_valid = (
         staging_pool.get("valid") is True
-        and staging_pool.get("allocation_count") == 1
-        and staging_pool.get("reuse_count") == expected_reuse_count
-        and staging_pool.get("expected_reuse_count") == expected_reuse_count
-        and staging_pool.get("transient_allocation_count") == 0
+        and staging_pool.get("max_cached_bytes") == expected_max_cached_bytes
+        and staging_pool.get("allocation_count") == int(cacheable)
+        and staging_pool.get("reuse_count")
+        == (expected_reuse_count if cacheable else 0)
+        and staging_pool.get("expected_reuse_count")
+        == (expected_reuse_count if cacheable else 0)
+        and staging_pool.get("transient_allocation_count")
+        == (0 if cacheable else attempts)
         and staging_pool.get("leased") == 0
-        and isinstance(staging_pool.get("storage_bytes"), int)
-        and staging_pool["storage_bytes"] >= expected_components["total"]
+        and staging_pool.get("storage_bytes")
+        == (expected_components["total"] if cacheable else 0)
     )
 
     def measurements_valid(item: dict) -> bool:
@@ -2326,6 +2340,7 @@ def summarize_pd_export(
         and profile.get("components") == expected_components
         and profile.get("allocated_tokens") == expected_allocated_tokens
         and profile.get("cached_tokens") == expected_cached_tokens
+        and profile.get("max_cached_bytes") == expected_max_cached_bytes
         and isinstance(result.get("environment", {}).get("device"), str)
         and bool(result["environment"]["device"])
         and result.get("correctness", {}).get("candidate_matches_reference")
@@ -2633,6 +2648,7 @@ def summarize(run_dir: Path, run_id: str) -> dict:
     memory_by_tp = summarize_memory_preflight(memory)
     pd_transfer = {}
     pd_export = {}
+    pd_export_bounded = {}
     for tp_name in sorted(expected_tp_names):
         tp_size = int(tp_name.removeprefix("tp"))
         expected_profiles = (
@@ -2672,6 +2688,28 @@ def summarize(run_dir: Path, run_id: str) -> dict:
                     expected_cached_tokens=memory["results"][tp_name][
                         "pd_transfer_context_tokens"
                     ],
+                )
+            )
+            bounded_export_result = load_json(
+                run_dir
+                / "pd_export_bounded"
+                / tp_name
+                / f"{profile_name}.json"
+            )
+            pd_export_bounded.setdefault(tp_name, {})[profile_name] = (
+                summarize_pd_export(
+                    bounded_export_result,
+                    expected_tp_size=tp_size,
+                    expected_kv_dtype=kv_dtype,
+                    expected_state_dtype=state_dtype,
+                    expected_components=expected_components,
+                    expected_allocated_tokens=memory["results"][tp_name][
+                        "pd_transfer_allocated_tokens"
+                    ],
+                    expected_cached_tokens=memory["results"][tp_name][
+                        "pd_transfer_context_tokens"
+                    ],
+                    expected_max_cached_bytes=0,
                 )
             )
     def rank_storage_matches(row, field, expected):
@@ -3592,6 +3630,14 @@ def summarize(run_dir: Path, run_id: str) -> dict:
                 for profiles in pd_export.values()
             )
         ),
+        "pd_export_retention_bound_evidence": (
+            set(pd_export_bounded) == expected_tp_names
+            and all(
+                set(profiles) == {"auto-float32", "int8-model"}
+                and all(item["valid"] for item in profiles.values())
+                for profiles in pd_export_bounded.values()
+            )
+        ),
         "rotary_storage_matches_preflight": rotary_storage_matches_preflight,
         "recurrent_storage_matches_preflight": (
             recurrent_storage_matches_preflight
@@ -3758,6 +3804,7 @@ def summarize(run_dir: Path, run_id: str) -> dict:
         "pd_export": {
             "scope": "synthetic single-rank GPU-to-host export evidence",
             "by_tp": pd_export,
+            "bounded_by_tp": pd_export_bounded,
         },
         "quality": {
             "scope": quality["quality_scope"],
