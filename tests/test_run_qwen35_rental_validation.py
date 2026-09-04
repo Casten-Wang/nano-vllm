@@ -63,6 +63,7 @@ def args():
         result_dir="benchmark_results/qwen35_rental",
         dry_run=True,
         resume=False,
+        stage_limit=None,
     )
 
 
@@ -96,6 +97,71 @@ def runtime_environment(**overrides):
     }
     environment.update(overrides)
     return environment
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "1.5", "many"])
+def test_stage_limit_rejects_non_positive_integers(value):
+    with pytest.raises(MODULE.argparse.ArgumentTypeError, match="positive integer"):
+        MODULE.positive_int(value)
+
+
+def test_stage_limit_counts_only_unfinished_stages():
+    stages = [
+        ("audit", ["audit"]),
+        ("preflight", ["preflight"]),
+        ("benchmark", ["benchmark"]),
+        ("summary", ["summary"]),
+    ]
+
+    selected = MODULE.pending_stage_window(
+        stages,
+        {"audit", "benchmark"},
+        stage_limit=1,
+    )
+
+    assert selected == [(2, "preflight", ["preflight"])]
+
+
+def test_stage_limit_is_not_part_of_resume_manifest_identity():
+    arguments = args()
+    stages = MODULE.commands(arguments)
+    unlimited = MODULE.manifest_plan(arguments, stages, runtime_environment())
+    arguments.stage_limit = 2
+    limited = MODULE.manifest_plan(arguments, stages, runtime_environment())
+
+    assert limited == unlimited
+
+
+def test_dry_run_prints_only_limited_stage_window(monkeypatch, capsys):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_qwen35_rental_validation.py",
+            "--model",
+            "/models/qwen35",
+            "--dry-run",
+            "--stage-limit",
+            "2",
+        ],
+    )
+    monkeypatch.setattr(
+        MODULE,
+        "commands",
+        lambda _args: [
+            ("audit", ["run", "audit"]),
+            ("preflight", ["run", "preflight"]),
+            ("benchmark", ["run", "benchmark"]),
+        ],
+    )
+
+    MODULE.main()
+
+    output = capsys.readouterr().out
+    assert "[1/3] audit" in output
+    assert "[2/3] preflight" in output
+    assert "[3/3] benchmark" not in output
+    assert "stage limit reached; 1 stage(s) would remain after this invocation" in output
 
 
 def test_commands_are_fail_fast_and_cover_complete_validation_suite():

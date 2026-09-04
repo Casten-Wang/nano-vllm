@@ -103,6 +103,16 @@ def validate_run_id(value: str) -> str:
     return value
 
 
+def positive_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("value must be a positive integer") from error
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("value must be a positive integer")
+    return parsed
+
+
 def source_tree_sha256() -> str:
     """Fingerprint executable project sources used by rental validation."""
 
@@ -1116,6 +1126,21 @@ def manifest_plan(
     }
 
 
+def pending_stage_window(
+    stages: list[tuple[str, list[str]]],
+    completed_stages: set[str],
+    stage_limit: int | None,
+) -> list[tuple[int, str, list[str]]]:
+    """Select this invocation's work without changing the persisted full plan."""
+
+    pending = [
+        (index, name, command)
+        for index, (name, command) in enumerate(stages, start=1)
+        if name not in completed_stages
+    ]
+    return pending if stage_limit is None else pending[:stage_limit]
+
+
 def validate_runtime_environment(environment: dict) -> None:
     """Require enough provenance to prevent mixed-environment rental results."""
 
@@ -1842,6 +1867,15 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Resume only stages recorded by an identical run manifest.",
     )
+    parser.add_argument(
+        "--stage-limit",
+        type=positive_int,
+        default=None,
+        help=(
+            "Run at most this many unfinished stages in this invocation. "
+            "The full plan remains resumable with --resume."
+        ),
+    )
     args = parser.parse_args()
     args.run_id = args.run_id or datetime.now(timezone.utc).strftime(
         "rental_%Y%m%dT%H%M%S%fZ"
@@ -1905,10 +1939,15 @@ def main() -> None:
                 validate_resumed_hardware(args, manifest)
         except (ValueError, RuntimeError) as error:
             raise SystemExit(str(error)) from error
-    for index, (name, command) in enumerate(stages, start=1):
-        if manifest is not None and name in manifest["completed_stages"]:
-            print(f"[{index}/{len(stages)}] {name} (already completed)", flush=True)
-            continue
+    completed_stages = (
+        set(manifest["completed_stages"]) if manifest is not None else set()
+    )
+    invocation_stages = pending_stage_window(
+        stages,
+        completed_stages,
+        args.stage_limit,
+    )
+    for index, name, command in invocation_stages:
         print(f"[{index}/{len(stages)}] {name}", flush=True)
         print(subprocess.list2cmdline(command), flush=True)
         if not args.dry_run:
@@ -1930,6 +1969,17 @@ def main() -> None:
                     identity_name
                 ] = attestation
             mark_stage_completed(manifest_path, manifest, name, artifacts)
+    remaining = len(stages) - len(completed_stages) - len(invocation_stages)
+    if args.stage_limit is not None and remaining > 0:
+        suffix = (
+            "would remain after this invocation"
+            if args.dry_run
+            else "remain for --resume"
+        )
+        print(
+            f"stage limit reached; {remaining} stage(s) {suffix}",
+            flush=True,
+        )
 
 
 if __name__ == "__main__":
