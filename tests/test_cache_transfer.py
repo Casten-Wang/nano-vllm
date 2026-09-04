@@ -885,6 +885,28 @@ def test_transfer_session_timeout_requires_colocated_fallback():
         session.acknowledge(1, now=12.1)
 
 
+@pytest.mark.parametrize(
+    "timeout_s",
+    [
+        0.0,
+        -1.0,
+        float("nan"),
+        float("inf"),
+        True,
+        "1",
+        10**1000,
+    ],
+)
+def test_transfer_session_rejects_invalid_timeout(timeout_s):
+    with pytest.raises(ValueError, match="timeout must be a finite positive number"):
+        CacheTransferSession(
+            "request-invalid-timeout/attempt-1",
+            2,
+            started_at=10.0,
+            timeout_s=timeout_s,
+        )
+
+
 def test_transfer_session_rank_failure_aborts_all_rank_commit():
     session = CacheTransferSession(
         "request-8/attempt-1",

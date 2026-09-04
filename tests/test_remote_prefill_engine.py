@@ -386,6 +386,26 @@ def test_unstarted_receive_timeout_releases_engine_staging_reservation():
     assert engine.metrics.to_dict()["remote_prefill_reservation_timed_out"] == 1
 
 
+@pytest.mark.parametrize(
+    "timeout_s",
+    [float("nan"), float("inf"), True, "1", 10**1000],
+)
+def test_invalid_reservation_timeout_does_not_acquire_capacity(timeout_s):
+    engine = make_engine()
+    capacity_before = engine.remote_prefill_capacity_snapshot()
+
+    with pytest.raises(ValueError, match="timeout must be a finite positive number"):
+        engine.add_remote_prefill_request(
+            [1, 2, 3, 4],
+            SamplingParams(max_tokens=4),
+            transfer_id="request/attempt-1",
+            timeout_s=timeout_s,
+        )
+
+    assert engine.scheduler.is_finished()
+    assert engine.remote_prefill_capacity_snapshot() == capacity_before
+
+
 def test_expired_reservation_cannot_start_receive():
     engine = make_engine()
     seq_id = engine.add_remote_prefill_request(

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum, auto
+import math
 from threading import Lock
 
 import torch
@@ -177,11 +178,23 @@ class CacheTransferSession:
             raise ValueError("cache transfer id must not be empty")
         if tensor_parallel_size <= 0:
             raise ValueError("cache transfer TP size must be positive")
-        if timeout_s <= 0:
-            raise ValueError("cache transfer timeout must be positive")
+        valid_timeout_type = (
+            isinstance(timeout_s, (int, float))
+            and not isinstance(timeout_s, bool)
+        )
+        try:
+            validated_timeout_s = (
+                float(timeout_s) if valid_timeout_type else math.nan
+            )
+        except (OverflowError, ValueError):
+            validated_timeout_s = math.nan
+        if not math.isfinite(validated_timeout_s) or validated_timeout_s <= 0:
+            raise ValueError(
+                "cache transfer timeout must be a finite positive number"
+            )
         self.transfer_id = transfer_id
         self.tensor_parallel_size = tensor_parallel_size
-        self.deadline = started_at + timeout_s
+        self.deadline = started_at + validated_timeout_s
         self.phase = CacheTransferPhase.RECEIVING
         self.acknowledged_ranks: set[int] = set()
         self.failure_reason: str | None = None
