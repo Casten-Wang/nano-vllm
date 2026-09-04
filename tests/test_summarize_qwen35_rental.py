@@ -34,6 +34,13 @@ def preflight_hardware(tp_size):
 
 def benchmark_environment(device_count=8):
     return {
+        "python_version": "3.12.13",
+        "torch_version": "2.8.0+cu128",
+        "cuda_version": "12.8",
+        "nccl_version": [2, 27, 3],
+        "transformers_version": "4.57.1",
+        "triton_version": "3.4.0",
+        "flash_attn_version": "2.8.3",
         "cuda_device_count": device_count,
         "cuda_devices": [
             {
@@ -45,7 +52,29 @@ def benchmark_environment(device_count=8):
             }
             for rank in range(device_count)
         ],
+        "nvidia_smi_gpus": [
+            f"{rank}, NVIDIA H100 80GB HBM3, 580.95.05, 81000"
+            for rank in range(device_count)
+        ],
+        "nvidia_smi_topology": "GPU0 X GPU1 NV8",
     }
+
+
+def test_benchmark_environment_requires_complete_software_stack():
+    environment = benchmark_environment(4)
+
+    assert MODULE.benchmark_environment_is_complete(environment)
+    environment["cuda_version"] = None
+    assert not MODULE.benchmark_environment_is_complete(environment)
+
+
+def test_benchmark_environment_comparison_rejects_software_drift():
+    reference = benchmark_environment(4)
+    candidate = deepcopy(reference)
+
+    assert MODULE.benchmark_environments_match(reference, candidate)
+    candidate["torch_version"] = "2.9.0+cu130"
+    assert not MODULE.benchmark_environments_match(reference, candidate)
 
 
 def test_preflight_hardware_matches_benchmark_environment():
@@ -704,6 +733,25 @@ def test_optional_fp8_summary_rejects_mixed_source_evidence(tmp_path):
     assert not report["valid"]
 
 
+def test_optional_fp8_summary_rejects_cross_matrix_software_drift(tmp_path):
+    write_fp8_summary_inputs(tmp_path, "run")
+    path = tmp_path / "fp8/performance/run-fp8_matrix_summary.json"
+    performance = json.loads(path.read_text())
+    performance["environment"]["triton_version"] = "4.0.0"
+    write(path, performance)
+
+    report = MODULE.summarize_optional_fp8_audit(
+        tmp_path,
+        "run",
+        fp8_baseline_rows(),
+        expected_environment=benchmark_environment(),
+    )
+
+    assert not report["environment_valid"]
+    assert not report["execution_validated"]
+    assert not report["valid"]
+
+
 def test_optional_fp8_summary_accepts_resident_execution_without_native_claim(tmp_path):
     write_fp8_summary_inputs(
         tmp_path,
@@ -896,6 +944,23 @@ def test_optional_gptq_rejects_cross_machine_memory_evidence(tmp_path):
     report = MODULE.summarize_optional_gptq(tmp_path, "run")
 
     assert not report["memory_preflight_valid"]
+    assert not report["valid"]
+
+
+def test_optional_gptq_rejects_cross_matrix_software_drift(tmp_path):
+    write_gptq_summary_inputs(tmp_path, "run")
+    path = tmp_path / "gptq/performance/run-gptq_matrix_summary.json"
+    performance = json.loads(path.read_text())
+    performance["environment"]["torch_version"] = "2.9.0+cu130"
+    write(path, performance)
+
+    report = MODULE.summarize_optional_gptq(
+        tmp_path,
+        "run",
+        expected_environment=benchmark_environment(),
+    )
+
+    assert not report["environment_valid"]
     assert not report["valid"]
 
 

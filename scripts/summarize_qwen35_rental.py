@@ -85,6 +85,15 @@ OFFICIAL_INDEX_CONTRACTS = {
     "fp8_block": (64_196, 37_454_789_472),
 }
 
+REQUIRED_SOFTWARE_ENVIRONMENT_FIELDS = (
+    "python_version",
+    "torch_version",
+    "cuda_version",
+    "transformers_version",
+    "triton_version",
+    "flash_attn_version",
+)
+
 
 def ranked_records_complete(records: object, tp_size: object) -> bool:
     """Return whether records identify every TP rank exactly once."""
@@ -153,6 +162,49 @@ def preflight_hardware_matches_environment(
             ):
                 return False
     return True
+
+
+def benchmark_environment_is_complete(environment: dict) -> bool:
+    """Return whether a GPU benchmark identifies its executable software stack."""
+
+    if not isinstance(environment, dict):
+        return False
+    if any(
+        not isinstance(environment.get(field), str)
+        or not environment[field].strip()
+        or environment[field] == "unknown"
+        for field in REQUIRED_SOFTWARE_ENVIRONMENT_FIELDS
+    ):
+        return False
+    nccl_version = environment.get("nccl_version")
+    if (
+        not isinstance(nccl_version, (int, str, list))
+        or isinstance(nccl_version, bool)
+        or not nccl_version
+    ):
+        return False
+    device_count = environment.get("cuda_device_count")
+    smi_rows = environment.get("nvidia_smi_gpus")
+    return (
+        isinstance(device_count, int)
+        and not isinstance(device_count, bool)
+        and device_count > 0
+        and isinstance(smi_rows, list)
+        and len(smi_rows) == device_count
+        and all(isinstance(row, str) and row.strip() for row in smi_rows)
+        and isinstance(environment.get("nvidia_smi_topology"), str)
+        and bool(environment["nvidia_smi_topology"].strip())
+    )
+
+
+def benchmark_environments_match(reference: dict, candidate: dict) -> bool:
+    """Require complete, byte-for-byte comparable benchmark environments."""
+
+    return (
+        benchmark_environment_is_complete(reference)
+        and benchmark_environment_is_complete(candidate)
+        and reference == candidate
+    )
 
 
 def expected_checkpoint_semantic_contract(quantization_format: str) -> dict:
@@ -422,6 +474,7 @@ def summarize_optional_gptq(
     run_dir: Path,
     run_id: str,
     expected_source_commit: str | None = None,
+    expected_environment: dict | None = None,
 ) -> dict:
     """Validate and summarize the optional GPTQ rental stages."""
 
@@ -519,6 +572,14 @@ def summarize_optional_gptq(
             and checkpoint_quality.get("commit") == expected_source_commit
         )
     )
+    environment_valid = (
+        benchmark_environment_is_complete(performance.get("environment", {}))
+        if expected_environment is None
+        else benchmark_environments_match(
+            expected_environment,
+            performance.get("environment", {}),
+        )
+    )
     valid_runs = [
         row
         for row in performance_runs
@@ -536,6 +597,7 @@ def summarize_optional_gptq(
             and quality_valid
             and checkpoint_quality_valid
             and source_commit_valid
+            and environment_valid
         ),
         "audit_valid": audit_valid,
         "local_checkpoint_matches_official": local_checkpoint_valid,
@@ -545,6 +607,7 @@ def summarize_optional_gptq(
         "quality_valid": quality_valid,
         "bf16_vs_gptq_quality_valid": checkpoint_quality_valid,
         "source_commit_valid": source_commit_valid,
+        "environment_valid": environment_valid,
         "official_checkpoint": {
             "repo": audit.get("repo"),
             "resolved_revision": audit.get("resolved_revision"),
@@ -655,6 +718,7 @@ def summarize_optional_fp8_audit(
     run_id: str | None = None,
     baseline_rows: list[dict] | None = None,
     expected_source_commit: str | None = None,
+    expected_environment: dict | None = None,
 ) -> dict:
     """Summarize optional FP8 layout and reference-execution evidence."""
 
@@ -1042,6 +1106,14 @@ def summarize_optional_fp8_audit(
             and checkpoint_quality.get("commit") == expected_source_commit
         )
     )
+    environment_valid = (
+        benchmark_environment_is_complete(performance.get("environment", {}))
+        if expected_environment is None
+        else benchmark_environments_match(
+            expected_environment,
+            performance.get("environment", {}),
+        )
+    )
     valid_runs = [
         row
         for row in performance_runs
@@ -1057,6 +1129,7 @@ def summarize_optional_fp8_audit(
         and quality_valid
         and checkpoint_quality_valid
         and source_commit_valid
+        and environment_valid
     )
     report.update(
         {
@@ -1085,6 +1158,7 @@ def summarize_optional_fp8_audit(
             "quality_valid": quality_valid,
             "bf16_vs_fp8_quality_valid": checkpoint_quality_valid,
             "source_commit_valid": source_commit_valid,
+            "environment_valid": environment_valid,
             "tensor_parallel_sizes": sorted(
                 {row["tensor_parallel_size"] for row in performance_runs}
             ),
@@ -3472,6 +3546,7 @@ def summarize(run_dir: Path, run_id: str) -> dict:
     performance = load_json(
         run_dir / "performance" / f"{run_id}_matrix_summary.json"
     )
+    performance_environment = performance.get("environment", {})
     quality = load_json(run_dir / "quality" / f"{run_id}_summary.json")
     decode_conv_quality = load_json(
         run_dir
@@ -3483,12 +3558,14 @@ def summarize(run_dir: Path, run_id: str) -> dict:
         run_dir,
         run_id,
         expected_source_commit=manifest_source_commit,
+        expected_environment=performance_environment,
     )
     fp8 = summarize_optional_fp8_audit(
         run_dir,
         run_id,
         performance.get("runs"),
         expected_source_commit=manifest_source_commit,
+        expected_environment=performance_environment,
     )
     kernel_paths = sorted((run_dir / "kernels").glob("tp*.json"))
     if not kernel_paths:
@@ -4596,6 +4673,9 @@ def summarize(run_dir: Path, run_id: str) -> dict:
                 memory,
                 performance.get("environment", {}),
             )
+        ),
+        "software_environment_valid": benchmark_environment_is_complete(
+            performance_environment
         ),
         "pd_transfer_baseline_valid": (
             set(pd_transfer) == expected_tp_names
