@@ -426,8 +426,15 @@ class LLMEngine:
             [first_token_id],
             value_name="first_token_id",
         )
+        if transfer_id not in self.scheduler.remote_prefills:
+            raise ValueError("cache transfer id is not reserved")
         if transfer_id in getattr(self, "_remote_prefill_receive_tokens", {}):
             raise ValueError("cache receive id is already active")
+        if transfer_id in self._heterogeneous_remote_prefill_source_tp_sizes:
+            raise ValueError(
+                "heterogeneous cache reservations require the heterogeneous "
+                "receive API"
+            )
         seq = self._require_live_remote_prefill_reservation(transfer_id)
         _, session = self.scheduler.remote_prefills[transfer_id]
         expected_by_rank = self._remote_prefill_receive_expected_bytes[
@@ -557,6 +564,11 @@ class LLMEngine:
             receive_tokens = self._remote_prefill_receive_tokens = {}
         if transfer_id in receive_tokens:
             raise ValueError("cache receive id is already active")
+        if transfer_id in self._heterogeneous_remote_prefill_source_tp_sizes:
+            raise ValueError(
+                "heterogeneous cache reservations require the heterogeneous "
+                "receive API"
+            )
         seq = self._require_live_remote_prefill_reservation(transfer_id)
         expected_by_rank = self._remote_prefill_receive_expected_bytes[
             transfer_id

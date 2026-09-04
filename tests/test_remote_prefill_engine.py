@@ -468,6 +468,40 @@ def test_expired_reservation_cannot_start_heterogeneous_receive():
     assert engine.metrics.to_dict()["remote_prefill_reservation_timed_out"] == 1
 
 
+@pytest.mark.parametrize("asynchronous", [False, True])
+def test_regular_receive_api_rejects_heterogeneous_reservation(asynchronous):
+    engine = make_engine(tensor_parallel_size=2)
+    seq_id = engine.add_heterogeneous_remote_prefill_request(
+        [1, 2, 3, 4],
+        SamplingParams(max_tokens=4),
+        transfer_id="request/attempt-1",
+        source_tp_size=4,
+    )
+    capacity = engine.remote_prefill_capacity_snapshot()
+    engine.model_runner.call_rank_results.reset_mock()
+
+    with pytest.raises(ValueError, match="require the heterogeneous receive API"):
+        if asynchronous:
+            engine.start_remote_prefill_receive(
+                "request/attempt-1",
+                9,
+                [("127.0.0.1", 20001), ("127.0.0.1", 20002)],
+            )
+        else:
+            engine.receive_remote_prefill(
+                "request/attempt-1",
+                9,
+                [("127.0.0.1", 20001), ("127.0.0.1", 20002)],
+            )
+
+    engine.model_runner.call_rank_results.assert_not_called()
+    assert engine.remote_prefill_capacity_snapshot() == capacity
+    assert engine.scheduler.remote_prefills["request/attempt-1"][0].seq_id == seq_id
+    assert engine._heterogeneous_remote_prefill_source_tp_sizes == {
+        "request/attempt-1": 4
+    }
+
+
 def test_reservation_poll_leaves_active_receive_owned_by_engine():
     engine = make_engine()
     engine.add_remote_prefill_request(
