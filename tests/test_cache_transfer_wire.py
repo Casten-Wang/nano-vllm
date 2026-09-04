@@ -575,6 +575,8 @@ def test_model_runner_rank_endpoint_exports_receives_and_installs():
     receiver_thread.join()
 
     assert send_result["rank"] == 0
+    assert send_result["payload_bytes"] == payload.nbytes
+    assert send_result["sent_bytes"] > send_result["payload_bytes"]
     assert exported_to_host == [True]
     assert receive_result == [
         {"rank": 0, "cached_tokens": 5, "received_bytes": payload.nbytes}

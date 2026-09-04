@@ -1253,7 +1253,12 @@ class LLMEngine:
             self.config.tensor_parallel_size,
             "sent_bytes",
         )
-        if sent_by_rank != estimated_by_rank:
+        payload_by_rank = _validate_rank_results(
+            rank_results,
+            self.config.tensor_parallel_size,
+            "payload_bytes",
+        )
+        if payload_by_rank != estimated_by_rank:
             raise RuntimeError(
                 "cache send payload bytes differ from the preflight estimate"
             )

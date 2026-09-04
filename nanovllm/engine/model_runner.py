@@ -2175,13 +2175,18 @@ class ModelRunner:
             to_host=True,
             host_staging_pool=self._host_staging_pool(),
         )
+        payload_bytes = payload.nbytes
         sent_bytes = send_rank_cache_to_endpoint(
             host,
             port,
             payload,
             timeout_s=timeout_s,
         )
-        return {"rank": self.rank, "sent_bytes": sent_bytes}
+        return {
+            "rank": self.rank,
+            "sent_bytes": sent_bytes,
+            "payload_bytes": payload_bytes,
+        }
 
     def start_sequence_cache_send(
         self,

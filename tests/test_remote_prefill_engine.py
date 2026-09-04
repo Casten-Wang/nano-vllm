@@ -137,7 +137,11 @@ def make_engine(*, tensor_parallel_size=1):
             ]
         if method_name == "send_sequence_cache_to_endpoint":
             return [
-                {"rank": rank, "sent_bytes": 100 + rank}
+                {
+                    "rank": rank,
+                    "sent_bytes": 200 + rank,
+                    "payload_bytes": 100 + rank,
+                }
                 for rank in range(tensor_parallel_size)
             ]
         if method_name in {
@@ -1348,13 +1352,13 @@ def test_engine_keeps_prefill_source_when_sent_bytes_differ_from_preflight():
     engine.scheduler.postprocess_mixed(result, [9])
     original = engine.model_runner.call_rank_results.side_effect
 
-    def truncate_one_rank(method_name, *args):
+    def mismatch_one_rank(method_name, *args):
         results = original(method_name, *args)
         if method_name == "send_sequence_cache_to_endpoint":
-            results[1]["sent_bytes"] -= 1
+            results[1]["payload_bytes"] -= 1
         return results
 
-    engine.model_runner.call_rank_results.side_effect = truncate_one_rank
+    engine.model_runner.call_rank_results.side_effect = mismatch_one_rank
 
     with pytest.raises(RuntimeError, match="differ from the preflight"):
         engine.send_remote_prefill(
