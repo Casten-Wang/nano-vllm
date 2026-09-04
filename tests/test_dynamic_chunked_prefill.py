@@ -450,7 +450,15 @@ def test_remote_prefill_reservation_counts_partial_prefill_capacity(hybrid):
     assert partial.block_table
     if hybrid:
         assert partial.state_slot is not None
-    assert scheduler.capacity_snapshot()["sequence_slots_free"] == 0
+    snapshot = scheduler.capacity_snapshot()
+    assert snapshot["sequence_slots_free"] == 0
+    assert snapshot["sequence_slots_waiting_owned"] == 1
+    assert snapshot["sequence_slots_local_running"] == 0
+    assert snapshot["sequence_slots_remote_destination"] == 0
+    assert snapshot["sequence_slots_remote_source"] == 0
+    assert snapshot["state_slots_total"] == int(hybrid)
+    assert snapshot["state_slots_used"] == int(hybrid)
+    assert snapshot["state_slots_free"] == 0
 
     with pytest.raises(RuntimeError, match="no sequence slot"):
         scheduler.reserve_remote_prefill(
@@ -1101,6 +1109,13 @@ def test_prefill_capacity_snapshot_distinguishes_scheduler_boundaries():
         "sequence_slots_total": 1,
         "sequence_slots_used": 1,
         "sequence_slots_free": 0,
+        "sequence_slots_waiting_owned": 0,
+        "sequence_slots_local_running": 1,
+        "sequence_slots_remote_destination": 0,
+        "sequence_slots_remote_source": 0,
+        "state_slots_total": 0,
+        "state_slots_used": 0,
+        "state_slots_free": 0,
         "kv_blocks_total": 2,
         "kv_blocks_used": 1,
         "kv_blocks_free": 1,

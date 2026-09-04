@@ -144,11 +144,35 @@ class Scheduler:
     def capacity_snapshot(self) -> dict[str, int | float | str | None]:
         """Return scheduler-owned capacity and admission-pressure state."""
 
-        used_sequence_slots = self._used_sequence_slots()
+        waiting_owned_slots = self._active_waiting_sequence_count()
+        local_running_slots = len(self.running)
+        remote_destination_slots = len(self.remote_prefills)
+        remote_source_slots = len(self.remote_prefill_sources)
+        used_sequence_slots = (
+            waiting_owned_slots
+            + local_running_slots
+            + remote_destination_slots
+            + remote_source_slots
+        )
+        state_slots_total = (
+            self.state_manager.capacity if self.state_manager is not None else 0
+        )
+        state_slots_used = (
+            self.state_manager.num_used_slots
+            if self.state_manager is not None
+            else 0
+        )
         return {
             "sequence_slots_total": self.max_num_seqs,
             "sequence_slots_used": used_sequence_slots,
             "sequence_slots_free": max(self.max_num_seqs - used_sequence_slots, 0),
+            "sequence_slots_waiting_owned": waiting_owned_slots,
+            "sequence_slots_local_running": local_running_slots,
+            "sequence_slots_remote_destination": remote_destination_slots,
+            "sequence_slots_remote_source": remote_source_slots,
+            "state_slots_total": state_slots_total,
+            "state_slots_used": state_slots_used,
+            "state_slots_free": state_slots_total - state_slots_used,
             "kv_blocks_total": self.block_manager.num_total_blocks,
             "kv_blocks_used": self.block_manager.num_used_blocks,
             "kv_blocks_free": self.block_manager.num_free_blocks,
