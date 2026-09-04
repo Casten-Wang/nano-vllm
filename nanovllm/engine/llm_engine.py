@@ -31,6 +31,40 @@ def _find_free_port() -> int:
         return int(sock.getsockname()[1])
 
 
+def _validate_cache_transfer_endpoints(
+    endpoints: object,
+    expected_size: int,
+) -> list[tuple[str, int]]:
+    """Validate a complete TP topology before any rank starts transport."""
+
+    if (
+        not isinstance(expected_size, int)
+        or isinstance(expected_size, bool)
+        or expected_size <= 0
+    ):
+        raise ValueError("cache transfer endpoint count must be positive")
+    if not isinstance(endpoints, (list, tuple)) or len(endpoints) != expected_size:
+        raise ValueError(
+            "cache transfer requires one endpoint per tensor-parallel rank"
+        )
+    validated = []
+    for endpoint in endpoints:
+        if (
+            not isinstance(endpoint, (list, tuple))
+            or len(endpoint) != 2
+            or not isinstance(endpoint[0], str)
+            or not endpoint[0]
+            or not isinstance(endpoint[1], int)
+            or isinstance(endpoint[1], bool)
+            or not 1 <= endpoint[1] <= 65535
+        ):
+            raise ValueError("cache transfer endpoint is invalid")
+        validated.append((endpoint[0], endpoint[1]))
+    if len(set(validated)) != len(validated):
+        raise ValueError("cache transfer endpoints must be unique")
+    return validated
+
+
 def _validate_rank_results(
     results: list[object],
     tensor_parallel_size: int,
@@ -433,6 +467,10 @@ class LLMEngine:
         max_payload_bytes = validate_cache_transfer_payload_limit(
             max_payload_bytes
         )
+        bind_endpoints = _validate_cache_transfer_endpoints(
+            bind_endpoints,
+            self.config.tensor_parallel_size,
+        )
         self._validate_token_ids(
             [first_token_id],
             value_name="first_token_id",
@@ -571,6 +609,10 @@ class LLMEngine:
         max_payload_bytes = validate_cache_transfer_payload_limit(
             max_payload_bytes
         )
+        bind_endpoints = _validate_cache_transfer_endpoints(
+            bind_endpoints,
+            self.config.tensor_parallel_size,
+        )
         self._validate_token_ids(
             [first_token_id],
             value_name="first_token_id",
@@ -677,6 +719,10 @@ class LLMEngine:
         timeout_s = validate_cache_transfer_timeout(timeout_s)
         max_payload_bytes = validate_cache_transfer_payload_limit(
             max_payload_bytes
+        )
+        bind_endpoints = _validate_cache_transfer_endpoints(
+            bind_endpoints,
+            self.config.tensor_parallel_size,
         )
         self._validate_token_ids([first_token_id], value_name="first_token_id")
         source_sizes = getattr(
@@ -1124,6 +1170,10 @@ class LLMEngine:
         """Send every TP rank and release producer state after all ACKs."""
 
         timeout_s = validate_cache_transfer_timeout(timeout_s)
+        endpoints = _validate_cache_transfer_endpoints(
+            endpoints,
+            self.config.tensor_parallel_size,
+        )
         seq = next(
             (candidate for candidate in self.scheduler.running if candidate.seq_id == seq_id),
             None,
@@ -1322,6 +1372,10 @@ class LLMEngine:
         """Stage a source on every rank and send it without blocking scheduling."""
 
         timeout_s = validate_cache_transfer_timeout(timeout_s)
+        endpoints = _validate_cache_transfer_endpoints(
+            endpoints,
+            self.config.tensor_parallel_size,
+        )
         seq = next(
             (candidate for candidate in self.scheduler.running if candidate.seq_id == seq_id),
             None,
@@ -1408,6 +1462,10 @@ class LLMEngine:
         """Stage routed source slices and start every destination peer."""
 
         timeout_s = validate_cache_transfer_timeout(timeout_s)
+        destination_endpoints = _validate_cache_transfer_endpoints(
+            destination_endpoints,
+            destination_tp_size,
+        )
         seq = next(
             (
                 candidate

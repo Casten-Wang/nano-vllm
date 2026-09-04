@@ -4,7 +4,10 @@ from unittest.mock import Mock, call
 
 import pytest
 
-from nanovllm.engine.llm_engine import LLMEngine
+from nanovllm.engine.llm_engine import (
+    LLMEngine,
+    _validate_cache_transfer_endpoints,
+)
 from nanovllm.engine.metrics import EngineMetrics
 from nanovllm.engine.scheduler import ScheduleResult, Scheduler
 from nanovllm.engine.sequence import Sequence, SequenceStatus
@@ -250,6 +253,37 @@ def make_engine(*, tensor_parallel_size=1):
     engine._test_send_state = send_state
     engine.metrics = EngineMetrics()
     return engine
+
+
+@pytest.mark.parametrize(
+    ("endpoints", "expected_size", "message"),
+    [
+        ([("127.0.0.1", 20001)], 2, "one endpoint per"),
+        (
+            [("127.0.0.1", 20001), ("", 20002)],
+            2,
+            "endpoint is invalid",
+        ),
+        (
+            [("127.0.0.1", 20001), ("127.0.0.1", True)],
+            2,
+            "endpoint is invalid",
+        ),
+        (
+            [("127.0.0.1", 20001), ("127.0.0.1", 20001)],
+            2,
+            "must be unique",
+        ),
+        ([("127.0.0.1", 20001)], True, "count must be positive"),
+    ],
+)
+def test_cache_transfer_endpoint_topology_rejects_invalid_input(
+    endpoints,
+    expected_size,
+    message,
+):
+    with pytest.raises(ValueError, match=message):
+        _validate_cache_transfer_endpoints(endpoints, expected_size)
 
 
 def test_local_request_returns_id_and_can_be_cancelled():
@@ -582,7 +616,7 @@ def test_expired_reservation_cannot_start_heterogeneous_receive():
         engine.start_heterogeneous_remote_prefill_receive(
             "request/attempt-1",
             9,
-            [("127.0.0.1", 20001)] * 4,
+            [("127.0.0.1", 20001), ("127.0.0.1", 20002)],
         )
 
     engine.model_runner.call_rank_results.assert_not_called()
@@ -633,7 +667,7 @@ def test_receive_timeout_is_bounded_by_reservation_deadline(
         engine.start_heterogeneous_remote_prefill_receive(
             transfer_id,
             9,
-            [("127.0.0.1", 20001 + rank) for rank in range(4)],
+            [("127.0.0.1", 20001 + rank) for rank in range(2)],
             timeout_s=20.0,
         )
     elif asynchronous:
@@ -1184,6 +1218,93 @@ def _prepare_remote_prefill_source(engine, prompt_token: int):
     seq.append_token(9)
     engine.scheduler.running.append(seq)
     return seq
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [
+        "receive",
+        "start_receive",
+        "start_heterogeneous_receive",
+        "send",
+        "start_send",
+        "start_heterogeneous_send",
+    ],
+)
+def test_transfer_entrypoints_validate_all_endpoints_before_rank_work(operation):
+    engine = make_engine(tensor_parallel_size=2)
+    invalid_endpoints = [
+        ("127.0.0.1", 20001),
+        ("", 20002),
+    ]
+    if operation == "receive":
+        engine.add_remote_prefill_request(
+            [1, 2, 3, 4],
+            SamplingParams(max_tokens=4),
+            transfer_id="request/attempt-1",
+        )
+        invoke = lambda: engine.receive_remote_prefill(
+            "request/attempt-1",
+            9,
+            invalid_endpoints,
+        )
+    elif operation == "start_receive":
+        engine.add_remote_prefill_request(
+            [1, 2, 3, 4],
+            SamplingParams(max_tokens=4),
+            transfer_id="request/attempt-1",
+        )
+        invoke = lambda: engine.start_remote_prefill_receive(
+            "request/attempt-1",
+            9,
+            invalid_endpoints,
+        )
+    elif operation == "start_heterogeneous_receive":
+        engine.add_heterogeneous_remote_prefill_request(
+            [1, 2, 3, 4],
+            SamplingParams(max_tokens=4),
+            transfer_id="request/attempt-1",
+            source_tp_size=2,
+        )
+        invoke = lambda: engine.start_heterogeneous_remote_prefill_receive(
+            "request/attempt-1",
+            9,
+            invalid_endpoints,
+        )
+    else:
+        seq = _prepare_remote_prefill_source(engine, 1)
+        if operation == "send":
+            invoke = lambda: engine.send_remote_prefill(
+                seq.seq_id,
+                "request/attempt-1",
+                invalid_endpoints,
+            )
+        elif operation == "start_send":
+            invoke = lambda: engine.start_remote_prefill_send(
+                seq.seq_id,
+                "request/attempt-1",
+                invalid_endpoints,
+            )
+        else:
+            invoke = lambda: engine.start_heterogeneous_remote_prefill_send(
+                seq.seq_id,
+                "request/attempt-1",
+                2,
+                invalid_endpoints,
+            )
+
+    capacity_before = engine.remote_prefill_capacity_snapshot()
+    engine.model_runner.call_rank_results.reset_mock()
+    engine.model_runner.build_heterogeneous_cache_receive_plan_for_blocks.reset_mock()
+    engine.model_runner.build_heterogeneous_cache_transfer_plan_for_blocks.reset_mock()
+
+    with pytest.raises(ValueError, match="endpoint is invalid"):
+        invoke()
+
+    engine.model_runner.call_rank_results.assert_not_called()
+    engine.model_runner.build_heterogeneous_cache_receive_plan_for_blocks.assert_not_called()
+    engine.model_runner.build_heterogeneous_cache_transfer_plan_for_blocks.assert_not_called()
+    assert engine.remote_prefill_capacity_snapshot() == capacity_before
 
 
 def test_async_send_pauses_decode_until_every_rank_acknowledges():
