@@ -422,10 +422,13 @@ def receive_peer_cache_fragment(
     expected_transfer_id: str | None = None,
     expected_src_rank: int | None = None,
     expected_dst_rank: int | None = None,
+    expected_src_tp_size: int | None = None,
+    expected_dst_tp_size: int | None = None,
     expected_cache_fingerprint: str | None = None,
     expected_token_fingerprint: str | None = None,
     expected_cached_tokens: int | None = None,
     expected_payload_bytes: int | None = None,
+    expected_peer_bytes: dict[int, int] | None = None,
 ) -> PeerCacheFragment:
     """Receive and verify one heterogeneous-TP peer fragment."""
 
@@ -470,12 +473,20 @@ def receive_peer_cache_fragment(
             not isinstance(value, int) or isinstance(value, bool)
             for value in integers.values()
         )
+        or integers["src_tp_size"] <= 0
+        or integers["dst_tp_size"] <= 0
+        or integers["block_size"] <= 0
+        or integers["cached_tokens"] <= 0
+        or not 0 <= integers["src_rank"] < integers["src_tp_size"]
+        or not 0 <= integers["dst_rank"] < integers["dst_tp_size"]
     ):
         raise ValueError("peer cache fragment wire metadata is invalid")
     expectations = (
         ("transfer id", transfer_id, expected_transfer_id),
         ("source rank", integers["src_rank"], expected_src_rank),
         ("destination rank", integers["dst_rank"], expected_dst_rank),
+        ("source TP size", integers["src_tp_size"], expected_src_tp_size),
+        ("destination TP size", integers["dst_tp_size"], expected_dst_tp_size),
         ("fingerprint", cache_fingerprint, expected_cache_fingerprint),
         ("token fingerprint", token_fingerprint, expected_token_fingerprint),
         (
@@ -488,6 +499,12 @@ def receive_peer_cache_fragment(
     for name, actual, expected in expectations:
         if expected is not None and actual != expected:
             raise ValueError(f"peer cache fragment wire {name} does not match")
+    if expected_peer_bytes is not None:
+        expected_bytes = expected_peer_bytes.get(integers["src_rank"])
+        if expected_bytes is None:
+            raise ValueError("peer cache fragment source rank is unexpected")
+        if body_bytes != expected_bytes:
+            raise ValueError("peer cache fragment bytes do not match preflight")
 
     descriptors = header.get("slices")
     if not isinstance(descriptors, list) or not descriptors:
@@ -847,6 +864,7 @@ class PendingPeerCacheReceiveGroup:
         transfer_id: str,
         dst_rank: int,
         dst_tp_size: int,
+        expected_src_tp_size: int | None = None,
         expected_cache_fingerprint: str | None = None,
         expected_token_fingerprint: str | None = None,
         expected_cached_tokens: int | None = None,
@@ -893,6 +911,12 @@ class PendingPeerCacheReceiveGroup:
             or not 0 <= dst_rank < dst_tp_size
         ):
             raise ValueError("peer cache receiver destination is invalid")
+        if expected_src_tp_size is not None and (
+            not isinstance(expected_src_tp_size, int)
+            or isinstance(expected_src_tp_size, bool)
+            or expected_src_tp_size <= 0
+        ):
+            raise ValueError("peer cache receiver source TP size must be positive")
         if (
             not isinstance(expected_peer_bytes, dict)
             or not expected_peer_bytes
@@ -916,6 +940,7 @@ class PendingPeerCacheReceiveGroup:
         self._transfer_id = transfer_id
         self._dst_rank = dst_rank
         self._dst_tp_size = dst_tp_size
+        self._expected_src_tp_size = expected_src_tp_size
         self._expected_cache_fingerprint = expected_cache_fingerprint
         self._expected_token_fingerprint = expected_token_fingerprint
         self._expected_cached_tokens = expected_cached_tokens
@@ -988,9 +1013,12 @@ class PendingPeerCacheReceiveGroup:
                 max_payload_bytes=self._max_payload_bytes,
                 expected_transfer_id=self._transfer_id,
                 expected_dst_rank=self._dst_rank,
+                expected_src_tp_size=self._expected_src_tp_size,
+                expected_dst_tp_size=self._dst_tp_size,
                 expected_cache_fingerprint=self._expected_cache_fingerprint,
                 expected_token_fingerprint=self._expected_token_fingerprint,
                 expected_cached_tokens=self._expected_cached_tokens,
+                expected_peer_bytes=self._expected_peer_bytes,
             )
             expected_bytes = self._expected_peer_bytes.get(fragment.src_rank)
             if expected_bytes is None:

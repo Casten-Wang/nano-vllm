@@ -279,6 +279,43 @@ def test_peer_fragment_rejects_wrong_prompt_before_payload_allocation(monkeypatc
     assert allocations == []
 
 
+def test_peer_fragment_rejects_wrong_topology_before_payload_allocation(monkeypatch):
+    fragment = build_qwen35_peer_cache_fragments(
+        make_payload(0, 4, with_scales=False),
+        make_plan(with_scales=False),
+    )[0]
+    wire = MemorySocket()
+    send_peer_cache_fragment(wire, fragment)
+    original_empty = torch.empty
+    allocations = []
+
+    def tracked_empty(*args, **kwargs):
+        allocations.append((args, kwargs))
+        return original_empty(*args, **kwargs)
+
+    monkeypatch.setattr(torch, "empty", tracked_empty)
+    with pytest.raises(ValueError, match="source TP size does not match"):
+        receive_peer_cache_fragment(
+            wire,
+            expected_src_tp_size=8,
+            expected_dst_tp_size=fragment.dst_tp_size,
+        )
+
+    assert wire.offset < len(wire.data)
+    assert allocations == []
+
+    wire = MemorySocket()
+    send_peer_cache_fragment(wire, fragment)
+    with pytest.raises(ValueError, match="source rank is unexpected"):
+        receive_peer_cache_fragment(
+            wire,
+            expected_peer_bytes={1: fragment.nbytes},
+        )
+
+    assert wire.offset < len(wire.data)
+    assert allocations == []
+
+
 @pytest.mark.parametrize("src_tp,dst_tp", [(4, 8), (8, 4)])
 @pytest.mark.parametrize("with_scales", [False, True])
 def test_destination_assembly_matches_direct_tensor_routes(
@@ -925,6 +962,7 @@ def test_model_runner_installs_before_acknowledging_peer_receivers():
         transfer_id="transfer-1",
         dst_rank=0,
         dst_tp_size=8,
+        expected_src_tp_size=4,
         expected_cache_fingerprint="legacy-unscoped",
         expected_token_fingerprint="prompt-fingerprint",
         expected_cached_tokens=7,

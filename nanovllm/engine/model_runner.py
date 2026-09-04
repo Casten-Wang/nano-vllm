@@ -1868,6 +1868,7 @@ class ModelRunner:
             transfer_id=transfer_id,
             dst_rank=self.rank,
             dst_tp_size=self.world_size,
+            expected_src_tp_size=source_tp_size,
             expected_cache_fingerprint=_runner_cache_fingerprint(self),
             expected_token_fingerprint=expected_token_fingerprint,
             expected_cached_tokens=expected_cached_tokens,
