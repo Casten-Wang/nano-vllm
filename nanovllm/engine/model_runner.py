@@ -729,6 +729,7 @@ class ModelRunner:
             host_staging_pool.storage_stats()
             if host_staging_pool is not None
             else {
+                "max_cached_bytes": self._host_staging_retention_limit(),
                 "storage_bytes": 0,
                 "allocation_count": 0,
                 "reuse_count": 0,
@@ -745,6 +746,7 @@ class ModelRunner:
             receive_staging_pool.storage_stats()
             if receive_staging_pool is not None
             else {
+                "max_cached_bytes": self._host_staging_retention_limit(),
                 "storage_bytes": 0,
                 "allocation_count": 0,
                 "reuse_count": 0,
@@ -876,6 +878,9 @@ class ModelRunner:
                 for item in tp_logits_stats
             ),
             "pd_send_host_staging_bytes": host_staging_stats["storage_bytes"],
+            "pd_send_host_staging_retention_limit_bytes": host_staging_stats[
+                "max_cached_bytes"
+            ],
             "pd_send_host_staging_allocation_count": host_staging_stats[
                 "allocation_count"
             ],
@@ -889,6 +894,9 @@ class ModelRunner:
             "pd_receive_host_staging_bytes": receive_staging_stats[
                 "storage_bytes"
             ],
+            "pd_receive_host_staging_retention_limit_bytes": (
+                receive_staging_stats["max_cached_bytes"]
+            ),
             "pd_receive_host_staging_allocation_count": receive_staging_stats[
                 "allocation_count"
             ],
@@ -899,6 +907,17 @@ class ModelRunner:
                 receive_staging_stats["transient_allocation_count"]
             ),
             "pd_receive_host_staging_leased": receive_staging_stats["leased"],
+            "pd_host_staging_retained_bytes": (
+                host_staging_stats["storage_bytes"]
+                + receive_staging_stats["storage_bytes"]
+            ),
+            "pd_host_staging_retention_limit_bytes": (
+                None
+                if host_staging_stats["max_cached_bytes"] is None
+                or receive_staging_stats["max_cached_bytes"] is None
+                else host_staging_stats["max_cached_bytes"]
+                + receive_staging_stats["max_cached_bytes"]
+            ),
             "total_bytes_local_rank": (
                 partitioned_total
                 + dequant_total

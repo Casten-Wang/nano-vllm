@@ -105,9 +105,10 @@ class HostStagingBufferPool:
                 raise RuntimeError("host staging pool lease is invalid")
             self._leased = False
 
-    def storage_stats(self) -> dict[str, int]:
+    def storage_stats(self) -> dict[str, int | None]:
         with self._lock:
             return {
+                "max_cached_bytes": self._max_cached_bytes,
                 "storage_bytes": (
                     0 if self._storage is None else self._storage.numel()
                 ),

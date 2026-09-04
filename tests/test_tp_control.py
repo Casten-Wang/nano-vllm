@@ -1173,6 +1173,7 @@ class HybridStateContextTest(unittest.TestCase):
         )
         runner._cache_send_staging_pool = SimpleNamespace(
             storage_stats=lambda: {
+                "max_cached_bytes": 100,
                 "storage_bytes": 96,
                 "allocation_count": 2,
                 "reuse_count": 4,
@@ -1182,6 +1183,7 @@ class HybridStateContextTest(unittest.TestCase):
         )
         runner._cache_receive_staging_pool = SimpleNamespace(
             storage_stats=lambda: {
+                "max_cached_bytes": 150,
                 "storage_bytes": 128,
                 "allocation_count": 3,
                 "reuse_count": 5,
@@ -1211,6 +1213,9 @@ class HybridStateContextTest(unittest.TestCase):
         self.assertEqual(stats["gptq_expert_workspace_allocation_count"], 1)
         self.assertEqual(stats["gptq_expert_workspace_reuse_count"], 15)
         self.assertEqual(stats["pd_send_host_staging_bytes"], 96)
+        self.assertEqual(
+            stats["pd_send_host_staging_retention_limit_bytes"], 100
+        )
         self.assertEqual(stats["pd_send_host_staging_allocation_count"], 2)
         self.assertEqual(stats["pd_send_host_staging_reuse_count"], 4)
         self.assertEqual(
@@ -1218,12 +1223,17 @@ class HybridStateContextTest(unittest.TestCase):
         )
         self.assertEqual(stats["pd_send_host_staging_leased"], 0)
         self.assertEqual(stats["pd_receive_host_staging_bytes"], 128)
+        self.assertEqual(
+            stats["pd_receive_host_staging_retention_limit_bytes"], 150
+        )
         self.assertEqual(stats["pd_receive_host_staging_allocation_count"], 3)
         self.assertEqual(stats["pd_receive_host_staging_reuse_count"], 5)
         self.assertEqual(
             stats["pd_receive_host_staging_transient_allocation_count"], 2
         )
         self.assertEqual(stats["pd_receive_host_staging_leased"], 1)
+        self.assertEqual(stats["pd_host_staging_retained_bytes"], 224)
+        self.assertEqual(stats["pd_host_staging_retention_limit_bytes"], 250)
         self.assertEqual(stats["moe_sorted_dispatch_count"], 11)
         self.assertEqual(stats["moe_sorted_decode_dispatch_count"], 5)
         self.assertEqual(stats["moe_sorted_prefill_dispatch_count"], 6)

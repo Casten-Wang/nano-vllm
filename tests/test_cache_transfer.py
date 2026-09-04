@@ -413,6 +413,7 @@ def test_host_export_reuses_released_staging_storage():
 
     assert second.kv_blocks.untyped_storage().data_ptr() == first_ptr
     assert pool.storage_stats() == {
+        "max_cached_bytes": None,
         "storage_bytes": first.nbytes,
         "allocation_count": 1,
         "reuse_count": 1,
@@ -464,6 +465,7 @@ def test_host_staging_pool_does_not_retain_oversized_allocation():
 
     oversized = pool.acquire(17, pin_memory=False)
     assert pool.storage_stats() == {
+        "max_cached_bytes": 16,
         "storage_bytes": 0,
         "allocation_count": 0,
         "reuse_count": 0,
