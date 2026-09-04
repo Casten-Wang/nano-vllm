@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 import argparse
-from datetime import datetime, timezone
 import hashlib
 import json
-from pathlib import Path
 import subprocess
 import sys
+from datetime import datetime, timezone
+from pathlib import Path
 
-from nanovllm.benchmark_metadata import checkpoint_manifest_metadata
-
+from nanovllm.benchmark_metadata import (
+    checkpoint_manifest_metadata,
+    collect_benchmark_metadata,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 MATRIX_SCRIPT = ROOT / "scripts" / "benchmark_qwen35_matrix.py"
@@ -59,6 +61,30 @@ PRESSURE_INITIAL_LENGTHS = (256, 1024)
 PRESSURE_INJECTED_LENGTHS = (512, 512)
 SOURCE_ROOTS = (ROOT / "nanovllm", ROOT / "scripts")
 SOURCE_FILES = (ROOT / "pyproject.toml",)
+RUNTIME_ENVIRONMENT_FIELDS = (
+    "python_version",
+    "torch_version",
+    "cuda_version",
+    "nccl_version",
+    "transformers_version",
+    "triton_version",
+    "flash_attn_version",
+    "cuda_device_count",
+    "cuda_devices",
+    "nvidia_smi_gpus",
+    "nvidia_smi_topology",
+    "cuda_visible_devices",
+    "cuda_device_order",
+    "nccl_environment",
+)
+REQUIRED_RUNTIME_VERSION_FIELDS = (
+    "python_version",
+    "torch_version",
+    "cuda_version",
+    "transformers_version",
+    "triton_version",
+    "flash_attn_version",
+)
 
 
 def parse_tp_sizes(value: str) -> tuple[int, ...]:
@@ -1050,7 +1076,10 @@ def commands(args: argparse.Namespace) -> list[tuple[str, list[str]]]:
 def manifest_plan(
     args: argparse.Namespace,
     stages: list[tuple[str, list[str]]],
+    runtime_environment: dict | None = None,
 ) -> dict:
+    if runtime_environment is None:
+        runtime_environment = collect_runtime_environment()
     return {
         "run_id": args.run_id,
         "model": canonical_model_reference(args.model),
@@ -1084,11 +1113,62 @@ def manifest_plan(
         ),
         "source_commit": source_commit(),
         "source_tree_sha256": source_tree_sha256(),
+        "runtime_environment": runtime_environment,
         "stages": [
             {"name": name, "command": command}
             for name, command in stages
         ],
     }
+
+
+def collect_runtime_environment() -> dict:
+    """Capture stable software, driver, and topology identity for a run."""
+
+    metadata = collect_benchmark_metadata()
+    return {field: metadata.get(field) for field in RUNTIME_ENVIRONMENT_FIELDS}
+
+
+def validate_runtime_environment(environment: dict) -> None:
+    """Require enough provenance to prevent mixed-environment rental results."""
+
+    if not isinstance(environment, dict):
+        raise RuntimeError("runtime environment snapshot is invalid")
+    missing = [
+        field
+        for field in REQUIRED_RUNTIME_VERSION_FIELDS
+        if not isinstance(environment.get(field), str)
+        or not environment[field].strip()
+        or environment[field] == "unknown"
+    ]
+    nccl_version = environment.get("nccl_version")
+    if (
+        not isinstance(nccl_version, (int, str, list))
+        or isinstance(nccl_version, bool)
+        or not nccl_version
+    ):
+        missing.append("nccl_version")
+    device_count = environment.get("cuda_device_count")
+    devices = environment.get("cuda_devices")
+    smi_rows = environment.get("nvidia_smi_gpus")
+    topology = environment.get("nvidia_smi_topology")
+    if (
+        not isinstance(device_count, int)
+        or isinstance(device_count, bool)
+        or device_count <= 0
+        or not isinstance(devices, list)
+        or len(devices) != device_count
+        or not isinstance(smi_rows, list)
+        or len(smi_rows) != device_count
+        or not all(isinstance(row, str) and row.strip() for row in smi_rows)
+        or not isinstance(topology, str)
+        or not topology.strip()
+    ):
+        missing.append("GPU driver/topology identity")
+    if missing:
+        raise RuntimeError(
+            "runtime environment snapshot is incomplete: "
+            + ", ".join(missing)
+        )
 
 
 def canonical_model_reference(model: str) -> str:
@@ -1649,6 +1729,12 @@ def prepare_manifest(
         if not path.is_file():
             raise ValueError(f"resume manifest does not exist: {path}")
         manifest = json.loads(path.read_text())
+        if manifest.get("runtime_environment") != plan.get(
+            "runtime_environment"
+        ):
+            raise ValueError(
+                "resume runtime environment does not match the original run"
+            )
         if {
             "run_id": manifest.get("run_id"),
             "model": manifest.get("model"),
@@ -1662,6 +1748,7 @@ def prepare_manifest(
             ),
             "source_commit": manifest.get("source_commit"),
             "source_tree_sha256": manifest.get("source_tree_sha256"),
+            "runtime_environment": manifest.get("runtime_environment"),
             "stages": manifest.get("stages"),
         } != plan:
             raise ValueError("resume manifest does not match requested run")
@@ -1818,9 +1905,11 @@ def main() -> None:
     manifest_path = Path(args.result_dir) / args.run_id / "manifest.json"
     if not args.dry_run:
         try:
+            runtime_environment = collect_runtime_environment()
+            validate_runtime_environment(runtime_environment)
             manifest = prepare_manifest(
                 manifest_path,
-                manifest_plan(args, stages),
+                manifest_plan(args, stages, runtime_environment),
                 resume=args.resume,
             )
             if args.resume:

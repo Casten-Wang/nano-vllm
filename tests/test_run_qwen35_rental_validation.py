@@ -6,7 +6,6 @@ from pathlib import Path
 
 import pytest
 
-
 ROOT = Path(__file__).parents[1]
 SPEC = spec_from_file_location(
     "run_qwen35_rental_validation",
@@ -45,6 +44,38 @@ def args():
         dry_run=True,
         resume=False,
     )
+
+
+def runtime_environment(**overrides):
+    environment = {
+        "python_version": "3.12.3",
+        "torch_version": "2.8.0",
+        "cuda_version": "12.8",
+        "nccl_version": [2, 27, 3],
+        "transformers_version": "4.57.1",
+        "triton_version": "3.4.0",
+        "flash_attn_version": "2.8.3",
+        "cuda_device_count": 8,
+        "cuda_devices": [
+            {
+                "index": rank,
+                "name": "GPU-A",
+                "capability": [9, 0],
+                "multiprocessor_count": 132,
+                "total_memory": 80 * 1024**3,
+            }
+            for rank in range(8)
+        ],
+        "nvidia_smi_gpus": [
+            f"{rank}, GPU-A, 580.65.06, 81920" for rank in range(8)
+        ],
+        "nvidia_smi_topology": "GPU0 GPU1 NV18\nGPU1 NV18 X",
+        "cuda_visible_devices": "0,1,2,3,4,5,6,7",
+        "cuda_device_order": "PCI_BUS_ID",
+        "nccl_environment": {"NCCL_ALGO": "Ring"},
+    }
+    environment.update(overrides)
+    return environment
 
 
 def test_commands_are_fail_fast_and_cover_complete_validation_suite():
@@ -580,6 +611,44 @@ def test_manifest_resumes_only_identical_run(tmp_path):
     resumed = MODULE.prepare_manifest(path, plan, resume=True)
 
     assert resumed["completed_stages"] == ["preflight"]
+
+
+def test_manifest_records_runtime_environment():
+    environment = runtime_environment()
+
+    plan = MODULE.manifest_plan(args(), MODULE.commands(args()), environment)
+
+    assert plan["runtime_environment"] == environment
+
+
+def test_runtime_environment_requires_complete_software_stack():
+    environment = runtime_environment(triton_version=None)
+
+    with pytest.raises(RuntimeError, match="incomplete.*triton_version"):
+        MODULE.validate_runtime_environment(environment)
+
+
+@pytest.mark.parametrize(
+    ("field", "changed"),
+    [
+        ("torch_version", "2.9.0"),
+        ("cuda_version", "13.0"),
+        ("triton_version", "3.5.0"),
+        ("nvidia_smi_topology", "GPU0 GPU1 SYS\nGPU1 SYS X"),
+    ],
+)
+def test_manifest_rejects_runtime_environment_drift(tmp_path, field, changed):
+    arguments = args()
+    stages = MODULE.commands(arguments)
+    original = runtime_environment()
+    plan = MODULE.manifest_plan(arguments, stages, original)
+    path = tmp_path / "manifest.json"
+    MODULE.prepare_manifest(path, plan, resume=False)
+    current = {**original, field: changed}
+    resumed_plan = MODULE.manifest_plan(arguments, stages, current)
+
+    with pytest.raises(ValueError, match="does not match"):
+        MODULE.prepare_manifest(path, resumed_plan, resume=True)
 
 
 def test_manifest_preserves_hugging_face_model_id():
