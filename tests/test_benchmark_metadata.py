@@ -368,6 +368,30 @@ class BenchmarkMetadataTest(unittest.TestCase):
                 expected_world_size=2,
             )
 
+    def test_ranked_records_are_complete_and_ordered(self):
+        records = module.validate_ranked_records(
+            [{"rank": 1, "bytes": 20}, {"rank": 0, "bytes": 10}],
+            expected_world_size=2,
+            record_name="memory stats",
+        )
+
+        self.assertEqual([item["rank"] for item in records], [0, 1])
+        self.assertEqual([item["bytes"] for item in records], [10, 20])
+
+    def test_ranked_records_reject_incomplete_or_duplicate_evidence(self):
+        with self.assertRaisesRegex(ValueError, "missing ranks: \\[1\\]"):
+            module.validate_ranked_records(
+                [{"rank": 0}],
+                expected_world_size=2,
+                record_name="memory stats",
+            )
+        with self.assertRaisesRegex(ValueError, "invalid or duplicate rank"):
+            module.validate_ranked_records(
+                [{"rank": 0}, {"rank": 0}],
+                expected_world_size=2,
+                record_name="memory stats",
+            )
+
     def test_generation_completion_accepts_exact_finished_workload(self):
         result = module.validate_generation_completion(
             [32, 32, 32],

@@ -374,6 +374,44 @@ def validate_execution_stats(
     }
 
 
+def validate_ranked_records(
+    records: object,
+    *,
+    expected_world_size: int,
+    record_name: str,
+) -> list[dict]:
+    """Return complete per-rank records in rank order."""
+
+    if (
+        not isinstance(expected_world_size, int)
+        or isinstance(expected_world_size, bool)
+        or expected_world_size <= 0
+    ):
+        raise ValueError("expected_world_size must be a positive integer")
+    if not isinstance(record_name, str) or not record_name:
+        raise ValueError("record_name must be a non-empty string")
+    if not isinstance(records, list):
+        raise ValueError(f"{record_name} must be a list")
+    by_rank = {}
+    for record in records:
+        if not isinstance(record, dict):
+            raise ValueError(f"each {record_name} record must be a dictionary")
+        rank = record.get("rank")
+        if (
+            not isinstance(rank, int)
+            or isinstance(rank, bool)
+            or not 0 <= rank < expected_world_size
+            or rank in by_rank
+        ):
+            raise ValueError(f"{record_name} contain an invalid or duplicate rank")
+        by_rank[rank] = record
+    expected_ranks = set(range(expected_world_size))
+    if set(by_rank) != expected_ranks:
+        missing = sorted(expected_ranks - set(by_rank))
+        raise ValueError(f"{record_name} are missing ranks: {missing}")
+    return [by_rank[rank] for rank in range(expected_world_size)]
+
+
 def validate_execution_stats_by_rank(
     execution_stats_by_rank: object,
     *,
@@ -382,35 +420,18 @@ def validate_execution_stats_by_rank(
 ) -> dict:
     """Validate complete, uniquely identified execution evidence for every rank."""
 
-    if (
-        not isinstance(expected_world_size, int)
-        or isinstance(expected_world_size, bool)
-        or expected_world_size <= 0
-    ):
-        raise ValueError("expected_world_size must be a positive integer")
-    if not isinstance(execution_stats_by_rank, list):
-        raise ValueError("execution_stats_by_rank must be a list")
-    by_rank = {}
-    for stats in execution_stats_by_rank:
-        if not isinstance(stats, dict):
-            raise ValueError("each rank's execution stats must be a dictionary")
-        rank = stats.get("rank")
-        if (
-            not isinstance(rank, int)
-            or isinstance(rank, bool)
-            or not 0 <= rank < expected_world_size
-            or rank in by_rank
-        ):
-            raise ValueError("execution stats contain an invalid or duplicate rank")
-        by_rank[rank] = {
-            "rank": rank,
+    ranked_stats = validate_ranked_records(
+        execution_stats_by_rank,
+        expected_world_size=expected_world_size,
+        record_name="execution stats",
+    )
+    validations = [
+        {
+            "rank": stats["rank"],
             **validate_execution_stats(stats, required_paths),
         }
-    expected_ranks = set(range(expected_world_size))
-    if set(by_rank) != expected_ranks:
-        missing = sorted(expected_ranks - set(by_rank))
-        raise ValueError(f"execution stats are missing ranks: {missing}")
-    validations = [by_rank[rank] for rank in range(expected_world_size)]
+        for stats in ranked_stats
+    ]
     invalid_ranks = [item["rank"] for item in validations if not item["valid"]]
     return {
         "valid": not invalid_ranks,

@@ -23,6 +23,7 @@ from nanovllm.benchmark_metadata import (
     validate_execution_stats,
     validate_execution_stats_by_rank,
     validate_generation_completion,
+    validate_ranked_records,
 )
 
 
@@ -321,6 +322,24 @@ def main() -> None:
         "get_runtime_buffer_stats_by_rank"
     )
     kv_cache_by_rank = llm.model_runner.call("get_kv_cache_stats_by_rank")
+    ranked_records = {
+        "cuda_memory_by_rank": cuda_memory_by_rank,
+        "model_parameter_storage_by_rank": model_parameter_by_rank,
+        "recurrent_state_storage_by_rank": recurrent_state_by_rank,
+        "runtime_buffer_storage_by_rank": runtime_buffer_by_rank,
+        "kv_cache_storage_by_rank": kv_cache_by_rank,
+    }
+    for name, records in ranked_records.items():
+        ranked_records[name] = validate_ranked_records(
+            records,
+            expected_world_size=args.tensor_parallel_size,
+            record_name=name,
+        )
+    cuda_memory_by_rank = ranked_records["cuda_memory_by_rank"]
+    model_parameter_by_rank = ranked_records["model_parameter_storage_by_rank"]
+    recurrent_state_by_rank = ranked_records["recurrent_state_storage_by_rank"]
+    runtime_buffer_by_rank = ranked_records["runtime_buffer_storage_by_rank"]
+    kv_cache_by_rank = ranked_records["kv_cache_storage_by_rank"]
     peak_allocated_bytes = max(
         item["peak_allocated_bytes"] for item in cuda_memory_by_rank
     )
