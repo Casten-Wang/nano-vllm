@@ -385,6 +385,62 @@ def test_unstarted_receive_timeout_releases_engine_staging_reservation():
     assert engine.metrics.to_dict()["remote_prefill_reservation_timed_out"] == 1
 
 
+def test_expired_reservation_cannot_start_receive():
+    engine = make_engine()
+    seq_id = engine.add_remote_prefill_request(
+        [1, 2, 3, 4],
+        SamplingParams(max_tokens=4),
+        transfer_id="request/attempt-1",
+        timeout_s=10.0,
+    )
+    _, session = engine.scheduler.remote_prefills["request/attempt-1"]
+    session.deadline = 0.0
+    engine.model_runner.call_rank_results.reset_mock()
+
+    with pytest.raises(TimeoutError, match="before receive started"):
+        engine.start_remote_prefill_receive(
+            "request/attempt-1",
+            9,
+            [("127.0.0.1", 20001)],
+        )
+
+    engine.model_runner.call_rank_results.assert_not_called()
+    assert not engine.scheduler.remote_prefills
+    assert not engine._remote_prefill_receive_reserved_staged_bytes
+    assert not engine._remote_prefill_receive_expected_bytes
+    assert [seq.seq_id for seq in engine.scheduler.waiting] == [seq_id]
+    assert engine.metrics.to_dict()["remote_prefill_reservation_timed_out"] == 1
+
+
+def test_expired_reservation_cannot_start_heterogeneous_receive():
+    engine = make_engine(tensor_parallel_size=2)
+    seq_id = engine.add_heterogeneous_remote_prefill_request(
+        [1, 2, 3, 4],
+        SamplingParams(max_tokens=4),
+        transfer_id="request/attempt-1",
+        source_tp_size=4,
+        timeout_s=10.0,
+    )
+    _, session = engine.scheduler.remote_prefills["request/attempt-1"]
+    session.deadline = 0.0
+    engine.model_runner.call_rank_results.reset_mock()
+
+    with pytest.raises(TimeoutError, match="before receive started"):
+        engine.start_heterogeneous_remote_prefill_receive(
+            "request/attempt-1",
+            9,
+            [("127.0.0.1", 20001)] * 4,
+        )
+
+    engine.model_runner.call_rank_results.assert_not_called()
+    assert not engine.scheduler.remote_prefills
+    assert not engine._remote_prefill_receive_reserved_staged_bytes
+    assert not engine._remote_prefill_receive_expected_bytes
+    assert not engine._heterogeneous_remote_prefill_source_tp_sizes
+    assert [seq.seq_id for seq in engine.scheduler.waiting] == [seq_id]
+    assert engine.metrics.to_dict()["remote_prefill_reservation_timed_out"] == 1
+
+
 def test_reservation_poll_leaves_active_receive_owned_by_engine():
     engine = make_engine()
     engine.add_remote_prefill_request(

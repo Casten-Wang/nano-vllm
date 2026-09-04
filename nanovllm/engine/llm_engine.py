@@ -513,6 +513,27 @@ class LLMEngine:
         self._remote_prefill_receive_expected_bytes.pop(transfer_id)
         return seq.seq_id
 
+    def _require_live_remote_prefill_reservation(
+        self,
+        transfer_id: str,
+    ) -> Sequence:
+        """Reject an expired handoff before allocating rank-local receivers."""
+
+        seq, session = self.scheduler.remote_prefills[transfer_id]
+        now = perf_counter()
+        if session.poll(now=now) is not CacheTransferPhase.TIMED_OUT:
+            return seq
+        self.scheduler.abort_remote_prefill(
+            transfer_id,
+            "cache transfer timed out before receive started",
+            now=now,
+        )
+        self._remote_prefill_receive_reserved_staged_bytes.pop(transfer_id)
+        self._remote_prefill_receive_expected_bytes.pop(transfer_id)
+        self._heterogeneous_remote_prefill_source_tp_sizes.pop(transfer_id, None)
+        self.metrics.record_remote_prefill_reservation_timeout(1)
+        raise TimeoutError("cache transfer timed out before receive started")
+
     def start_remote_prefill_receive(
         self,
         transfer_id: str,
@@ -535,7 +556,7 @@ class LLMEngine:
             receive_tokens = self._remote_prefill_receive_tokens = {}
         if transfer_id in receive_tokens:
             raise ValueError("cache receive id is already active")
-        seq, _session = self.scheduler.remote_prefills[transfer_id]
+        seq = self._require_live_remote_prefill_reservation(transfer_id)
         expected_by_rank = self._remote_prefill_receive_expected_bytes[
             transfer_id
         ]
@@ -632,7 +653,7 @@ class LLMEngine:
             receive_tokens = self._remote_prefill_receive_tokens = {}
         if transfer_id in receive_tokens:
             raise ValueError("cache receive id is already active")
-        seq, _session = self.scheduler.remote_prefills[transfer_id]
+        seq = self._require_live_remote_prefill_reservation(transfer_id)
         staged_bytes = self._remote_prefill_receive_reserved_staged_bytes[transfer_id]
         receive_started_at = perf_counter()
         try:
