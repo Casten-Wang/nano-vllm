@@ -2661,6 +2661,74 @@ def _linear_percentile(values: list[float], rank: float) -> float:
     return ordered[lower] + (ordered[upper] - ordered[lower]) * (index - lower)
 
 
+SCHEDULER_CAPACITY_COUNT_FIELDS = (
+    "sequence_slots_total",
+    "sequence_slots_used",
+    "sequence_slots_free",
+    "sequence_slots_waiting_owned",
+    "sequence_slots_local_running",
+    "sequence_slots_remote_destination",
+    "sequence_slots_remote_source",
+    "state_slots_total",
+    "state_slots_used",
+    "state_slots_free",
+    "kv_blocks_total",
+    "kv_blocks_used",
+    "kv_blocks_free",
+)
+SCHEDULER_CAPACITY_PEAK_FIELDS = (
+    "sequence_slots_used",
+    "sequence_slots_waiting_owned",
+    "sequence_slots_local_running",
+    "sequence_slots_remote_destination",
+    "sequence_slots_remote_source",
+    "state_slots_used",
+    "kv_blocks_used",
+    "kv_block_usage",
+)
+
+
+def scheduler_capacity_snapshot_valid(capacity: dict) -> bool:
+    if not isinstance(capacity, dict) or not all(
+        isinstance(capacity.get(name), int)
+        and not isinstance(capacity.get(name), bool)
+        and capacity[name] >= 0
+        for name in SCHEDULER_CAPACITY_COUNT_FIELDS
+    ):
+        return False
+    usage = capacity.get("kv_block_usage")
+    if (
+        not isinstance(usage, (int, float))
+        or isinstance(usage, bool)
+        or not math.isfinite(usage)
+        or not 0.0 <= usage <= 1.0
+    ):
+        return False
+    sequence_owners = sum(
+        capacity[name]
+        for name in (
+            "sequence_slots_waiting_owned",
+            "sequence_slots_local_running",
+            "sequence_slots_remote_destination",
+            "sequence_slots_remote_source",
+        )
+    )
+    kv_total = capacity["kv_blocks_total"]
+    expected_usage = capacity["kv_blocks_used"] / kv_total if kv_total else 0.0
+    return (
+        capacity["sequence_slots_used"] + capacity["sequence_slots_free"]
+        == capacity["sequence_slots_total"]
+        and sequence_owners == capacity["sequence_slots_used"]
+        and capacity["state_slots_used"] + capacity["state_slots_free"]
+        == capacity["state_slots_total"]
+        and capacity["state_slots_total"] == capacity["sequence_slots_total"]
+        and capacity["state_slots_used"] == capacity["sequence_slots_used"]
+        and capacity["kv_blocks_used"] + capacity["kv_blocks_free"]
+        == kv_total
+        and math.isclose(usage, expected_usage, rel_tol=1e-9, abs_tol=1e-9)
+    )
+
+
 def summarize_scheduler_trace_repeats(
     results: list[dict],
     *,
@@ -2893,7 +2961,7 @@ def summarize_scheduler_trace_repeats(
                 and isinstance(step.get("elapsed_s"), (int, float))
                 and math.isfinite(step["elapsed_s"])
                 and step["elapsed_s"] >= 0
-                and isinstance(step.get("capacity"), dict)
+                and scheduler_capacity_snapshot_valid(step.get("capacity"))
                 and isinstance(step.get("scheduled_request_ids"), list)
                 and all(
                     isinstance(request_id, str) and request_id
@@ -2985,6 +3053,14 @@ def summarize_scheduler_trace_repeats(
             and scheduler_metrics["preemption_count"]
             == total_request_preemptions
         )
+        capacity_peaks = (
+            {
+                name: max(step["capacity"][name] for step in steps)
+                for name in SCHEDULER_CAPACITY_PEAK_FIELDS
+            }
+            if step_contract_valid
+            else {name: None for name in SCHEDULER_CAPACITY_PEAK_FIELDS}
+        )
         valid = (
             configuration_valid
             and path_valid
@@ -3031,6 +3107,7 @@ def summarize_scheduler_trace_repeats(
                 "preempted_token_progress": total_request_preempted_progress,
                 "recomputed_tokens": total_request_recomputed_tokens,
                 "latency_by_class": latency_by_class,
+                "capacity_peaks": capacity_peaks,
                 **numeric,
             }
         )
@@ -3111,6 +3188,14 @@ def summarize_scheduler_trace_repeats(
             else None
         ),
         "latency_by_class": latency_by_class,
+        "capacity_peaks": {
+            name: (
+                max(row["capacity_peaks"][name] for row in rows)
+                if all(row["step_contract_valid"] for row in rows)
+                else None
+            )
+            for name in SCHEDULER_CAPACITY_PEAK_FIELDS
+        },
         "runs": rows,
     }
 

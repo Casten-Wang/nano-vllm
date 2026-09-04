@@ -1375,7 +1375,22 @@ def scheduler_trace_result(mode, repeat=1):
                         for item in request_samples
                         if item["first_schedule_step"] == step
                     ],
-                    "capacity": {"kv_blocks_free": 8 - step},
+                    "capacity": {
+                        "sequence_slots_total": 24,
+                        "sequence_slots_used": min(step + 1, 24),
+                        "sequence_slots_free": 24 - min(step + 1, 24),
+                        "sequence_slots_waiting_owned": 0,
+                        "sequence_slots_local_running": min(step + 1, 24),
+                        "sequence_slots_remote_destination": 0,
+                        "sequence_slots_remote_source": 0,
+                        "state_slots_total": 24,
+                        "state_slots_used": min(step + 1, 24),
+                        "state_slots_free": 24 - min(step + 1, 24),
+                        "kv_blocks_total": 16,
+                        "kv_blocks_used": step,
+                        "kv_blocks_free": 16 - step,
+                        "kv_block_usage": step / 16,
+                    },
                 }
                 for step in range(11)
             ],
@@ -1444,6 +1459,9 @@ def test_scheduler_trace_compares_tail_latency_for_every_workload_class():
     comparison = MODULE.compare_scheduler_trace_modes(baseline, optimized)
 
     assert comparison["valid"]
+    assert optimized["capacity_peaks"]["sequence_slots_used"] == 11
+    assert optimized["capacity_peaks"]["state_slots_used"] == 11
+    assert optimized["capacity_peaks"]["kv_blocks_used"] == 10
     assert comparison["class_latency_comparable"]
     assert set(comparison["ratios_optimized_over_baseline_by_class"]) == {
         "decode-heavy",
@@ -1509,6 +1527,22 @@ def test_scheduler_trace_rejects_inconsistent_first_schedule_trace():
 
     assert not summary["valid"]
     assert not summary["runs"][0]["schedule_trace_contract_valid"]
+
+
+def test_scheduler_trace_rejects_capacity_ownership_drift():
+    results = [scheduler_trace_result("baseline", repeat) for repeat in (1, 2)]
+    results[0]["replay"]["step_samples"][0]["capacity"][
+        "sequence_slots_remote_source"
+    ] = 1
+
+    summary = MODULE.summarize_scheduler_trace_repeats(
+        results,
+        expected_tp_size=4,
+        mode="baseline",
+    )
+
+    assert not summary["valid"]
+    assert not summary["runs"][0]["step_contract_valid"]
 
 
 def test_scheduler_trace_rejects_missing_class_latency_evidence():
