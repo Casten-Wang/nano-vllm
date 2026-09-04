@@ -338,6 +338,14 @@ def plan_local_kv_cache_capacity(
     }
 
 
+def make_cudagraph_slot_mapping(max_batch_size: int) -> torch.Tensor:
+    """Allocate capture inputs that cannot write into a real KV cache slot."""
+
+    if max_batch_size <= 0:
+        raise ValueError("CUDA Graph max batch size must be positive")
+    return torch.full((max_batch_size,), -1, dtype=torch.int32)
+
+
 class ModelRunner:
 
     def __init__(
@@ -3200,7 +3208,7 @@ class ModelRunner:
         max_num_blocks = (config.max_model_len + self.block_size - 1) // self.block_size
         input_ids = torch.zeros(max_bs, dtype=torch.int64)
         positions = torch.zeros(max_bs, dtype=torch.int64)
-        slot_mapping = torch.zeros(max_bs, dtype=torch.int32)
+        slot_mapping = make_cudagraph_slot_mapping(max_bs)
         context_lens = torch.zeros(max_bs, dtype=torch.int32)
         block_tables = torch.zeros(max_bs, max_num_blocks, dtype=torch.int32)
         outputs = torch.zeros(max_bs, hf_config.hidden_size)

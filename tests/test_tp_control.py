@@ -77,6 +77,9 @@ def load_model_runner_module():
         torch_module.float32 = object()
         torch_module.bool = object()
         torch_module.tensor = lambda values, **kwargs: FakeTensor(values)
+        torch_module.full = lambda shape, value, **kwargs: FakeTensor(
+            [value] * shape[0]
+        )
         torch_module.cat = lambda tensors: FakeTensor(
             value for tensor in tensors for value in tensor.values
         )
@@ -180,6 +183,7 @@ validate_kv_cache_model_length_capacity = (
     model_runner_module.validate_kv_cache_model_length_capacity
 )
 plan_local_kv_cache_capacity = model_runner_module.plan_local_kv_cache_capacity
+make_cudagraph_slot_mapping = model_runner_module.make_cudagraph_slot_mapping
 
 
 def make_runner(rank: int, events):
@@ -191,6 +195,13 @@ def make_runner(rank: int, events):
 
 
 class TPControlTest(unittest.TestCase):
+    def test_cudagraph_capture_uses_non_writing_kv_slots(self):
+        slots = make_cudagraph_slot_mapping(4)
+
+        self.assertEqual(slots.values, [-1, -1, -1, -1])
+        with self.assertRaisesRegex(ValueError, "positive"):
+            make_cudagraph_slot_mapping(0)
+
     def test_local_kv_capacity_records_persistent_and_transient_memory(self):
         blocks, stats = plan_local_kv_cache_capacity(
             free_bytes=700,
