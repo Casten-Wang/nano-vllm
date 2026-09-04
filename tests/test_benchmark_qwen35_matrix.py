@@ -345,6 +345,31 @@ def test_memory_preflight_rejects_insufficient_rank():
         )
 
 
+@pytest.mark.parametrize(
+    ("tp_sizes", "memory", "message"),
+    [
+        ((), [{"free": 1, "total": 1}], "unique positive integers"),
+        ((2, 2), [{"free": 1, "total": 1}] * 2, "unique positive integers"),
+        ((1,), [], "non-empty list"),
+        ((1,), [{"free": 2, "total": 1}], "0 <= free <= total"),
+        ((1,), [{"free": True, "total": 1}], "0 <= free <= total"),
+        ((1,), [{"free": 0, "total": 0}], "positive integer total"),
+    ],
+)
+def test_memory_preflight_rejects_invalid_rank_inputs(tp_sizes, memory, message):
+    with pytest.raises(ValueError, match=message):
+        MODULE.validate_memory_capacity(
+            {},
+            tp_sizes,
+            memory,
+            0,
+            1,
+            1,
+            1,
+            1.0,
+        )
+
+
 def test_memory_preflight_rejects_empty_kv_dtype_sizes():
     report = {
         "results": {

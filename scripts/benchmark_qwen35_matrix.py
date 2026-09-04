@@ -277,6 +277,38 @@ def validate_memory_capacity(
     configured_max_model_len: int | None = None,
     transfer_context_length: int | None = None,
 ) -> dict:
+    if (
+        not isinstance(tp_sizes, tuple)
+        or not tp_sizes
+        or any(
+            not isinstance(tp_size, int)
+            or isinstance(tp_size, bool)
+            or tp_size <= 0
+            for tp_size in tp_sizes
+        )
+        or len(set(tp_sizes)) != len(tp_sizes)
+    ):
+        raise ValueError("tp_sizes must contain unique positive integers")
+    if not isinstance(memory_by_device, list) or not memory_by_device:
+        raise ValueError("GPU memory information must be a non-empty list")
+    for rank, item in enumerate(memory_by_device):
+        if not isinstance(item, dict):
+            raise ValueError(f"GPU rank {rank} memory information must be a dictionary")
+        free = item.get("free")
+        total = item.get("total")
+        if (
+            not isinstance(free, int)
+            or isinstance(free, bool)
+            or not isinstance(total, int)
+            or isinstance(total, bool)
+            or total <= 0
+            or free < 0
+            or free > total
+        ):
+            raise ValueError(
+                f"GPU rank {rank} memory information must satisfy "
+                "0 <= free <= total with a positive integer total"
+            )
     if headroom_bytes < 0:
         raise ValueError("memory headroom must be non-negative")
     if max_num_seqs <= 0:
