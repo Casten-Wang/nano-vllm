@@ -1106,6 +1106,31 @@ def visible_gpu_count() -> int:
     return torch.cuda.device_count()
 
 
+def gpu_memory_info_bytes() -> list[dict[str, object]]:
+    """Describe every CUDA-visible rank and its currently available memory."""
+
+    import torch
+
+    result = []
+    for device in range(torch.cuda.device_count()):
+        free, total = torch.cuda.mem_get_info(device)
+        properties = torch.cuda.get_device_properties(device)
+        result.append(
+            {
+                "logical_device_index": device,
+                "name": str(properties.name),
+                "compute_capability": [
+                    int(properties.major),
+                    int(properties.minor),
+                ],
+                "multiprocessor_count": int(properties.multi_processor_count),
+                "free": int(free),
+                "total": int(total),
+            }
+        )
+    return result
+
+
 def source_commit() -> str:
     """Return the exact committed source revision used by a validation run."""
 
@@ -1274,6 +1299,104 @@ def validate_resumed_checkpoint_identities(
             raise RuntimeError(
                 f"resume manifest has a changed {identity_name} checkpoint identity"
             )
+
+
+def validate_resumed_hardware(
+    args: argparse.Namespace,
+    manifest: dict,
+    memory_by_device: list[dict[str, object]] | None = None,
+) -> None:
+    """Reject a resume when completed memory preflight evidence is stale."""
+
+    completed = set(manifest.get("completed_stages", ()))
+    preflight_roots = {
+        "preflight": Path(args.result_dir) / args.run_id / "preflight",
+        "fp8-preflight": Path(args.result_dir)
+        / args.run_id
+        / "fp8"
+        / "preflight",
+        "gptq-preflight": Path(args.result_dir)
+        / args.run_id
+        / "gptq"
+        / "preflight",
+    }
+    completed_preflights = [
+        (name, root)
+        for name, root in preflight_roots.items()
+        if name in completed
+    ]
+    if not completed_preflights:
+        return
+    current = (
+        gpu_memory_info_bytes()
+        if memory_by_device is None
+        else memory_by_device
+    )
+    tp_size = max(args.tp_sizes)
+    hardware_fields = (
+        "logical_device_index",
+        "name",
+        "compute_capability",
+        "multiprocessor_count",
+        "total",
+    )
+    for stage_name, root in completed_preflights:
+        try:
+            report = json.loads((root / "memory_preflight.json").read_text())
+            result = report["results"][f"tp{tp_size}"]
+            recorded = result["memory_by_rank"]
+            required = result["required_free_bytes_per_rank"]
+            utilization = result["gpu_memory_utilization"]
+        except (OSError, json.JSONDecodeError, KeyError, TypeError) as error:
+            raise RuntimeError(
+                f"cannot validate resumed hardware for {stage_name}"
+            ) from error
+        if (
+            not isinstance(recorded, list)
+            or not isinstance(current, list)
+            or len(recorded) != tp_size
+            or len(current) < tp_size
+        ):
+            raise RuntimeError(
+                f"resumed hardware does not provide the recorded TP={tp_size} ranks"
+            )
+        for rank in range(tp_size):
+            before = recorded[rank]
+            now = current[rank]
+            if not isinstance(before, dict) or not isinstance(now, dict):
+                raise RuntimeError(
+                    f"resumed hardware evidence is invalid at rank {rank}"
+                )
+            if any(before.get(field) != now.get(field) for field in hardware_fields):
+                raise RuntimeError(
+                    f"resumed hardware changed at logical GPU rank {rank}"
+                )
+            free = now.get("free")
+            total = now.get("total")
+            if (
+                not isinstance(free, int)
+                or isinstance(free, bool)
+                or not isinstance(total, int)
+                or isinstance(total, bool)
+                or not isinstance(required, int)
+                or isinstance(required, bool)
+                or required <= 0
+                or not isinstance(utilization, (int, float))
+                or isinstance(utilization, bool)
+                or not 0 < utilization <= 1
+            ):
+                raise RuntimeError(
+                    f"resumed hardware memory evidence is invalid at rank {rank}"
+                )
+            available = max(
+                int(total * utilization) - (total - free),
+                0,
+            )
+            if available < required:
+                raise RuntimeError(
+                    f"resumed hardware at rank {rank} no longer satisfies "
+                    f"the {stage_name} memory preflight"
+                )
 
 
 def collect_stage_artifacts(
@@ -1702,6 +1825,7 @@ def main() -> None:
             )
             if args.resume:
                 validate_resumed_checkpoint_identities(args, manifest)
+                validate_resumed_hardware(args, manifest)
         except (ValueError, RuntimeError) as error:
             raise SystemExit(str(error)) from error
     for index, (name, command) in enumerate(stages, start=1):

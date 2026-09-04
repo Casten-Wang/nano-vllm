@@ -741,6 +741,82 @@ def test_resume_rehashes_checkpoint_and_rejects_changed_files(tmp_path, monkeypa
         MODULE.validate_resumed_checkpoint_identities(arguments, manifest)
 
 
+def hardware_rank(rank, *, name="GPU-A", free=900, total=1_000):
+    return {
+        "logical_device_index": rank,
+        "name": name,
+        "compute_capability": [9, 0],
+        "multiprocessor_count": 132,
+        "free": free,
+        "total": total,
+    }
+
+
+def write_memory_preflight(tmp_path, *, required=800):
+    preflight = tmp_path / "run" / "preflight"
+    preflight.mkdir(parents=True, exist_ok=True)
+    ranks = [hardware_rank(rank) for rank in range(8)]
+    (preflight / "memory_preflight.json").write_text(
+        json.dumps(
+            {
+                "results": {
+                    "tp8": {
+                        "memory_by_rank": ranks,
+                        "required_free_bytes_per_rank": required,
+                        "gpu_memory_utilization": 1.0,
+                    }
+                }
+            }
+        )
+    )
+    return ranks
+
+
+def test_resume_accepts_same_hardware_with_sufficient_current_memory(tmp_path):
+    recorded = write_memory_preflight(tmp_path)
+    arguments = args()
+    arguments.result_dir = str(tmp_path)
+    arguments.run_id = "run"
+
+    MODULE.validate_resumed_hardware(
+        arguments,
+        {"completed_stages": ["preflight"]},
+        [{**rank, "free": 850} for rank in recorded],
+    )
+
+
+def test_resume_rejects_changed_gpu_hardware(tmp_path):
+    recorded = write_memory_preflight(tmp_path)
+    current = [dict(rank) for rank in recorded]
+    current[3]["name"] = "GPU-B"
+    arguments = args()
+    arguments.result_dir = str(tmp_path)
+    arguments.run_id = "run"
+
+    with pytest.raises(RuntimeError, match="changed at logical GPU rank 3"):
+        MODULE.validate_resumed_hardware(
+            arguments,
+            {"completed_stages": ["preflight"]},
+            current,
+        )
+
+
+def test_resume_rejects_new_memory_pressure(tmp_path):
+    recorded = write_memory_preflight(tmp_path)
+    current = [{**rank, "free": 850} for rank in recorded]
+    current[5]["free"] = 700
+    arguments = args()
+    arguments.result_dir = str(tmp_path)
+    arguments.run_id = "run"
+
+    with pytest.raises(RuntimeError, match="rank 5 no longer satisfies"):
+        MODULE.validate_resumed_hardware(
+            arguments,
+            {"completed_stages": ["preflight"]},
+            current,
+        )
+
+
 def test_manifest_rejects_resume_from_different_source_commit(tmp_path):
     arguments = args()
     plan = MODULE.manifest_plan(arguments, MODULE.commands(arguments))
