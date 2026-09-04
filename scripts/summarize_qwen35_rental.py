@@ -3259,6 +3259,28 @@ def compare_scheduler_trace_modes(baseline: dict, optimized: dict) -> dict:
         for name, ratio in class_ratios.items()
         if ratio is not None and ratio > 1.0
     ]
+    baseline_capacity = baseline.get("capacity_peaks", {})
+    optimized_capacity = optimized.get("capacity_peaks", {})
+    capacity_comparable = (
+        comparable
+        and set(baseline_capacity) == set(SCHEDULER_CAPACITY_PEAK_FIELDS)
+        and set(optimized_capacity) == set(SCHEDULER_CAPACITY_PEAK_FIELDS)
+        and all(
+            isinstance(capacity[name], (int, float))
+            and not isinstance(capacity[name], bool)
+            and math.isfinite(capacity[name])
+            for capacity in (baseline_capacity, optimized_capacity)
+            for name in SCHEDULER_CAPACITY_PEAK_FIELDS
+        )
+    )
+    capacity_peak_deltas = {
+        name: (
+            optimized_capacity[name] - baseline_capacity[name]
+            if capacity_comparable
+            else None
+        )
+        for name in SCHEDULER_CAPACITY_PEAK_FIELDS
+    }
     return {
         "valid": comparable,
         "output_parity": baseline["output_digest"]
@@ -3267,6 +3289,8 @@ def compare_scheduler_trace_modes(baseline: dict, optimized: dict) -> dict:
         "class_latency_comparable": class_latency_comparable,
         "ratios_optimized_over_baseline_by_class": ratios_by_class,
         "class_tail_regressions": class_tail_regressions,
+        "capacity_comparable": capacity_comparable,
+        "capacity_peak_delta_optimized_minus_baseline": capacity_peak_deltas,
         "throughput_ratio": (
             optimized["output_throughput_tok_s"]
             / baseline["output_throughput_tok_s"]

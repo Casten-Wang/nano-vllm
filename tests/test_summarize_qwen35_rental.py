@@ -1462,6 +1462,13 @@ def test_scheduler_trace_compares_tail_latency_for_every_workload_class():
     assert optimized["capacity_peaks"]["sequence_slots_used"] == 11
     assert optimized["capacity_peaks"]["state_slots_used"] == 11
     assert optimized["capacity_peaks"]["kv_blocks_used"] == 10
+    assert comparison["capacity_comparable"]
+    assert all(
+        delta == 0
+        for delta in comparison[
+            "capacity_peak_delta_optimized_minus_baseline"
+        ].values()
+    )
     assert comparison["class_latency_comparable"]
     assert set(comparison["ratios_optimized_over_baseline_by_class"]) == {
         "decode-heavy",
