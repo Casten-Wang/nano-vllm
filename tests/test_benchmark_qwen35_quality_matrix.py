@@ -123,6 +123,7 @@ def test_matrix_summary_separates_state_and_kv_quality_effects():
     result = MODULE.summarize_results(cases)
     comparison = result["comparisons_by_tp"]["tp4"]
 
+    assert result["commit"] == "abc"
     assert comparison["model_state_bf16_kv_relative_change"] == pytest.approx(0.02)
     assert comparison["float32_state_int8_kv_relative_change"] == pytest.approx(0.05)
     assert comparison["model_state_int8_kv_relative_change"] == pytest.approx(0.08)

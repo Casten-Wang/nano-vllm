@@ -124,6 +124,7 @@ def write_gptq_summary_inputs(root, run_id, *, backend="triton"):
     write(
         root / f"gptq/performance/{gptq_run_id}_matrix_summary.json",
         {
+            "commits": [SOURCE_COMMIT],
             "workload": {"max_num_seqs": 64},
             "all_execution_paths_valid": True,
             "all_generation_valid": True,
@@ -134,6 +135,7 @@ def write_gptq_summary_inputs(root, run_id, *, backend="triton"):
     write(
         root / f"gptq/quality/{gptq_run_id}_summary.json",
         {
+            "commit": SOURCE_COMMIT,
             "cases": [
                 {
                     "tensor_parallel_size": tp,
@@ -151,6 +153,7 @@ def write_gptq_summary_inputs(root, run_id, *, backend="triton"):
         root / "gptq/quality/bf16_vs_gptq.json",
         {
             "valid": True,
+            "commit": SOURCE_COMMIT,
             "baseline_run_id": run_id,
             "candidate_run_id": gptq_run_id,
             "tensor_parallel_sizes": [4, 8],
@@ -348,6 +351,7 @@ def write_fp8_summary_inputs(
     write(
         root / f"fp8/performance/{fp8_run_id}_matrix_summary.json",
         {
+            "commits": [SOURCE_COMMIT],
             "all_execution_paths_valid": True,
             "all_generation_valid": True,
             "all_repeat_output_digests_match": True,
@@ -357,6 +361,7 @@ def write_fp8_summary_inputs(
     write(
         root / f"fp8/quality/{fp8_run_id}_summary.json",
         {
+            "commit": SOURCE_COMMIT,
             "cases": [
                 {
                     "tensor_parallel_size": tp,
@@ -374,6 +379,7 @@ def write_fp8_summary_inputs(
         root / "fp8/quality/bf16_vs_fp8.json",
         {
             "valid": True,
+            "commit": SOURCE_COMMIT,
             "baseline_run_id": run_id,
             "candidate_run_id": fp8_run_id,
             "tensor_parallel_sizes": [4, 8],
@@ -533,7 +539,10 @@ def test_optional_fp8_summary_requires_reference_execution_and_quality(tmp_path)
     write_fp8_summary_inputs(tmp_path, "run")
 
     report = MODULE.summarize_optional_fp8_audit(
-        tmp_path, "run", fp8_baseline_rows()
+        tmp_path,
+        "run",
+        fp8_baseline_rows(),
+        expected_source_commit=SOURCE_COMMIT,
     )
 
     assert report["valid"]
@@ -543,6 +552,7 @@ def test_optional_fp8_summary_requires_reference_execution_and_quality(tmp_path)
     assert report["local_checkpoint_matches_official"]
     assert report["bf16_vs_fp8_quality_valid"]
     assert report["runtime_storage_valid"]
+    assert report["source_commit_valid"]
     assert report["best_throughput"]["tensor_parallel_size"] == 8
 
     write_fp8_summary_inputs(tmp_path, "run", backend="triton")
@@ -551,6 +561,25 @@ def test_optional_fp8_summary_requires_reference_execution_and_quality(tmp_path)
     )
     assert not invalid["valid"]
     assert not invalid["executable"]
+
+
+def test_optional_fp8_summary_rejects_mixed_source_evidence(tmp_path):
+    write_fp8_summary_inputs(tmp_path, "run")
+    quality_path = tmp_path / "fp8/quality/run-fp8_summary.json"
+    quality = json.loads(quality_path.read_text())
+    quality["commit"] = "b" * 40
+    write(quality_path, quality)
+
+    report = MODULE.summarize_optional_fp8_audit(
+        tmp_path,
+        "run",
+        fp8_baseline_rows(),
+        expected_source_commit=SOURCE_COMMIT,
+    )
+
+    assert not report["source_commit_valid"]
+    assert not report["execution_validated"]
+    assert not report["valid"]
 
 
 def test_optional_fp8_summary_accepts_resident_execution_without_native_claim(tmp_path):
@@ -692,7 +721,11 @@ def test_resident_fp8_summary_rejects_missing_or_regressed_bf16_comparison(tmp_p
 def test_optional_gptq_summary_requires_actual_triton_execution(tmp_path):
     write_gptq_summary_inputs(tmp_path, "run")
 
-    report = MODULE.summarize_optional_gptq(tmp_path, "run")
+    report = MODULE.summarize_optional_gptq(
+        tmp_path,
+        "run",
+        expected_source_commit=SOURCE_COMMIT,
+    )
 
     assert report["valid"]
     assert report["local_checkpoint_matches_official"]
@@ -702,6 +735,7 @@ def test_optional_gptq_summary_requires_actual_triton_execution(tmp_path):
     assert report["best_throughput"]["tensor_parallel_size"] == 8
     assert report["lowest_peak_memory"]["tensor_parallel_size"] == 8
     assert report["workspace"]["valid"]
+    assert report["source_commit_valid"]
     assert report["workspace"]["by_tp"]["tp4"][
         "expected_bytes_per_rank"
     ] == 64 * (2 * 128 + 2048) * 2
@@ -711,6 +745,23 @@ def test_optional_gptq_summary_requires_actual_triton_execution(tmp_path):
     assert not invalid["valid"]
     assert not invalid["performance_valid"]
     assert not invalid["quality_valid"]
+
+
+def test_optional_gptq_summary_rejects_mixed_source_evidence(tmp_path):
+    write_gptq_summary_inputs(tmp_path, "run")
+    comparison_path = tmp_path / "gptq/quality/bf16_vs_gptq.json"
+    comparison = json.loads(comparison_path.read_text())
+    comparison["commit"] = "b" * 40
+    write(comparison_path, comparison)
+
+    report = MODULE.summarize_optional_gptq(
+        tmp_path,
+        "run",
+        expected_source_commit=SOURCE_COMMIT,
+    )
+
+    assert not report["source_commit_valid"]
+    assert not report["valid"]
 
 
 def test_optional_gptq_summary_rejects_workspace_without_runtime_reuse(tmp_path):

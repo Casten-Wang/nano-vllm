@@ -278,7 +278,11 @@ def summarize_gptq_workspace(
     }
 
 
-def summarize_optional_gptq(run_dir: Path, run_id: str) -> dict:
+def summarize_optional_gptq(
+    run_dir: Path,
+    run_id: str,
+    expected_source_commit: str | None = None,
+) -> dict:
     """Validate and summarize the optional GPTQ rental stages."""
 
     root = run_dir / "gptq"
@@ -363,6 +367,14 @@ def summarize_optional_gptq(run_dir: Path, run_id: str) -> dict:
         and checkpoint_quality.get("tensor_parallel_sizes")
         == sorted(int(name.removeprefix("tp")) for name in tp_names)
     )
+    source_commit_valid = (
+        expected_source_commit is None
+        or (
+            set(performance.get("commits", ())) == {expected_source_commit}
+            and quality.get("commit") == expected_source_commit
+            and checkpoint_quality.get("commit") == expected_source_commit
+        )
+    )
     valid_runs = [
         row
         for row in performance_runs
@@ -379,6 +391,7 @@ def summarize_optional_gptq(run_dir: Path, run_id: str) -> dict:
             and performance_valid
             and quality_valid
             and checkpoint_quality_valid
+            and source_commit_valid
         ),
         "audit_valid": audit_valid,
         "local_checkpoint_matches_official": local_checkpoint_valid,
@@ -387,6 +400,7 @@ def summarize_optional_gptq(run_dir: Path, run_id: str) -> dict:
         "workspace": gptq_workspace,
         "quality_valid": quality_valid,
         "bf16_vs_gptq_quality_valid": checkpoint_quality_valid,
+        "source_commit_valid": source_commit_valid,
         "official_checkpoint": {
             "repo": audit.get("repo"),
             "resolved_revision": audit.get("resolved_revision"),
@@ -420,6 +434,7 @@ def summarize_optional_fp8_audit(
     run_dir: Path,
     run_id: str | None = None,
     baseline_rows: list[dict] | None = None,
+    expected_source_commit: str | None = None,
 ) -> dict:
     """Summarize optional FP8 layout and reference-execution evidence."""
 
@@ -799,6 +814,14 @@ def summarize_optional_fp8_audit(
         and checkpoint_quality.get("tensor_parallel_sizes")
         == sorted(int(name.removeprefix("tp")) for name in tp_names)
     )
+    source_commit_valid = (
+        expected_source_commit is None
+        or (
+            set(performance.get("commits", ())) == {expected_source_commit}
+            and quality.get("commit") == expected_source_commit
+            and checkpoint_quality.get("commit") == expected_source_commit
+        )
+    )
     valid_runs = [
         row
         for row in performance_runs
@@ -813,6 +836,7 @@ def summarize_optional_fp8_audit(
         and performance_valid
         and quality_valid
         and checkpoint_quality_valid
+        and source_commit_valid
     )
     report.update(
         {
@@ -840,6 +864,7 @@ def summarize_optional_fp8_audit(
             "runtime_storage_by_tp": runtime_storage_by_tp,
             "quality_valid": quality_valid,
             "bf16_vs_fp8_quality_valid": checkpoint_quality_valid,
+            "source_commit_valid": source_commit_valid,
             "tensor_parallel_sizes": sorted(
                 {row["tensor_parallel_size"] for row in performance_runs}
             ),
@@ -3118,8 +3143,17 @@ def summarize(run_dir: Path, run_id: str) -> dict:
         / "channel_accumulate"
         / f"{run_id}-conv-channel_accumulate_summary.json"
     )
-    gptq = summarize_optional_gptq(run_dir, run_id)
-    fp8 = summarize_optional_fp8_audit(run_dir, run_id, performance.get("runs"))
+    gptq = summarize_optional_gptq(
+        run_dir,
+        run_id,
+        expected_source_commit=manifest_source_commit,
+    )
+    fp8 = summarize_optional_fp8_audit(
+        run_dir,
+        run_id,
+        performance.get("runs"),
+        expected_source_commit=manifest_source_commit,
+    )
     kernel_paths = sorted((run_dir / "kernels").glob("tp*.json"))
     if not kernel_paths:
         raise ValueError("no kernel benchmark artifacts were found")

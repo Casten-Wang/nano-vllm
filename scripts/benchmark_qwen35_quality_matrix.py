@@ -312,6 +312,7 @@ def summarize_results(
         all(checks.values()) for checks in per_tp_quality.values()
     ) and cross_tp_passed
     return {
+        "commit": next(iter(commits)),
         "quality_scope": "teacher-forced decode tokens that read stored KV cache",
         "cases": rows,
         "comparisons_by_tp": by_tp,
