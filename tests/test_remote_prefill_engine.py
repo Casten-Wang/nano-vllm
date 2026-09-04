@@ -1321,6 +1321,30 @@ def test_sync_send_respects_active_transfer_capacity_before_host_copy():
     assert engine.metrics.to_dict()["remote_prefill_send_backpressure"] == 1
 
 
+def test_sync_send_rejects_destination_transfer_id_before_host_copy():
+    engine = make_engine()
+    engine.add_remote_prefill_request(
+        [5, 6, 7, 8],
+        SamplingParams(max_tokens=4),
+        transfer_id="request/attempt-1",
+    )
+    source = _prepare_remote_prefill_source(engine, 1)
+    capacity_before = engine.remote_prefill_capacity_snapshot()
+    engine.model_runner.call_rank_results.reset_mock()
+
+    with pytest.raises(ValueError, match="already reserved"):
+        engine.send_remote_prefill(
+            source.seq_id,
+            "request/attempt-1",
+            [("127.0.0.1", 20001)],
+        )
+
+    engine.model_runner.call_rank_results.assert_not_called()
+    assert source in engine.scheduler.running
+    assert source.status is SequenceStatus.RUNNING
+    assert engine.remote_prefill_capacity_snapshot() == capacity_before
+
+
 def test_destination_reservation_respects_transfer_capacity_before_allocation():
     engine = make_engine()
     source = _prepare_remote_prefill_source(engine, 1)

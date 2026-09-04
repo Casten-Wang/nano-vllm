@@ -1107,6 +1107,11 @@ class LLMEngine:
             or seq.num_scheduled_tokens != 0
         ):
             raise ValueError("remote prefill source is not ready for handoff")
+        if (
+            transfer_id in self.scheduler.remote_prefills
+            or transfer_id in self.scheduler.remote_prefill_sources
+        ):
+            raise ValueError("cache transfer id is already reserved")
         self._ensure_remote_prefill_transfer_capacity(direction="send")
         estimates = self.model_runner.call_rank_results(
             "estimate_sequence_cache_bytes",
