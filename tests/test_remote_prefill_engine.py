@@ -15,6 +15,19 @@ from nanovllm.engine.sequence import Sequence, SequenceStatus
 from nanovllm.sampling_params import SamplingParams
 
 
+def test_engine_rejects_unknown_configuration_before_startup():
+    with pytest.raises(
+        TypeError,
+        match="unexpected configuration argument.*tensor_paralel_size",
+    ):
+        LLMEngine("missing-model", tensor_paralel_size=4)
+
+
+def test_engine_reports_unknown_configuration_in_stable_order():
+    with pytest.raises(TypeError, match="aaa, zzz"):
+        LLMEngine("missing-model", zzz=1, aaa=2)
+
+
 def make_engine(*, tensor_parallel_size=1):
     config = SimpleNamespace(
         max_model_len=32,

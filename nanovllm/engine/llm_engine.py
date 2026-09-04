@@ -194,6 +194,10 @@ class LLMEngine:
 
     def __init__(self, model, **kwargs):
         config_fields = {field.name for field in fields(Config)}
+        unknown_fields = sorted(set(kwargs) - config_fields)
+        if unknown_fields:
+            names = ", ".join(unknown_fields)
+            raise TypeError(f"unexpected configuration argument(s): {names}")
         config_kwargs = {k: v for k, v in kwargs.items() if k in config_fields}
         config = Config(model, **config_kwargs)
         self.distributed_store = _create_distributed_store(
