@@ -1137,6 +1137,87 @@ def file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def checkpoint_manifests_match(local: dict, remote: dict) -> bool:
+    """Match a fully hashed local checkpoint to a pinned Hub revision."""
+
+    remote_shards = {
+        item.get("name"): item
+        for item in remote.get("checkpoint_shards", ())
+        if isinstance(item, dict) and isinstance(item.get("name"), str)
+    }
+    local_shards = {
+        item.get("name"): item
+        for item in local.get("files", ())
+        if isinstance(item, dict) and isinstance(item.get("name"), str)
+    }
+    return (
+        remote.get("valid") is True
+        and local.get("config_sha256") == remote.get("config_sha256")
+        and local.get("index_sha256") == remote.get("index_sha256")
+        and local.get("shard_count") == remote.get("shard_count")
+        and local.get("present_shard_count") == remote.get("shard_count")
+        and not local.get("missing_shards")
+        and bool(remote_shards)
+        and set(local_shards) == set(remote_shards)
+        and all(
+            local_shards[name].get("present") is True
+            and local_shards[name].get("size_bytes")
+            == remote_shards[name].get("size_bytes")
+            and (
+                local_shards[name].get("content_sha256")
+                or local_shards[name].get("content_id")
+            )
+            == remote_shards[name].get("sha256")
+            for name in remote_shards
+        )
+    )
+
+
+def validate_preflight_checkpoint_identity(
+    args: argparse.Namespace,
+    stage_name: str,
+) -> None:
+    """Stop before paid benchmark stages when a local checkpoint is wrong."""
+
+    root = Path(args.result_dir) / args.run_id
+    paths = {
+        "preflight": (
+            root / "preflight" / "checkpoint_mapping_audit.json",
+            root / "preflight" / "official_checkpoint_header_audit.json",
+            "BF16",
+            OFFICIAL_CHECKPOINT_REPO,
+            OFFICIAL_CHECKPOINT_REVISION,
+        ),
+        "fp8-preflight": (
+            root / "fp8" / "preflight" / "checkpoint_mapping_audit.json",
+            root / "fp8" / "official_checkpoint_header_audit.json",
+            "FP8",
+            OFFICIAL_FP8_CHECKPOINT_REPO,
+            OFFICIAL_FP8_CHECKPOINT_REVISION,
+        ),
+    }
+    if stage_name not in paths:
+        return
+    local_path, remote_path, label, expected_repo, expected_revision = paths[
+        stage_name
+    ]
+    try:
+        local = json.loads(local_path.read_text()).get("checkpoint_manifest", {})
+        remote = json.loads(remote_path.read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        raise RuntimeError(
+            f"cannot validate {label} checkpoint identity after preflight"
+        ) from error
+    if (
+        remote.get("repo") != expected_repo
+        or remote.get("resolved_revision") != expected_revision
+        or not checkpoint_manifests_match(local, remote)
+    ):
+        raise RuntimeError(
+            f"local {label} checkpoint does not match the pinned official revision"
+        )
+
+
 def collect_stage_artifacts(
     args: argparse.Namespace,
     stage_name: str,
@@ -1581,6 +1662,7 @@ def main() -> None:
             except ValueError as error:
                 raise SystemExit(str(error)) from error
             artifacts = collect_stage_artifacts(args, name)
+            validate_preflight_checkpoint_identity(args, name)
             mark_stage_completed(manifest_path, manifest, name, artifacts)
 
 

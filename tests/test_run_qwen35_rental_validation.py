@@ -1,3 +1,4 @@
+import json
 import sys
 from argparse import Namespace
 from importlib.util import module_from_spec, spec_from_file_location
@@ -589,6 +590,100 @@ def test_manifest_preserves_hugging_face_model_id():
 
     assert plan["model"] == "Qwen/Qwen3.6-35B-A3B"
     assert len(plan["source_commit"]) == 40
+
+
+def checkpoint_reports(tmp_path, *, local_digest="shard-digest", fp8=False):
+    local = {
+        "checkpoint_manifest": {
+            "config_sha256": "config-digest",
+            "index_sha256": "index-digest",
+            "shard_count": 1,
+            "present_shard_count": 1,
+            "missing_shards": [],
+            "files": [
+                {
+                    "name": "model-00001-of-00001.safetensors",
+                    "present": True,
+                    "size_bytes": 123,
+                    "content_sha256": local_digest,
+                }
+            ],
+        }
+    }
+    remote = {
+        "valid": True,
+        "repo": (
+            MODULE.OFFICIAL_FP8_CHECKPOINT_REPO
+            if fp8
+            else MODULE.OFFICIAL_CHECKPOINT_REPO
+        ),
+        "resolved_revision": (
+            MODULE.OFFICIAL_FP8_CHECKPOINT_REVISION
+            if fp8
+            else MODULE.OFFICIAL_CHECKPOINT_REVISION
+        ),
+        "config_sha256": "config-digest",
+        "index_sha256": "index-digest",
+        "shard_count": 1,
+        "checkpoint_shards": [
+            {
+                "name": "model-00001-of-00001.safetensors",
+                "size_bytes": 123,
+                "sha256": "shard-digest",
+            }
+        ],
+    }
+    preflight = tmp_path / "run" / ("fp8/preflight" if fp8 else "preflight")
+    preflight.mkdir(parents=True)
+    (preflight / "checkpoint_mapping_audit.json").write_text(json.dumps(local))
+    remote_root = tmp_path / "run" / ("fp8" if fp8 else "preflight")
+    (remote_root / "official_checkpoint_header_audit.json").write_text(
+        json.dumps(remote)
+    )
+
+
+def test_preflight_accepts_checkpoint_matching_pinned_revision(tmp_path):
+    checkpoint_reports(tmp_path)
+    arguments = args()
+    arguments.result_dir = str(tmp_path)
+    arguments.run_id = "run"
+
+    MODULE.validate_preflight_checkpoint_identity(arguments, "preflight")
+
+
+def test_fp8_preflight_accepts_checkpoint_matching_pinned_revision(tmp_path):
+    checkpoint_reports(tmp_path, fp8=True)
+    arguments = args()
+    arguments.result_dir = str(tmp_path)
+    arguments.run_id = "run"
+
+    MODULE.validate_preflight_checkpoint_identity(arguments, "fp8-preflight")
+
+
+def test_preflight_rejects_checkpoint_not_matching_pinned_revision(tmp_path):
+    checkpoint_reports(tmp_path, local_digest="different")
+    arguments = args()
+    arguments.result_dir = str(tmp_path)
+    arguments.run_id = "run"
+
+    with pytest.raises(RuntimeError, match="does not match.*official revision"):
+        MODULE.validate_preflight_checkpoint_identity(arguments, "preflight")
+
+
+def test_preflight_rejects_unpinned_remote_revision(tmp_path):
+    checkpoint_reports(tmp_path)
+    remote_path = (
+        tmp_path / "run" / "preflight" / "official_checkpoint_header_audit.json"
+    )
+    remote = json.loads(remote_path.read_text())
+    remote["resolved_revision"] = "0" * 40
+    remote_path.write_text(json.dumps(remote))
+    arguments = args()
+    arguments.result_dir = str(tmp_path)
+    arguments.run_id = "run"
+
+    with pytest.raises(RuntimeError, match="does not match.*official revision"):
+        MODULE.validate_preflight_checkpoint_identity(arguments, "preflight")
 
 
 def test_manifest_rejects_resume_from_different_source_commit(tmp_path):
