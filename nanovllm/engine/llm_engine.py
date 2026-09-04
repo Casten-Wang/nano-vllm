@@ -15,6 +15,7 @@ from nanovllm.engine.scheduler import ScheduleResult, Scheduler
 from nanovllm.engine.cache_transfer import (
     CacheTransferPhase,
     CacheTransferSession,
+    validate_cache_transfer_id,
     validate_cache_transfer_payload_limit,
     validate_cache_transfer_timeout,
 )
@@ -348,6 +349,7 @@ class LLMEngine:
     ) -> int:
         """Reserve decode-side cache/state for a remote prefill request."""
 
+        transfer_id = validate_cache_transfer_id(transfer_id)
         timeout_s = validate_cache_transfer_timeout(timeout_s)
         if (
             transfer_id in self.scheduler.remote_prefills
@@ -422,6 +424,7 @@ class LLMEngine:
     ) -> int:
         """Reserve a destination using a source-to-local TP transfer plan."""
 
+        transfer_id = validate_cache_transfer_id(transfer_id)
         timeout_s = validate_cache_transfer_timeout(timeout_s)
         if (
             transfer_id in self.scheduler.remote_prefills
@@ -463,6 +466,7 @@ class LLMEngine:
     ) -> int:
         """Receive every TP rank, then atomically admit the request to decode."""
 
+        transfer_id = validate_cache_transfer_id(transfer_id)
         timeout_s = validate_cache_transfer_timeout(timeout_s)
         max_payload_bytes = validate_cache_transfer_payload_limit(
             max_payload_bytes
@@ -605,6 +609,7 @@ class LLMEngine:
     ) -> int:
         """Start CPU-side rank receives while decode scheduling continues."""
 
+        transfer_id = validate_cache_transfer_id(transfer_id)
         timeout_s = validate_cache_transfer_timeout(timeout_s)
         max_payload_bytes = validate_cache_transfer_payload_limit(
             max_payload_bytes
@@ -716,6 +721,7 @@ class LLMEngine:
     ) -> int:
         """Start source-peer receives without admitting decode early."""
 
+        transfer_id = validate_cache_transfer_id(transfer_id)
         timeout_s = validate_cache_transfer_timeout(timeout_s)
         max_payload_bytes = validate_cache_transfer_payload_limit(
             max_payload_bytes
@@ -796,6 +802,7 @@ class LLMEngine:
     ) -> int:
         """Release an unstarted destination so a router can try another node."""
 
+        transfer_id = validate_cache_transfer_id(transfer_id)
         if transfer_id not in self.scheduler.remote_prefills:
             raise ValueError("cache transfer id is not reserved")
         if transfer_id in self._remote_prefill_receive_tokens:
@@ -887,6 +894,7 @@ class LLMEngine:
     ) -> int:
         """Cancel an active receive and return its request to local prefill."""
 
+        transfer_id = validate_cache_transfer_id(transfer_id)
         if transfer_id not in getattr(self, "_remote_prefill_receive_tokens", {}):
             raise ValueError("cache receive id is not active")
         if not reason:
@@ -1032,6 +1040,7 @@ class LLMEngine:
     def poll_remote_prefill_receive(self, transfer_id: str) -> int | None:
         """Progress one receive; return its sequence id only after all-rank commit."""
 
+        transfer_id = validate_cache_transfer_id(transfer_id)
         if transfer_id not in getattr(self, "_remote_prefill_receive_tokens", {}):
             raise ValueError("cache receive id is not active")
         self.metrics.record_remote_prefill_poll(1)
@@ -1169,6 +1178,7 @@ class LLMEngine:
     ) -> int:
         """Send every TP rank and release producer state after all ACKs."""
 
+        transfer_id = validate_cache_transfer_id(transfer_id)
         timeout_s = validate_cache_transfer_timeout(timeout_s)
         endpoints = _validate_cache_transfer_endpoints(
             endpoints,
@@ -1371,6 +1381,7 @@ class LLMEngine:
     ) -> int:
         """Stage a source on every rank and send it without blocking scheduling."""
 
+        transfer_id = validate_cache_transfer_id(transfer_id)
         timeout_s = validate_cache_transfer_timeout(timeout_s)
         endpoints = _validate_cache_transfer_endpoints(
             endpoints,
@@ -1461,6 +1472,7 @@ class LLMEngine:
     ) -> int:
         """Stage routed source slices and start every destination peer."""
 
+        transfer_id = validate_cache_transfer_id(transfer_id)
         timeout_s = validate_cache_transfer_timeout(timeout_s)
         destination_endpoints = _validate_cache_transfer_endpoints(
             destination_endpoints,
@@ -1599,6 +1611,7 @@ class LLMEngine:
     def abort_remote_prefill_send(self, transfer_id: str) -> int:
         """Cancel a source send while retaining its local KV and decode state."""
 
+        transfer_id = validate_cache_transfer_id(transfer_id)
         if transfer_id not in getattr(self, "_remote_prefill_send_started_at", {}):
             raise ValueError("cache send id is not active")
         seq, _position = self.scheduler.remote_prefill_sources[transfer_id]
@@ -1701,6 +1714,7 @@ class LLMEngine:
     def poll_remote_prefill_send(self, transfer_id: str) -> int | None:
         """Progress one source send and commit only after every rank ACKs."""
 
+        transfer_id = validate_cache_transfer_id(transfer_id)
         if transfer_id not in getattr(self, "_remote_prefill_send_started_at", {}):
             raise ValueError("cache send id is not active")
         self.metrics.record_remote_prefill_send_poll(1)

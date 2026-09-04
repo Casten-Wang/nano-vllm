@@ -51,6 +51,14 @@ def validate_cache_transfer_payload_limit(max_payload_bytes: object) -> int:
     return max_payload_bytes
 
 
+def validate_cache_transfer_id(transfer_id: object) -> str:
+    """Return one non-empty string suitable for every ownership map."""
+
+    if not isinstance(transfer_id, str) or not transfer_id:
+        raise ValueError("cache transfer id must be a non-empty string")
+    return transfer_id
+
+
 class HostStagingLease:
     """Exclusive ownership of one contiguous host staging allocation."""
 
@@ -206,8 +214,7 @@ class CacheTransferSession:
         started_at: float,
         timeout_s: float,
     ) -> None:
-        if not transfer_id:
-            raise ValueError("cache transfer id must not be empty")
+        transfer_id = validate_cache_transfer_id(transfer_id)
         if tensor_parallel_size <= 0:
             raise ValueError("cache transfer TP size must be positive")
         validated_timeout_s = validate_cache_transfer_timeout(timeout_s)

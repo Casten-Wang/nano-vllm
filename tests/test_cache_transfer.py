@@ -908,6 +908,17 @@ def test_transfer_session_rejects_invalid_timeout(timeout_s):
         )
 
 
+@pytest.mark.parametrize("transfer_id", ["", 1, True, None, []])
+def test_transfer_session_rejects_invalid_transfer_id(transfer_id):
+    with pytest.raises(ValueError, match="id must be a non-empty string"):
+        CacheTransferSession(
+            transfer_id,
+            2,
+            started_at=10.0,
+            timeout_s=5.0,
+        )
+
+
 @pytest.mark.parametrize(
     "max_payload_bytes",
     [0, -1, 1.5, float("nan"), float("inf"), True, "1"],

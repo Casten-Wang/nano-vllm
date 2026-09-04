@@ -512,6 +512,54 @@ def test_remote_prefill_entrypoints_reject_invalid_timeout_before_work(operation
 @pytest.mark.parametrize(
     "operation",
     [
+        lambda engine: engine.add_remote_prefill_request(
+            [1, 2, 3, 4],
+            SamplingParams(max_tokens=4),
+            transfer_id=True,
+        ),
+        lambda engine: engine.add_heterogeneous_remote_prefill_request(
+            [1, 2, 3, 4],
+            SamplingParams(max_tokens=4),
+            transfer_id=True,
+            source_tp_size=2,
+        ),
+        lambda engine: engine.send_remote_prefill(
+            1,
+            True,
+            [("127.0.0.1", 20001)],
+        ),
+        lambda engine: engine.start_remote_prefill_send(
+            1,
+            True,
+            [("127.0.0.1", 20001)],
+        ),
+        lambda engine: engine.start_heterogeneous_remote_prefill_send(
+            1,
+            True,
+            2,
+            [("127.0.0.1", 20001), ("127.0.0.1", 20002)],
+        ),
+    ],
+)
+def test_state_creating_entrypoints_reject_invalid_transfer_id_before_work(
+    operation,
+):
+    engine = make_engine()
+    capacity_before = engine.remote_prefill_capacity_snapshot()
+
+    with pytest.raises(ValueError, match="id must be a non-empty string"):
+        operation(engine)
+
+    engine.model_runner.call_rank_results.assert_not_called()
+    engine.model_runner.build_heterogeneous_cache_receive_plan_for_blocks.assert_not_called()
+    engine.model_runner.build_heterogeneous_cache_transfer_plan_for_blocks.assert_not_called()
+    assert engine.scheduler.is_finished()
+    assert engine.remote_prefill_capacity_snapshot() == capacity_before
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [
         lambda engine: engine.receive_remote_prefill(
             "request/attempt-1",
             9,
