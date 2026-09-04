@@ -406,6 +406,75 @@ def test_invalid_reservation_timeout_does_not_acquire_capacity(timeout_s):
     assert engine.remote_prefill_capacity_snapshot() == capacity_before
 
 
+@pytest.mark.parametrize(
+    "operation",
+    [
+        lambda engine: engine.add_remote_prefill_request(
+            [1, 2, 3, 4],
+            SamplingParams(max_tokens=4),
+            transfer_id="request/attempt-1",
+            timeout_s=float("nan"),
+        ),
+        lambda engine: engine.add_heterogeneous_remote_prefill_request(
+            [1, 2, 3, 4],
+            SamplingParams(max_tokens=4),
+            transfer_id="request/attempt-1",
+            source_tp_size=2,
+            timeout_s=float("nan"),
+        ),
+        lambda engine: engine.receive_remote_prefill(
+            "request/attempt-1",
+            9,
+            [("127.0.0.1", 20001)],
+            timeout_s=float("nan"),
+        ),
+        lambda engine: engine.start_remote_prefill_receive(
+            "request/attempt-1",
+            9,
+            [("127.0.0.1", 20001)],
+            timeout_s=float("nan"),
+        ),
+        lambda engine: engine.start_heterogeneous_remote_prefill_receive(
+            "request/attempt-1",
+            9,
+            [("127.0.0.1", 20001)],
+            timeout_s=float("nan"),
+        ),
+        lambda engine: engine.send_remote_prefill(
+            1,
+            "request/attempt-1",
+            [("127.0.0.1", 20001)],
+            timeout_s=float("nan"),
+        ),
+        lambda engine: engine.start_remote_prefill_send(
+            1,
+            "request/attempt-1",
+            [("127.0.0.1", 20001)],
+            timeout_s=float("nan"),
+        ),
+        lambda engine: engine.start_heterogeneous_remote_prefill_send(
+            1,
+            "request/attempt-1",
+            2,
+            [("127.0.0.1", 20001), ("127.0.0.1", 20002)],
+            timeout_s=float("nan"),
+        ),
+    ],
+)
+def test_remote_prefill_entrypoints_reject_invalid_timeout_before_work(operation):
+    engine = make_engine()
+    capacity_before = engine.remote_prefill_capacity_snapshot()
+
+    with pytest.raises(ValueError, match="timeout must be a finite positive number"):
+        operation(engine)
+
+    engine.model_runner.call_rank_results.assert_not_called()
+    engine.model_runner.build_heterogeneous_cache_receive_plan_for_blocks.assert_not_called()
+    engine.model_runner.build_heterogeneous_cache_transfer_plan_for_blocks.assert_not_called()
+    assert engine.scheduler.is_finished()
+    assert engine.remote_prefill_capacity_snapshot() == capacity_before
+
+
 def test_expired_reservation_cannot_start_receive():
     engine = make_engine()
     seq_id = engine.add_remote_prefill_request(

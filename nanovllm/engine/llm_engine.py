@@ -12,7 +12,11 @@ from nanovllm.config import Config, resolve_eos_token_ids
 from nanovllm.sampling_params import SamplingParams
 from nanovllm.engine.sequence import Sequence
 from nanovllm.engine.scheduler import ScheduleResult, Scheduler
-from nanovllm.engine.cache_transfer import CacheTransferPhase, CacheTransferSession
+from nanovllm.engine.cache_transfer import (
+    CacheTransferPhase,
+    CacheTransferSession,
+    validate_cache_transfer_timeout,
+)
 from nanovllm.engine.model_runner import CONTROL_STATUS_SIZE, ModelRunner
 from nanovllm.engine.metrics import EngineMetrics
 from nanovllm.engine.remote_prefill_router import RemotePrefillDemand
@@ -309,6 +313,7 @@ class LLMEngine:
     ) -> int:
         """Reserve decode-side cache/state for a remote prefill request."""
 
+        timeout_s = validate_cache_transfer_timeout(timeout_s)
         if (
             transfer_id in self.scheduler.remote_prefills
             or transfer_id in self.scheduler.remote_prefill_sources
@@ -382,6 +387,7 @@ class LLMEngine:
     ) -> int:
         """Reserve a destination using a source-to-local TP transfer plan."""
 
+        timeout_s = validate_cache_transfer_timeout(timeout_s)
         if (
             transfer_id in self.scheduler.remote_prefills
             or transfer_id in self.scheduler.remote_prefill_sources
@@ -422,6 +428,7 @@ class LLMEngine:
     ) -> int:
         """Receive every TP rank, then atomically admit the request to decode."""
 
+        timeout_s = validate_cache_transfer_timeout(timeout_s)
         self._validate_token_ids(
             [first_token_id],
             value_name="first_token_id",
@@ -556,6 +563,7 @@ class LLMEngine:
     ) -> int:
         """Start CPU-side rank receives while decode scheduling continues."""
 
+        timeout_s = validate_cache_transfer_timeout(timeout_s)
         self._validate_token_ids(
             [first_token_id],
             value_name="first_token_id",
@@ -659,6 +667,7 @@ class LLMEngine:
     ) -> int:
         """Start source-peer receives without admitting decode early."""
 
+        timeout_s = validate_cache_transfer_timeout(timeout_s)
         self._validate_token_ids([first_token_id], value_name="first_token_id")
         source_sizes = getattr(
             self,
@@ -1104,6 +1113,7 @@ class LLMEngine:
     ) -> int:
         """Send every TP rank and release producer state after all ACKs."""
 
+        timeout_s = validate_cache_transfer_timeout(timeout_s)
         seq = next(
             (candidate for candidate in self.scheduler.running if candidate.seq_id == seq_id),
             None,
@@ -1301,6 +1311,7 @@ class LLMEngine:
     ) -> int:
         """Stage a source on every rank and send it without blocking scheduling."""
 
+        timeout_s = validate_cache_transfer_timeout(timeout_s)
         seq = next(
             (candidate for candidate in self.scheduler.running if candidate.seq_id == seq_id),
             None,
@@ -1386,6 +1397,7 @@ class LLMEngine:
     ) -> int:
         """Stage routed source slices and start every destination peer."""
 
+        timeout_s = validate_cache_transfer_timeout(timeout_s)
         seq = next(
             (
                 candidate

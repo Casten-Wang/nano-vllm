@@ -19,6 +19,24 @@ def _is_plain_int(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
+def validate_cache_transfer_timeout(timeout_s: object) -> float:
+    """Return one finite positive timeout for controller and worker paths."""
+
+    valid_type = (
+        isinstance(timeout_s, (int, float))
+        and not isinstance(timeout_s, bool)
+    )
+    try:
+        validated_timeout_s = float(timeout_s) if valid_type else math.nan
+    except (OverflowError, TypeError, ValueError):
+        validated_timeout_s = math.nan
+    if not math.isfinite(validated_timeout_s) or validated_timeout_s <= 0:
+        raise ValueError(
+            "cache transfer timeout must be a finite positive number"
+        )
+    return validated_timeout_s
+
+
 class HostStagingLease:
     """Exclusive ownership of one contiguous host staging allocation."""
 
@@ -178,20 +196,7 @@ class CacheTransferSession:
             raise ValueError("cache transfer id must not be empty")
         if tensor_parallel_size <= 0:
             raise ValueError("cache transfer TP size must be positive")
-        valid_timeout_type = (
-            isinstance(timeout_s, (int, float))
-            and not isinstance(timeout_s, bool)
-        )
-        try:
-            validated_timeout_s = (
-                float(timeout_s) if valid_timeout_type else math.nan
-            )
-        except (OverflowError, ValueError):
-            validated_timeout_s = math.nan
-        if not math.isfinite(validated_timeout_s) or validated_timeout_s <= 0:
-            raise ValueError(
-                "cache transfer timeout must be a finite positive number"
-            )
+        validated_timeout_s = validate_cache_transfer_timeout(timeout_s)
         self.transfer_id = transfer_id
         self.tensor_parallel_size = tensor_parallel_size
         self.deadline = started_at + validated_timeout_s
