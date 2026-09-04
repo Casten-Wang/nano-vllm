@@ -17,6 +17,9 @@ def qwen36_text_config():
         num_key_value_heads=2,
         linear_num_key_heads=16,
         linear_num_value_heads=32,
+        vocab_size=248320,
+        moe_intermediate_size=512,
+        shared_expert_intermediate_size=512,
     )
 
 

@@ -10,6 +10,7 @@ from nanovllm.models.model_spec import (
     ModelSpec,
     QWEN35_MOE_ARCHITECTURES,
     resolve_model_spec,
+    validate_weight_parallelism,
 )
 
 
@@ -188,6 +189,7 @@ class Config:
         self.model_spec = resolve_model_spec(self.hf_config)
         self.model_config = self.model_spec.text_config
         validate_cache_parallelism(self.model_spec, self.tensor_parallel_size)
+        validate_weight_parallelism(self.model_spec, self.tensor_parallel_size)
         quantization = self.model_spec.quantization
         if quantization.format == "gptq_int4":
             if self.weight_quant_backend == "auto":

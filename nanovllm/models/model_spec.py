@@ -43,6 +43,41 @@ class ModelSpec:
         return bool(self.linear_attention_layers)
 
 
+def validate_weight_parallelism(
+    model_spec: ModelSpec,
+    tensor_parallel_size: int,
+) -> None:
+    """Validate dimensions sharded by the supported model implementations."""
+
+    if (
+        not isinstance(tensor_parallel_size, int)
+        or isinstance(tensor_parallel_size, bool)
+        or tensor_parallel_size <= 0
+    ):
+        raise ValueError("tensor_parallel_size must be a positive integer")
+    config = model_spec.text_config
+    for field in (
+        "vocab_size",
+        "intermediate_size",
+        "moe_intermediate_size",
+        "shared_expert_intermediate_size",
+    ):
+        value = getattr(config, field, None)
+        if value is None:
+            continue
+        if (
+            not isinstance(value, int)
+            or isinstance(value, bool)
+            or value <= 0
+        ):
+            raise ValueError(f"{field} must be a positive integer")
+        if value % tensor_parallel_size:
+            raise ValueError(
+                f"{field}={value} cannot be sharded across "
+                f"TP={tensor_parallel_size}"
+            )
+
+
 def _architecture(hf_config: Any) -> str:
     architectures = getattr(hf_config, "architectures", None)
     if not architectures or not isinstance(architectures, (list, tuple)):

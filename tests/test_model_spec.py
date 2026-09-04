@@ -15,6 +15,7 @@ MODEL_SPEC = module_from_spec(SPEC)
 sys.modules[SPEC.name] = MODEL_SPEC
 SPEC.loader.exec_module(MODEL_SPEC)
 resolve_model_spec = MODEL_SPEC.resolve_model_spec
+validate_weight_parallelism = MODEL_SPEC.validate_weight_parallelism
 
 
 def test_dense_qwen_uses_every_layer_for_kv_cache():
@@ -127,3 +128,39 @@ def test_unknown_architecture_is_rejected_early():
 
     with pytest.raises(ValueError, match="unsupported model architecture"):
         resolve_model_spec(config)
+
+
+def test_dense_intermediate_size_must_divide_tensor_parallel_size():
+    config = SimpleNamespace(
+        architectures=["Qwen3ForCausalLM"],
+        num_hidden_layers=2,
+        vocab_size=16,
+        intermediate_size=10,
+    )
+    spec = resolve_model_spec(config)
+
+    with pytest.raises(ValueError, match="intermediate_size=10"):
+        validate_weight_parallelism(spec, 4)
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["vocab_size", "moe_intermediate_size", "shared_expert_intermediate_size"],
+)
+def test_qwen35_weight_dimensions_must_divide_tensor_parallel_size(field):
+    text_config = SimpleNamespace(
+        num_hidden_layers=2,
+        layer_types=("linear_attention", "full_attention"),
+        vocab_size=16,
+        moe_intermediate_size=16,
+        shared_expert_intermediate_size=16,
+    )
+    setattr(text_config, field, 17)
+    config = SimpleNamespace(
+        architectures=["Qwen3_5MoeForConditionalGeneration"],
+        text_config=text_config,
+    )
+    spec = resolve_model_spec(config)
+
+    with pytest.raises(ValueError, match=field):
+        validate_weight_parallelism(spec, 4)
