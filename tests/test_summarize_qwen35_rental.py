@@ -1066,7 +1066,9 @@ def scheduler_trace_result(mode, repeat=1):
             "seq_id": class_index * 8 + index,
             "workload_class": workload_class,
             "arrival_step": index,
+            "first_schedule_step": index + (1 if optimized else 2),
             "completion_step": index + 4,
+            "scheduler_wait_steps": 1 if optimized else 2,
             "input_tokens": 128,
             "requested_output_tokens": 4,
             "output_tokens": 4,
@@ -1121,7 +1123,7 @@ def scheduler_trace_result(mode, repeat=1):
                     "short": 8,
                 },
             },
-            "engine_steps": 2,
+            "engine_steps": 11,
             "request_samples": request_samples,
             "output_token_ids": {
                 "digest": "greedy-output",
@@ -1131,6 +1133,7 @@ def scheduler_trace_result(mode, repeat=1):
             "latency": {
                 "all": {
                     "request_count": 24,
+                    "p95_scheduler_wait_steps": 1 if optimized else 2,
                     "p95_ttft_s": (
                         0.08 if optimized else 0.12
                     ) + repeat * 0.001,
@@ -1148,6 +1151,7 @@ def scheduler_trace_result(mode, repeat=1):
                 "by_class": {
                     workload_class: {
                         "request_count": 8,
+                        "p95_scheduler_wait_steps": 1 if optimized else 2,
                         "p95_time_to_first_schedule_s": (
                             0.03 if optimized else 0.05
                         ) + repeat * 0.0005,
@@ -1242,9 +1246,14 @@ def scheduler_trace_result(mode, repeat=1):
                 {
                     "logical_step": step,
                     "elapsed_s": 0.01,
+                    "scheduled_request_ids": [
+                        item["request_id"]
+                        for item in request_samples
+                        if item["first_schedule_step"] == step
+                    ],
                     "capacity": {"kv_blocks_free": 8 - step},
                 }
-                for step in range(2)
+                for step in range(11)
             ],
             "engine_metrics": {
                 "num_finished_requests": 24,
@@ -1321,6 +1330,61 @@ def test_scheduler_trace_compares_tail_latency_for_every_workload_class():
         "p95_ttft_s"
     ] == pytest.approx(0.0815 / 0.1215)
     assert comparison["class_tail_regressions"] == []
+
+
+def test_scheduler_trace_rejects_per_class_scheduler_wait_regression():
+    baseline = MODULE.summarize_scheduler_trace_repeats(
+        [scheduler_trace_result("baseline", repeat) for repeat in (1, 2)],
+        expected_tp_size=4,
+        mode="baseline",
+    )
+    optimized_results = [
+        scheduler_trace_result("optimized", repeat) for repeat in (1, 2)
+    ]
+    for result in optimized_results:
+        samples = result["replay"]["request_samples"]
+        for sample in samples:
+            if sample["workload_class"] == "short":
+                sample["scheduler_wait_steps"] = 3
+                sample["first_schedule_step"] = sample["arrival_step"] + 3
+        result["replay"]["latency"]["all"]["p95_scheduler_wait_steps"] = 3
+        result["replay"]["latency"]["by_class"]["short"][
+            "p95_scheduler_wait_steps"
+        ] = 3
+        for step in result["replay"]["step_samples"]:
+            step["scheduled_request_ids"] = [
+                sample["request_id"]
+                for sample in samples
+                if sample["first_schedule_step"] == step["logical_step"]
+            ]
+    optimized = MODULE.summarize_scheduler_trace_repeats(
+        optimized_results,
+        expected_tp_size=4,
+        mode="optimized",
+    )
+
+    comparison = MODULE.compare_scheduler_trace_modes(baseline, optimized)
+
+    assert comparison["valid"]
+    assert {
+        "workload_class": "short",
+        "metric": "p95_scheduler_wait_steps",
+        "ratio": 1.5,
+    } in comparison["class_tail_regressions"]
+
+
+def test_scheduler_trace_rejects_inconsistent_first_schedule_trace():
+    results = [scheduler_trace_result("baseline", repeat) for repeat in (1, 2)]
+    results[0]["replay"]["step_samples"][2]["scheduled_request_ids"] = []
+
+    summary = MODULE.summarize_scheduler_trace_repeats(
+        results,
+        expected_tp_size=4,
+        mode="baseline",
+    )
+
+    assert not summary["valid"]
+    assert not summary["runs"][0]["schedule_trace_contract_valid"]
 
 
 def test_scheduler_trace_rejects_missing_class_latency_evidence():

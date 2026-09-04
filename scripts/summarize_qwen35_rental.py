@@ -2578,6 +2578,7 @@ def summarize_scheduler_trace_repeats(
             "short": 8,
         }
         class_latency_names = (
+            "p95_scheduler_wait_steps",
             "p95_time_to_first_schedule_s",
             "p95_first_token_service_s",
             "p95_ttft_s",
@@ -2601,7 +2602,10 @@ def summarize_scheduler_trace_repeats(
             and len(samples) == 24
             and sample_class_counts == expected_class_counts
             and all(
-                item.get("output_tokens")
+                isinstance(item, dict)
+                and isinstance(item.get("request_id"), str)
+                and bool(item["request_id"])
+                and item.get("output_tokens")
                 == item.get("requested_output_tokens")
                 and isinstance(item.get("preemption_count"), int)
                 and not isinstance(item.get("preemption_count"), bool)
@@ -2613,8 +2617,17 @@ def summarize_scheduler_trace_repeats(
                 and not isinstance(item.get("recomputed_tokens"), bool)
                 and item["recomputed_tokens"] >= 0
                 and isinstance(item.get("arrival_step"), int)
+                and not isinstance(item.get("arrival_step"), bool)
+                and isinstance(item.get("first_schedule_step"), int)
+                and not isinstance(item.get("first_schedule_step"), bool)
                 and isinstance(item.get("completion_step"), int)
-                and item["completion_step"] >= item["arrival_step"]
+                and not isinstance(item.get("completion_step"), bool)
+                and isinstance(item.get("scheduler_wait_steps"), int)
+                and not isinstance(item.get("scheduler_wait_steps"), bool)
+                and item["scheduler_wait_steps"] >= 0
+                and item["first_schedule_step"] - item["arrival_step"]
+                == item["scheduler_wait_steps"]
+                and item["completion_step"] >= item["first_schedule_step"]
                 and all(
                     isinstance(item.get(name), (int, float))
                     and math.isfinite(item[name])
@@ -2636,6 +2649,7 @@ def summarize_scheduler_trace_repeats(
                 )
                 for item in samples
             )
+            and len({item["request_id"] for item in samples}) == len(samples)
         )
         all_latency_contract_valid = (
             sample_contract_valid
@@ -2756,11 +2770,38 @@ def summarize_scheduler_trace_repeats(
             and replay.get("engine_steps") == len(steps)
             and all(
                 isinstance(step.get("logical_step"), int)
+                and not isinstance(step.get("logical_step"), bool)
                 and isinstance(step.get("elapsed_s"), (int, float))
                 and math.isfinite(step["elapsed_s"])
                 and step["elapsed_s"] >= 0
                 and isinstance(step.get("capacity"), dict)
+                and isinstance(step.get("scheduled_request_ids"), list)
+                and all(
+                    isinstance(request_id, str) and request_id
+                    for request_id in step["scheduled_request_ids"]
+                )
+                and len(step["scheduled_request_ids"])
+                == len(set(step["scheduled_request_ids"]))
                 for step in steps
+            )
+        )
+        first_schedule_by_request = {}
+        if step_contract_valid:
+            for step in steps:
+                for request_id in step["scheduled_request_ids"]:
+                    first_schedule_by_request.setdefault(
+                        request_id,
+                        step["logical_step"],
+                    )
+        schedule_trace_contract_valid = (
+            sample_contract_valid
+            and step_contract_valid
+            and set(first_schedule_by_request)
+            == {item["request_id"] for item in samples}
+            and all(
+                first_schedule_by_request[item["request_id"]]
+                == item["first_schedule_step"]
+                for item in samples
             )
         )
         configuration_valid = (
@@ -2783,6 +2824,9 @@ def summarize_scheduler_trace_repeats(
             "total_time_s": result.get("total_time_s"),
             "output_throughput_tok_s": result.get("output_throughput_tok_s"),
             "peak_torch_allocated_mib": result.get("peak_torch_allocated_mib"),
+            "p95_scheduler_wait_steps": latency.get(
+                "p95_scheduler_wait_steps"
+            ),
             "p95_ttft_s": latency.get("p95_ttft_s"),
             "p95_time_to_first_schedule_s": latency.get(
                 "p95_time_to_first_schedule_s"
@@ -2830,6 +2874,7 @@ def summarize_scheduler_trace_repeats(
             and class_latency_contract_valid
             and preemption_contract_valid
             and step_contract_valid
+            and schedule_trace_contract_valid
             and workload.get("name") == "mixed"
             and workload.get("request_count") == 24
             and workload.get("requests_by_class") == expected_class_counts
@@ -2852,6 +2897,7 @@ def summarize_scheduler_trace_repeats(
                 "class_latency_contract_valid": class_latency_contract_valid,
                 "preemption_contract_valid": preemption_contract_valid,
                 "step_contract_valid": step_contract_valid,
+                "schedule_trace_contract_valid": schedule_trace_contract_valid,
                 "measurements_valid": measurements_valid,
                 "scheduler_metrics_valid": scheduler_metrics_valid,
                 "commit": result.get("commit"),
@@ -2885,6 +2931,7 @@ def summarize_scheduler_trace_repeats(
         "total_time_s",
         "output_throughput_tok_s",
         "peak_torch_allocated_mib",
+        "p95_scheduler_wait_steps",
         "p95_ttft_s",
         "p95_time_to_first_schedule_s",
         "p95_first_token_service_s",
@@ -2961,6 +3008,7 @@ def compare_scheduler_trace_modes(baseline: dict, optimized: dict) -> dict:
     ratios = {}
     for name in (
         "total_time_s",
+        "p95_scheduler_wait_steps",
         "p95_ttft_s",
         "p95_time_to_first_schedule_s",
         "p95_first_token_service_s",
@@ -2975,6 +3023,7 @@ def compare_scheduler_trace_modes(baseline: dict, optimized: dict) -> dict:
         candidate = optimized[name]
         ratios[name] = candidate / base if comparable and base else None
     class_latency_names = (
+        "p95_scheduler_wait_steps",
         "p95_time_to_first_schedule_s",
         "p95_first_token_service_s",
         "p95_ttft_s",
