@@ -10,6 +10,8 @@ from pathlib import Path
 import subprocess
 import sys
 
+from nanovllm.benchmark_metadata import checkpoint_manifest_metadata
+
 
 ROOT = Path(__file__).resolve().parents[1]
 MATRIX_SCRIPT = ROOT / "scripts" / "benchmark_qwen35_matrix.py"
@@ -1176,6 +1178,8 @@ def checkpoint_manifests_match(local: dict, remote: dict) -> bool:
 def validate_preflight_checkpoint_identity(
     args: argparse.Namespace,
     stage_name: str,
+    *,
+    verify_local_files: bool = False,
 ) -> tuple[str, dict] | None:
     """Stop before paid benchmark stages when a local checkpoint is wrong."""
 
@@ -1219,6 +1223,17 @@ def validate_preflight_checkpoint_identity(
         raise RuntimeError(
             f"cannot validate {label} checkpoint identity after preflight"
         ) from error
+    if verify_local_files:
+        current_local = checkpoint_manifest_metadata(
+            local_model,
+            require_shards=True,
+            hash_shards=True,
+        )
+        if not checkpoint_manifests_match(current_local, remote):
+            raise RuntimeError(
+                f"local {label} checkpoint changed after its completed preflight"
+            )
+        local = current_local
     if (
         remote.get("repo") != expected_repo
         or remote.get("resolved_revision") != expected_revision
@@ -1235,6 +1250,30 @@ def validate_preflight_checkpoint_identity(
         "index_sha256": local["index_sha256"],
         "shard_count": local["shard_count"],
     }
+
+
+def validate_resumed_checkpoint_identities(
+    args: argparse.Namespace,
+    manifest: dict,
+) -> None:
+    """Re-hash checkpoints before resuming after a completed preflight."""
+
+    recorded = manifest.get("checkpoint_identities", {})
+    for stage_name in ("preflight", "fp8-preflight"):
+        if stage_name not in manifest.get("completed_stages", ()):
+            continue
+        identity = validate_preflight_checkpoint_identity(
+            args,
+            stage_name,
+            verify_local_files=True,
+        )
+        if identity is None:
+            raise RuntimeError(f"missing checkpoint identity for {stage_name}")
+        identity_name, attestation = identity
+        if recorded.get(identity_name) != attestation:
+            raise RuntimeError(
+                f"resume manifest has a changed {identity_name} checkpoint identity"
+            )
 
 
 def collect_stage_artifacts(
@@ -1642,7 +1681,7 @@ def main() -> None:
     if not args.dry_run:
         try:
             validate_clean_worktree()
-        except ValueError as error:
+        except (ValueError, RuntimeError) as error:
             raise SystemExit(str(error)) from error
         required_gpus = max(args.tp_sizes)
         available_gpus = visible_gpu_count()
@@ -1661,7 +1700,9 @@ def main() -> None:
                 manifest_plan(args, stages),
                 resume=args.resume,
             )
-        except ValueError as error:
+            if args.resume:
+                validate_resumed_checkpoint_identities(args, manifest)
+        except (ValueError, RuntimeError) as error:
             raise SystemExit(str(error)) from error
     for index, (name, command) in enumerate(stages, start=1):
         if manifest is not None and name in manifest["completed_stages"]:

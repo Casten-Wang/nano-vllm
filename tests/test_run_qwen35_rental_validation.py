@@ -708,6 +708,39 @@ def test_preflight_rejects_unpinned_remote_revision(tmp_path):
         MODULE.validate_preflight_checkpoint_identity(arguments, "preflight")
 
 
+def test_resume_rehashes_checkpoint_and_rejects_changed_files(tmp_path, monkeypatch):
+    checkpoint_reports(tmp_path)
+    arguments = args()
+    arguments.result_dir = str(tmp_path)
+    arguments.run_id = "run"
+    identity_name, attestation = MODULE.validate_preflight_checkpoint_identity(
+        arguments, "preflight"
+    )
+    manifest = {
+        "completed_stages": ["preflight"],
+        "checkpoint_identities": {identity_name: attestation},
+    }
+    local_path = tmp_path / "run" / "preflight" / "checkpoint_mapping_audit.json"
+    local = json.loads(local_path.read_text())["checkpoint_manifest"]
+    monkeypatch.setattr(
+        MODULE,
+        "checkpoint_manifest_metadata",
+        lambda *_args, **_kwargs: local,
+    )
+
+    MODULE.validate_resumed_checkpoint_identities(arguments, manifest)
+
+    changed = json.loads(json.dumps(local))
+    changed["files"][0]["content_sha256"] = "changed"
+    monkeypatch.setattr(
+        MODULE,
+        "checkpoint_manifest_metadata",
+        lambda *_args, **_kwargs: changed,
+    )
+    with pytest.raises(RuntimeError, match="changed after.*preflight"):
+        MODULE.validate_resumed_checkpoint_identities(arguments, manifest)
+
+
 def test_manifest_rejects_resume_from_different_source_commit(tmp_path):
     arguments = args()
     plan = MODULE.manifest_plan(arguments, MODULE.commands(arguments))
