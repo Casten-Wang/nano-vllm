@@ -6,7 +6,6 @@ import argparse
 from datetime import datetime, timezone
 import hashlib
 import json
-import os
 from pathlib import Path
 import subprocess
 import sys
@@ -64,6 +63,8 @@ def parse_tp_sizes(value: str) -> tuple[int, ...]:
     sizes = tuple(int(item.strip()) for item in value.split(",") if item.strip())
     if not sizes or any(size not in (1, 2, 4, 8) for size in sizes):
         raise argparse.ArgumentTypeError("TP sizes must be selected from 1,2,4,8")
+    if len(set(sizes)) != len(sizes):
+        raise argparse.ArgumentTypeError("TP sizes must not contain duplicates")
     return sizes
 
 
@@ -1038,6 +1039,9 @@ def commands(args: argparse.Namespace) -> list[tuple[str, list[str]]]:
                 ],
             )
     )
+    stage_names = [name for name, _command in result]
+    if len(stage_names) != len(set(stage_names)):
+        raise ValueError("validation stage names must be unique")
     return result
 
 
@@ -1094,11 +1098,6 @@ def canonical_model_reference(model: str) -> str:
 
 
 def visible_gpu_count() -> int:
-    visible = os.environ.get("CUDA_VISIBLE_DEVICES")
-    if visible is not None:
-        devices = [item.strip() for item in visible.split(",") if item.strip()]
-        return 0 if not devices or devices == ["-1"] else len(devices)
-
     import torch
 
     return torch.cuda.device_count()

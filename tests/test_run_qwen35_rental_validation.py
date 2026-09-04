@@ -496,9 +496,30 @@ def test_run_id_rejects_unsafe_paths(value):
         MODULE.validate_run_id(value)
 
 
-def test_tp_sizes_reject_unsupported_parallelism():
+@pytest.mark.parametrize("value", ["3,4", "4,4", "8,4,8"])
+def test_tp_sizes_reject_unsupported_or_duplicate_parallelism(value):
     with pytest.raises(MODULE.argparse.ArgumentTypeError):
-        MODULE.parse_tp_sizes("3,4")
+        MODULE.parse_tp_sizes(value)
+
+
+def test_visible_gpu_count_uses_cuda_runtime_instead_of_env_text(monkeypatch):
+    class Cuda:
+        @staticmethod
+        def device_count():
+            return 1
+
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,0")
+    monkeypatch.setitem(sys.modules, "torch", type("Torch", (), {"cuda": Cuda})())
+
+    assert MODULE.visible_gpu_count() == 1
+
+
+def test_commands_reject_duplicate_stage_names_from_programmatic_args():
+    arguments = args()
+    arguments.tp_sizes = (4, 4)
+
+    with pytest.raises(ValueError, match="stage names must be unique"):
+        MODULE.commands(arguments)
 
 
 @pytest.mark.parametrize(
