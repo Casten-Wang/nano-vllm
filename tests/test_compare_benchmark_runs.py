@@ -198,6 +198,28 @@ def test_comparison_reports_relative_metrics_and_output_parity():
 def test_comparison_allows_explicit_optimization_variables_to_change():
     candidate = result()
     candidate["tensor_parallel_size"] = 8
+    candidate["model_parameter_storage_by_rank"] = [
+        {"rank": rank, "total_bytes_local_rank": 4096}
+        for rank in range(8)
+    ]
+    candidate["model_parameter_total_all_ranks_bytes"] = 32768
+    candidate["kv_cache_storage_by_rank"] = [
+        {"rank": rank, "total_bytes": 1024} for rank in range(8)
+    ]
+    candidate["recurrent_state_storage_by_rank"] = [
+        {
+            "rank": rank,
+            "total_bytes_local_rank": 2048,
+            "rotary_cache_bytes_local_rank": 512,
+        }
+        for rank in range(8)
+    ]
+    candidate["recurrent_state_total_all_ranks_bytes"] = 16384
+    candidate["runtime_buffer_storage_by_rank"] = [
+        {"rank": rank, "total_bytes_local_rank": 4608}
+        for rank in range(8)
+    ]
+    candidate["runtime_buffer_total_all_ranks_bytes"] = 36864
     candidate["recurrent_state_dtype"] = "model"
     candidate["qwen35_moe_decode_backend"] = "batched"
     candidate["quantization_format"] = "gptq_int4"
@@ -214,6 +236,28 @@ def test_comparison_allows_explicit_optimization_variables_to_change():
     assert comparison["runs"][1]["qwen35_moe_decode_backend"] == "batched"
     assert comparison["runs"][1]["quantization_format"] == "gptq_int4"
     assert comparison["runs"][1]["weight_quant_backend"] == "triton"
+
+
+def test_comparison_rejects_incomplete_ranked_storage():
+    candidate = result()
+    candidate["kv_cache_storage_by_rank"].pop()
+
+    with pytest.raises(ValueError, match="kv_cache_storage_by_rank.*missing ranks"):
+        MODULE.compare_results(
+            [result(), candidate],
+            ["baseline", "candidate"],
+        )
+
+
+def test_comparison_rejects_inconsistent_ranked_storage_total():
+    candidate = result()
+    candidate["runtime_buffer_total_all_ranks_bytes"] += 1
+
+    with pytest.raises(ValueError, match="does not match per-rank storage"):
+        MODULE.compare_results(
+            [result(), candidate],
+            ["baseline", "candidate"],
+        )
 
 
 @pytest.mark.parametrize(
@@ -408,6 +452,16 @@ def test_comparison_uses_slowest_tensor_parallel_rank_preparation_time():
             },
         }
         item["tensor_parallel_size"] = 2
+        for field in (
+            "model_parameter_storage_by_rank",
+            "kv_cache_storage_by_rank",
+            "recurrent_state_storage_by_rank",
+            "runtime_buffer_storage_by_rank",
+        ):
+            item[field] = item[field][:2]
+        item["model_parameter_total_all_ranks_bytes"] = 8192
+        item["recurrent_state_total_all_ranks_bytes"] = 4096
+        item["runtime_buffer_total_all_ranks_bytes"] = 9216
         item["execution_stats_by_rank"] = [rank0, rank1]
 
     comparison = MODULE.compare_results(

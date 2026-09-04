@@ -7,6 +7,14 @@ import json
 import math
 from pathlib import Path
 import statistics
+import sys
+
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from nanovllm.benchmark_metadata import validate_ranked_records
 
 
 WORKLOAD_FIELDS = (
@@ -91,6 +99,24 @@ LATENCY_METRIC_NAMES = (
 
 INPUT_PREPARATION_STEP_KINDS = ("prefill", "decode", "mixed")
 
+RANKED_STORAGE_TOTALS = (
+    (
+        "model_parameter_storage_by_rank",
+        "total_bytes_local_rank",
+        "model_parameter_total_all_ranks_bytes",
+    ),
+    (
+        "recurrent_state_storage_by_rank",
+        "total_bytes_local_rank",
+        "recurrent_state_total_all_ranks_bytes",
+    ),
+    (
+        "runtime_buffer_storage_by_rank",
+        "total_bytes_local_rank",
+        "runtime_buffer_total_all_ranks_bytes",
+    ),
+)
+
 
 def ratio(value: float, baseline: float) -> float | None:
     return value / baseline if baseline else None
@@ -115,6 +141,37 @@ def validate_measurement(
             else "a finite non-negative number"
         )
         raise ValueError(f"{label} must be {requirement}")
+
+
+def validate_ranked_evidence(result: dict, *, label: str) -> None:
+    """Reject incomplete per-rank evidence and inconsistent storage totals."""
+
+    world_size = result.get("tensor_parallel_size")
+    ranked_fields = [field for field in STORAGE_FIELDS if field.endswith("_by_rank")]
+    if "cuda_memory_by_rank" in result:
+        ranked_fields.append("cuda_memory_by_rank")
+    for field in ranked_fields:
+        validate_ranked_records(
+            result.get(field),
+            expected_world_size=world_size,
+            record_name=f"{label}.{field}",
+        )
+    for by_rank_field, local_total_field, aggregate_field in RANKED_STORAGE_TOTALS:
+        records = result[by_rank_field]
+        local_values = []
+        for record in records:
+            value = record.get(local_total_field)
+            validate_measurement(
+                value,
+                label=f"{label}.{by_rank_field}.{local_total_field}",
+            )
+            local_values.append(value)
+        aggregate = result.get(aggregate_field)
+        validate_measurement(aggregate, label=f"{label}.{aggregate_field}")
+        if sum(local_values) != aggregate:
+            raise ValueError(
+                f"{label}.{aggregate_field} does not match per-rank storage"
+            )
 
 
 def distribution(values: list[float]) -> dict:
@@ -297,6 +354,7 @@ def compare_results(results: list[dict], labels: list[str]) -> dict:
         )
     baseline = results[0]
     for label, result in zip(labels, results):
+        validate_ranked_evidence(result, label=label)
         validate_measurement(
             result.get("output_throughput_tok_s"),
             label=f"{label}.output_throughput_tok_s",
