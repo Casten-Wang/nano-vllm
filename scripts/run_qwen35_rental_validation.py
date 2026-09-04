@@ -1176,33 +1176,44 @@ def checkpoint_manifests_match(local: dict, remote: dict) -> bool:
 def validate_preflight_checkpoint_identity(
     args: argparse.Namespace,
     stage_name: str,
-) -> None:
+) -> tuple[str, dict] | None:
     """Stop before paid benchmark stages when a local checkpoint is wrong."""
 
     root = Path(args.result_dir) / args.run_id
-    paths = {
-        "preflight": (
+    if stage_name == "preflight":
+        identity = (
             root / "preflight" / "checkpoint_mapping_audit.json",
             root / "preflight" / "official_checkpoint_header_audit.json",
             "BF16",
+            canonical_model_reference(args.model),
             OFFICIAL_CHECKPOINT_REPO,
             OFFICIAL_CHECKPOINT_REVISION,
-        ),
-        "fp8-preflight": (
+        )
+    elif stage_name == "fp8-preflight":
+        if args.fp8_model is None:
+            raise RuntimeError("FP8 preflight has no local checkpoint")
+        identity = (
             root / "fp8" / "preflight" / "checkpoint_mapping_audit.json",
             root / "fp8" / "official_checkpoint_header_audit.json",
             "FP8",
+            canonical_model_reference(args.fp8_model),
             OFFICIAL_FP8_CHECKPOINT_REPO,
             OFFICIAL_FP8_CHECKPOINT_REVISION,
-        ),
-    }
-    if stage_name not in paths:
-        return
-    local_path, remote_path, label, expected_repo, expected_revision = paths[
-        stage_name
-    ]
+        )
+    else:
+        return None
+    (
+        local_audit_path,
+        remote_path,
+        label,
+        local_model,
+        expected_repo,
+        expected_revision,
+    ) = identity
     try:
-        local = json.loads(local_path.read_text()).get("checkpoint_manifest", {})
+        local = json.loads(local_audit_path.read_text()).get(
+            "checkpoint_manifest", {}
+        )
         remote = json.loads(remote_path.read_text())
     except (OSError, json.JSONDecodeError) as error:
         raise RuntimeError(
@@ -1216,6 +1227,14 @@ def validate_preflight_checkpoint_identity(
         raise RuntimeError(
             f"local {label} checkpoint does not match the pinned official revision"
         )
+    return label.lower(), {
+        "local_path": local_model,
+        "repository": expected_repo,
+        "resolved_revision": expected_revision,
+        "config_sha256": local["config_sha256"],
+        "index_sha256": local["index_sha256"],
+        "shard_count": local["shard_count"],
+    }
 
 
 def collect_stage_artifacts(
@@ -1662,7 +1681,12 @@ def main() -> None:
             except ValueError as error:
                 raise SystemExit(str(error)) from error
             artifacts = collect_stage_artifacts(args, name)
-            validate_preflight_checkpoint_identity(args, name)
+            identity = validate_preflight_checkpoint_identity(args, name)
+            if identity is not None:
+                identity_name, attestation = identity
+                manifest.setdefault("checkpoint_identities", {})[
+                    identity_name
+                ] = attestation
             mark_stage_completed(manifest_path, manifest, name, artifacts)
 
 

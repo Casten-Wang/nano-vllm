@@ -648,7 +648,19 @@ def test_preflight_accepts_checkpoint_matching_pinned_revision(tmp_path):
     arguments.result_dir = str(tmp_path)
     arguments.run_id = "run"
 
-    MODULE.validate_preflight_checkpoint_identity(arguments, "preflight")
+    identity_name, attestation = MODULE.validate_preflight_checkpoint_identity(
+        arguments, "preflight"
+    )
+
+    assert identity_name == "bf16"
+    assert attestation == {
+        "local_path": "/models/qwen35",
+        "repository": MODULE.OFFICIAL_CHECKPOINT_REPO,
+        "resolved_revision": MODULE.OFFICIAL_CHECKPOINT_REVISION,
+        "config_sha256": "config-digest",
+        "index_sha256": "index-digest",
+        "shard_count": 1,
+    }
 
 
 def test_fp8_preflight_accepts_checkpoint_matching_pinned_revision(tmp_path):
@@ -656,8 +668,18 @@ def test_fp8_preflight_accepts_checkpoint_matching_pinned_revision(tmp_path):
     arguments = args()
     arguments.result_dir = str(tmp_path)
     arguments.run_id = "run"
+    arguments.fp8_model = "/models/qwen36-fp8"
 
-    MODULE.validate_preflight_checkpoint_identity(arguments, "fp8-preflight")
+    identity_name, attestation = MODULE.validate_preflight_checkpoint_identity(
+        arguments, "fp8-preflight"
+    )
+
+    assert identity_name == "fp8"
+    assert attestation["repository"] == MODULE.OFFICIAL_FP8_CHECKPOINT_REPO
+    assert (
+        attestation["resolved_revision"]
+        == MODULE.OFFICIAL_FP8_CHECKPOINT_REVISION
+    )
 
 
 def test_preflight_rejects_checkpoint_not_matching_pinned_revision(tmp_path):
