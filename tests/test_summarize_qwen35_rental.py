@@ -1,5 +1,6 @@
 from importlib.util import module_from_spec, spec_from_file_location
 from copy import deepcopy
+import hashlib
 import json
 from pathlib import Path
 
@@ -22,6 +23,34 @@ def write(path, value):
     path.write_text(json.dumps(value))
 
 
+def bind_manifest_artifacts(root, run_id):
+    records = []
+    for path in sorted(root.rglob("*.json")):
+        if path.name == "manifest.json":
+            continue
+        payload = path.read_bytes()
+        records.append(
+            {
+                "path": str(path.relative_to(root)),
+                "size": len(payload),
+                "sha256": hashlib.sha256(payload).hexdigest(),
+            }
+        )
+    write(
+        root / "manifest.json",
+        {
+            "run_id": run_id,
+            "source_commit": SOURCE_COMMIT,
+            "stages": [
+                {"name": "fixture"},
+                {"name": "final-summary"},
+            ],
+            "completed_stages": ["fixture"],
+            "completed_stage_artifacts": {"fixture": records},
+        },
+    )
+
+
 def test_run_manifest_is_required(tmp_path):
     with pytest.raises(ValueError, match="manifest.json"):
         MODULE.load_run_manifest(tmp_path, "rental-a")
@@ -40,6 +69,29 @@ def test_run_manifest_rejects_invalid_identity(tmp_path, manifest, message):
 
     with pytest.raises(ValueError, match=message):
         MODULE.load_run_manifest(tmp_path, "rental-a")
+
+
+def test_manifest_artifact_integrity_detects_tampering(tmp_path):
+    artifact = tmp_path / "performance" / "result.json"
+    write(artifact, {"valid": True})
+    bind_manifest_artifacts(tmp_path, "rental-a")
+    manifest = MODULE.load_run_manifest(tmp_path, "rental-a")
+
+    assert MODULE.manifest_artifacts_match(tmp_path, manifest)
+
+    write(artifact, {"valid": False})
+
+    assert not MODULE.manifest_artifacts_match(tmp_path, manifest)
+
+
+def test_manifest_artifact_integrity_requires_complete_stage_prefix(tmp_path):
+    artifact = tmp_path / "result.json"
+    write(artifact, {"valid": True})
+    bind_manifest_artifacts(tmp_path, "rental-a")
+    manifest = MODULE.load_run_manifest(tmp_path, "rental-a")
+    manifest["completed_stages"] = []
+
+    assert not MODULE.manifest_artifacts_match(tmp_path, manifest)
 
 
 def write_gptq_summary_inputs(root, run_id, *, backend="triton"):
@@ -2493,12 +2545,14 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
             bounded_export,
         )
 
+    bind_manifest_artifacts(tmp_path, run_id)
     report = MODULE.summarize(tmp_path, run_id)
 
     assert report["valid"], {
         key: value for key, value in report["evidence"].items() if not value
     }
     assert report["manifest_source_commit"] == SOURCE_COMMIT
+    assert report["evidence"]["manifest_artifact_integrity"]
     assert report["evidence"]["artifacts_match_manifest_commit"]
     assert report["evidence"]["official_checkpoint_headers_valid"]
     assert report["evidence"]["local_checkpoint_matches_official"]

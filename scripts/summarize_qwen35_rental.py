@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -178,6 +179,76 @@ def load_run_manifest(run_dir: Path, run_id: str) -> dict:
             "Git SHA"
         )
     return manifest
+
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def manifest_artifacts_match(run_dir: Path, manifest: dict) -> bool:
+    stages = manifest.get("stages")
+    completed = manifest.get("completed_stages")
+    records_by_stage = manifest.get("completed_stage_artifacts")
+    if (
+        not isinstance(stages, list)
+        or not isinstance(completed, list)
+        or not isinstance(records_by_stage, dict)
+    ):
+        return False
+    stage_names = [
+        stage.get("name") if isinstance(stage, dict) else None
+        for stage in stages
+    ]
+    if (
+        not stage_names
+        or stage_names[-1] != "final-summary"
+        or any(not isinstance(name, str) or not name for name in stage_names)
+        or len(stage_names) != len(set(stage_names))
+        or completed != stage_names[:-1]
+        or set(records_by_stage) != set(completed)
+    ):
+        return False
+    seen_paths = set()
+    for stage_name in completed:
+        records = records_by_stage.get(stage_name)
+        if not isinstance(records, list) or not records:
+            return False
+        for record in records:
+            if not isinstance(record, dict):
+                return False
+            relative = record.get("path")
+            size = record.get("size")
+            expected_sha256 = record.get("sha256")
+            if (
+                not isinstance(relative, str)
+                or not relative
+                or Path(relative).is_absolute()
+                or ".." in Path(relative).parts
+                or relative in seen_paths
+                or not isinstance(size, int)
+                or isinstance(size, bool)
+                or size < 0
+                or not isinstance(expected_sha256, str)
+                or len(expected_sha256) != 64
+                or any(
+                    character not in "0123456789abcdef"
+                    for character in expected_sha256
+                )
+            ):
+                return False
+            seen_paths.add(relative)
+            artifact = run_dir / relative
+            if (
+                not artifact.is_file()
+                or artifact.stat().st_size != size
+                or file_sha256(artifact) != expected_sha256
+            ):
+                return False
+    return True
 
 
 def checkpoint_manifest_matches_remote(local: dict, remote: dict) -> bool:
@@ -3128,6 +3199,7 @@ def compare_scheduler_trace_modes(baseline: dict, optimized: dict) -> dict:
 def summarize(run_dir: Path, run_id: str) -> dict:
     manifest = load_run_manifest(run_dir, run_id)
     manifest_source_commit = manifest["source_commit"]
+    artifact_integrity_valid = manifest_artifacts_match(run_dir, manifest)
     official_audit = load_json(
         run_dir / "preflight" / "official_checkpoint_header_audit.json"
     )
@@ -4240,6 +4312,7 @@ def summarize(run_dir: Path, run_id: str) -> dict:
         for item in by_kv.values()
     )
     evidence = {
+        "manifest_artifact_integrity": artifact_integrity_valid,
         "official_checkpoint_headers_valid": official_checkpoint_valid,
         "local_checkpoint_matches_official": local_checkpoint_identity_valid,
         "checkpoint_mapping_valid": (
