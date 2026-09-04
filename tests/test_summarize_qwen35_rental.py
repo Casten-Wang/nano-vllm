@@ -1079,11 +1079,15 @@ def scheduler_trace_result(mode, repeat=1):
             "recomputed_tokens": (
                 16 if not optimized and class_index == 0 and index < 2 else 0
             ),
-            "time_to_first_schedule_s": 0.04 + repeat * 0.0005,
-            "first_token_service_s": 0.06 + repeat * 0.0005,
-            "ttft_s": 0.1 + repeat * 0.001,
-            "tpot_s": 0.02,
-            "latency_s": 0.2 + repeat * 0.001,
+            "time_to_first_schedule_s": (
+                0.03 if optimized else 0.05
+            ) + repeat * 0.0005,
+            "first_token_service_s": (
+                0.05 if optimized else 0.07
+            ) + repeat * 0.0005,
+            "ttft_s": (0.08 if optimized else 0.12) + repeat * 0.001,
+            "tpot_s": 0.018 if optimized else 0.02,
+            "latency_s": (0.18 if optimized else 0.22) + repeat * 0.001,
         }
         for class_index, workload_class in enumerate(classes)
         for index in range(8)
@@ -1126,16 +1130,40 @@ def scheduler_trace_result(mode, repeat=1):
             },
             "latency": {
                 "all": {
-                    "p95_ttft_s": 0.12 if optimized else 0.15,
+                    "request_count": 24,
+                    "p95_ttft_s": (
+                        0.08 if optimized else 0.12
+                    ) + repeat * 0.001,
                     "p95_time_to_first_schedule_s": (
-                        0.05 if optimized else 0.07
-                    ),
+                        0.03 if optimized else 0.05
+                    ) + repeat * 0.0005,
                     "p95_first_token_service_s": (
-                        0.07 if optimized else 0.08
-                    ),
-                    "p95_tpot_s": 0.02,
-                    "p95_latency_s": 0.22 if optimized else 0.25,
-                }
+                        0.05 if optimized else 0.07
+                    ) + repeat * 0.0005,
+                    "p95_tpot_s": 0.018 if optimized else 0.02,
+                    "p95_latency_s": (
+                        0.18 if optimized else 0.22
+                    ) + repeat * 0.001,
+                },
+                "by_class": {
+                    workload_class: {
+                        "request_count": 8,
+                        "p95_time_to_first_schedule_s": (
+                            0.03 if optimized else 0.05
+                        ) + repeat * 0.0005,
+                        "p95_first_token_service_s": (
+                            0.05 if optimized else 0.07
+                        ) + repeat * 0.0005,
+                        "p95_ttft_s": (
+                            0.08 if optimized else 0.12
+                        ) + repeat * 0.001,
+                        "p95_tpot_s": 0.018 if optimized else 0.02,
+                        "p95_latency_s": (
+                            0.18 if optimized else 0.22
+                        ) + repeat * 0.001,
+                    }
+                    for workload_class in classes
+                },
             },
             "preemption": {
                 "all": {
@@ -1266,6 +1294,47 @@ def test_scheduler_trace_comparison_requires_greedy_output_parity():
     assert baseline["valid"]
     assert not optimized["valid"]
     assert not comparison["valid"]
+
+
+def test_scheduler_trace_compares_tail_latency_for_every_workload_class():
+    baseline = MODULE.summarize_scheduler_trace_repeats(
+        [scheduler_trace_result("baseline", repeat) for repeat in (1, 2)],
+        expected_tp_size=4,
+        mode="baseline",
+    )
+    optimized = MODULE.summarize_scheduler_trace_repeats(
+        [scheduler_trace_result("optimized", repeat) for repeat in (1, 2)],
+        expected_tp_size=4,
+        mode="optimized",
+    )
+
+    comparison = MODULE.compare_scheduler_trace_modes(baseline, optimized)
+
+    assert comparison["valid"]
+    assert comparison["class_latency_comparable"]
+    assert set(comparison["ratios_optimized_over_baseline_by_class"]) == {
+        "decode-heavy",
+        "prefill-heavy",
+        "short",
+    }
+    assert comparison["ratios_optimized_over_baseline_by_class"]["short"][
+        "p95_ttft_s"
+    ] == pytest.approx(0.0815 / 0.1215)
+    assert comparison["class_tail_regressions"] == []
+
+
+def test_scheduler_trace_rejects_missing_class_latency_evidence():
+    results = [scheduler_trace_result("baseline", repeat) for repeat in (1, 2)]
+    results[0]["replay"]["latency"]["by_class"].pop("short")
+
+    summary = MODULE.summarize_scheduler_trace_repeats(
+        results,
+        expected_tp_size=4,
+        mode="baseline",
+    )
+
+    assert not summary["valid"]
+    assert not summary["runs"][0]["class_latency_contract_valid"]
 
 
 def test_scheduler_trace_rejects_unbalanced_classes_and_missing_metrics():

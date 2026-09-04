@@ -2530,6 +2530,18 @@ def summarize_long_prefill(result: dict, *, expected_tp_size: int) -> dict:
     }
 
 
+def _linear_percentile(values: list[float], rank: float) -> float:
+    ordered = sorted(values)
+    if not ordered:
+        return 0.0
+    index = (len(ordered) - 1) * rank
+    lower = math.floor(index)
+    upper = math.ceil(index)
+    if lower == upper:
+        return ordered[lower]
+    return ordered[lower] + (ordered[upper] - ordered[lower]) * (index - lower)
+
+
 def summarize_scheduler_trace_repeats(
     results: list[dict],
     *,
@@ -2547,7 +2559,9 @@ def summarize_scheduler_trace_repeats(
     for result in results:
         replay = result.get("replay", {})
         workload = replay.get("workload", {})
-        latency = replay.get("latency", {}).get("all", {})
+        latency_payload = replay.get("latency", {})
+        latency = latency_payload.get("all", {})
+        latency_by_class = latency_payload.get("by_class", {})
         preemption = replay.get("preemption", {})
         preemption_all = preemption.get("all", {})
         preemption_by_class = preemption.get("by_class", {})
@@ -2563,6 +2577,13 @@ def summarize_scheduler_trace_repeats(
             "prefill-heavy": 8,
             "short": 8,
         }
+        class_latency_names = (
+            "p95_time_to_first_schedule_s",
+            "p95_first_token_service_s",
+            "p95_ttft_s",
+            "p95_tpot_s",
+            "p95_latency_s",
+        )
         sample_class_counts = (
             {
                 name: sum(
@@ -2614,6 +2635,60 @@ def summarize_scheduler_trace_repeats(
                     abs_tol=1e-9,
                 )
                 for item in samples
+            )
+        )
+        all_latency_contract_valid = (
+            sample_contract_valid
+            and isinstance(latency, dict)
+            and latency.get("request_count") == len(samples)
+            and all(
+                isinstance(latency.get(metric), (int, float))
+                and not isinstance(latency.get(metric), bool)
+                and math.isfinite(latency[metric])
+                and latency[metric] >= 0
+                and math.isclose(
+                    latency[metric],
+                    _linear_percentile(
+                        [
+                            float(item[metric.removeprefix("p95_")])
+                            for item in samples
+                        ],
+                        0.95,
+                    ),
+                    rel_tol=1e-9,
+                    abs_tol=1e-9,
+                )
+                for metric in class_latency_names
+            )
+        )
+        class_latency_contract_valid = (
+            sample_contract_valid
+            and isinstance(latency_by_class, dict)
+            and set(latency_by_class) == set(expected_class_counts)
+            and all(
+                isinstance(latency_by_class[name], dict)
+                and latency_by_class[name].get("request_count") == expected_count
+                and all(
+                    isinstance(latency_by_class[name].get(metric), (int, float))
+                    and not isinstance(latency_by_class[name].get(metric), bool)
+                    and math.isfinite(latency_by_class[name][metric])
+                    and latency_by_class[name][metric] >= 0
+                    and math.isclose(
+                        latency_by_class[name][metric],
+                        _linear_percentile(
+                            [
+                                float(item[metric.removeprefix("p95_")])
+                                for item in samples
+                                if item["workload_class"] == name
+                            ],
+                            0.95,
+                        ),
+                        rel_tol=1e-9,
+                        abs_tol=1e-9,
+                    )
+                    for metric in class_latency_names
+                )
+                for name, expected_count in expected_class_counts.items()
             )
         )
         total_request_preemptions = (
@@ -2751,6 +2826,8 @@ def summarize_scheduler_trace_repeats(
             configuration_valid
             and path_valid
             and sample_contract_valid
+            and all_latency_contract_valid
+            and class_latency_contract_valid
             and preemption_contract_valid
             and step_contract_valid
             and workload.get("name") == "mixed"
@@ -2771,6 +2848,8 @@ def summarize_scheduler_trace_repeats(
                 "configuration_valid": configuration_valid,
                 "path_valid": path_valid,
                 "sample_contract_valid": sample_contract_valid,
+                "all_latency_contract_valid": all_latency_contract_valid,
+                "class_latency_contract_valid": class_latency_contract_valid,
                 "preemption_contract_valid": preemption_contract_valid,
                 "step_contract_valid": step_contract_valid,
                 "measurements_valid": measurements_valid,
@@ -2786,6 +2865,7 @@ def summarize_scheduler_trace_repeats(
                 "preempted_request_count": preempted_request_count,
                 "preempted_token_progress": total_request_preempted_progress,
                 "recomputed_tokens": total_request_recomputed_tokens,
+                "latency_by_class": latency_by_class,
                 **numeric,
             }
         )
@@ -2826,6 +2906,24 @@ def summarize_scheduler_trace_repeats(
             else None
         )
 
+    latency_by_class = {
+        class_name: {
+            "request_count": expected_count,
+            **{
+                name: (
+                    statistics.median(
+                        row["latency_by_class"][class_name][name]
+                        for row in rows
+                    )
+                    if all(row["class_latency_contract_valid"] for row in rows)
+                    else None
+                )
+                for name in class_latency_names
+            },
+        }
+        for class_name, expected_count in expected_class_counts.items()
+    }
+
     return {
         "valid": (
             len(rows) >= 2
@@ -2846,6 +2944,7 @@ def summarize_scheduler_trace_repeats(
             if all(row["scheduler_metrics_valid"] for row in rows)
             else None
         ),
+        "latency_by_class": latency_by_class,
         "runs": rows,
     }
 
@@ -2875,11 +2974,46 @@ def compare_scheduler_trace_modes(baseline: dict, optimized: dict) -> dict:
         base = baseline[name]
         candidate = optimized[name]
         ratios[name] = candidate / base if comparable and base else None
+    class_latency_names = (
+        "p95_time_to_first_schedule_s",
+        "p95_first_token_service_s",
+        "p95_ttft_s",
+        "p95_tpot_s",
+        "p95_latency_s",
+    )
+    class_names = set(baseline.get("latency_by_class", {}))
+    class_latency_comparable = (
+        comparable
+        and class_names == set(optimized.get("latency_by_class", {}))
+        and bool(class_names)
+    )
+    ratios_by_class = {
+        class_name: {
+            name: (
+                optimized["latency_by_class"][class_name][name]
+                / baseline["latency_by_class"][class_name][name]
+                if class_latency_comparable
+                and baseline["latency_by_class"][class_name][name]
+                else None
+            )
+            for name in class_latency_names
+        }
+        for class_name in sorted(class_names)
+    }
+    class_tail_regressions = [
+        {"workload_class": class_name, "metric": name, "ratio": ratio}
+        for class_name, class_ratios in ratios_by_class.items()
+        for name, ratio in class_ratios.items()
+        if ratio is not None and ratio > 1.0
+    ]
     return {
         "valid": comparable,
         "output_parity": baseline["output_digest"]
         == optimized["output_digest"],
         "ratios_optimized_over_baseline": ratios,
+        "class_latency_comparable": class_latency_comparable,
+        "ratios_optimized_over_baseline_by_class": ratios_by_class,
+        "class_tail_regressions": class_tail_regressions,
         "throughput_ratio": (
             optimized["output_throughput_tok_s"]
             / baseline["output_throughput_tok_s"]
