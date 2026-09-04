@@ -10,8 +10,18 @@ from nanovllm.models.quantization_spec import (
 )
 
 
+def qwen36_text_config():
+    return SimpleNamespace(
+        max_position_embeddings=32768,
+        num_attention_heads=16,
+        num_key_value_heads=2,
+        linear_num_key_heads=16,
+        linear_num_value_heads=32,
+    )
+
+
 def make_config(monkeypatch, tmp_path, **kwargs):
-    text_config = SimpleNamespace(max_position_embeddings=32768)
+    text_config = qwen36_text_config()
     monkeypatch.setattr(
         config_module.AutoConfig,
         "from_pretrained",
@@ -24,6 +34,7 @@ def make_config(monkeypatch, tmp_path, **kwargs):
             architecture="Qwen3_5MoeForConditionalGeneration",
             text_config=text_config,
             quantization=BF16_QUANTIZATION_SPEC,
+            linear_attention_layers=(0,),
         ),
     )
     return config_module.Config(str(tmp_path), **kwargs), text_config
@@ -121,6 +132,35 @@ def test_invalid_kv_block_override_is_rejected(monkeypatch, tmp_path):
         make_config(monkeypatch, tmp_path, num_kvcache_blocks_override=0)
 
 
+@pytest.mark.parametrize("value", [0, 9, True, 4.0])
+def test_invalid_tensor_parallel_size_is_rejected(monkeypatch, tmp_path, value):
+    with pytest.raises(ValueError, match="tensor_parallel_size must be an integer"):
+        make_config(monkeypatch, tmp_path, tensor_parallel_size=value)
+
+
+@pytest.mark.parametrize("tensor_parallel_size", [4, 8])
+def test_qwen36_official_head_topology_accepts_tp4_and_tp8(
+    monkeypatch,
+    tmp_path,
+    tensor_parallel_size,
+):
+    config, _ = make_config(
+        monkeypatch,
+        tmp_path,
+        tensor_parallel_size=tensor_parallel_size,
+    )
+
+    assert config.tensor_parallel_size == tensor_parallel_size
+
+
+def test_incompatible_head_topology_is_rejected_before_engine_start(
+    monkeypatch,
+    tmp_path,
+):
+    with pytest.raises(ValueError, match="attention heads cannot be sharded"):
+        make_config(monkeypatch, tmp_path, tensor_parallel_size=3)
+
+
 def test_invalid_preemption_policy_is_rejected(monkeypatch, tmp_path):
     with pytest.raises(ValueError, match="preemption_policy"):
         make_config(monkeypatch, tmp_path, preemption_policy="smallest")
@@ -181,7 +221,7 @@ def test_invalid_remote_prefill_staging_limit_is_rejected(
 
 
 def test_gptq_auto_selects_triton_backend(monkeypatch, tmp_path):
-    text_config = SimpleNamespace(max_position_embeddings=32768)
+    text_config = qwen36_text_config()
     monkeypatch.setattr(
         config_module.AutoConfig,
         "from_pretrained",
@@ -204,7 +244,7 @@ def test_gptq_auto_selects_triton_backend(monkeypatch, tmp_path):
 
 
 def test_fp8_checkpoint_selects_reference_dequantization_backend(monkeypatch, tmp_path):
-    text_config = SimpleNamespace(max_position_embeddings=32768)
+    text_config = qwen36_text_config()
     monkeypatch.setattr(
         config_module.AutoConfig,
         "from_pretrained",
@@ -232,7 +272,7 @@ def test_fp8_checkpoint_selects_reference_dequantization_backend(monkeypatch, tm
 
 
 def test_fp8_checkpoint_rejects_unimplemented_native_backend(monkeypatch, tmp_path):
-    text_config = SimpleNamespace(max_position_embeddings=32768)
+    text_config = qwen36_text_config()
     monkeypatch.setattr(
         config_module.AutoConfig,
         "from_pretrained",
@@ -257,7 +297,7 @@ def test_fp8_checkpoint_rejects_unimplemented_native_backend(monkeypatch, tmp_pa
 
 
 def test_fp8_checkpoint_accepts_resident_reference_backend(monkeypatch, tmp_path):
-    text_config = SimpleNamespace(max_position_embeddings=32768)
+    text_config = qwen36_text_config()
     monkeypatch.setattr(
         config_module.AutoConfig,
         "from_pretrained",
@@ -287,7 +327,7 @@ def test_fp8_checkpoint_accepts_resident_reference_backend(monkeypatch, tmp_path
 
 
 def test_fp8_reference_loader_is_scoped_to_qwen35(monkeypatch, tmp_path):
-    text_config = SimpleNamespace(max_position_embeddings=32768)
+    text_config = qwen36_text_config()
     monkeypatch.setattr(
         config_module.AutoConfig,
         "from_pretrained",
@@ -312,7 +352,7 @@ def test_fp8_reference_loader_is_scoped_to_qwen35(monkeypatch, tmp_path):
 
 
 def test_gptq_reference_backend_is_explicitly_admitted(monkeypatch, tmp_path):
-    text_config = SimpleNamespace(max_position_embeddings=32768)
+    text_config = qwen36_text_config()
     quantization = QuantizationSpec(
         format="gptq_int4",
         weight_bits=4,
@@ -348,7 +388,7 @@ def test_bf16_rejects_gptq_backend(monkeypatch, tmp_path):
 
 
 def test_gptq_triton_backend_is_forwarded(monkeypatch, tmp_path):
-    text_config = SimpleNamespace(max_position_embeddings=32768)
+    text_config = qwen36_text_config()
     quantization = QuantizationSpec(
         format="gptq_int4",
         weight_bits=4,
@@ -374,7 +414,7 @@ def test_gptq_triton_backend_is_forwarded(monkeypatch, tmp_path):
 
 
 def test_gptq_reference_rejects_incompatible_moe_backend(monkeypatch, tmp_path):
-    text_config = SimpleNamespace(max_position_embeddings=32768)
+    text_config = qwen36_text_config()
     quantization = QuantizationSpec(
         format="gptq_int4",
         weight_bits=4,

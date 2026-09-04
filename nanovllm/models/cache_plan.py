@@ -47,6 +47,31 @@ def _local_heads(total_heads: int, tensor_parallel_size: int) -> tuple[int, int]
     return 1, tensor_parallel_size // total_heads
 
 
+def validate_cache_parallelism(
+    model_spec: ModelSpec,
+    tensor_parallel_size: int,
+) -> None:
+    """Validate cache-bearing head layouts before distributed workers start."""
+
+    if (
+        not isinstance(tensor_parallel_size, int)
+        or isinstance(tensor_parallel_size, bool)
+        or tensor_parallel_size <= 0
+    ):
+        raise ValueError("tensor_parallel_size must be a positive integer")
+    config = model_spec.text_config
+    num_attention_heads = int(config.num_attention_heads)
+    if num_attention_heads % tensor_parallel_size:
+        raise ValueError(
+            f"{num_attention_heads} attention heads cannot be sharded across "
+            f"TP={tensor_parallel_size}"
+        )
+    _local_heads(int(config.num_key_value_heads), tensor_parallel_size)
+    if getattr(model_spec, "linear_attention_layers", ()):
+        _local_heads(int(config.linear_num_key_heads), tensor_parallel_size)
+        _local_heads(int(config.linear_num_value_heads), tensor_parallel_size)
+
+
 def plan_cache_memory(
     model_spec: ModelSpec,
     tensor_parallel_size: int,
@@ -65,13 +90,9 @@ def plan_cache_memory(
         if value <= 0:
             raise ValueError(f"{name} must be positive")
 
+    validate_cache_parallelism(model_spec, tensor_parallel_size)
     config = model_spec.text_config
     num_attention_heads = int(config.num_attention_heads)
-    if num_attention_heads % tensor_parallel_size:
-        raise ValueError(
-            f"{num_attention_heads} attention heads cannot be sharded across "
-            f"TP={tensor_parallel_size}"
-        )
     local_kv_heads, kv_head_replication = _local_heads(
         int(config.num_key_value_heads),
         tensor_parallel_size,

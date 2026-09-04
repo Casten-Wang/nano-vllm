@@ -5,6 +5,7 @@ from pathlib import Path
 import torch
 from transformers import AutoConfig
 
+from nanovllm.models.cache_plan import validate_cache_parallelism
 from nanovllm.models.model_spec import (
     ModelSpec,
     QWEN35_MOE_ARCHITECTURES,
@@ -95,8 +96,12 @@ class Config:
             and self.num_kvcache_blocks_override <= 0
         ):
             raise ValueError("num_kvcache_blocks_override must be positive")
-        if not 1 <= self.tensor_parallel_size <= 8:
-            raise ValueError("tensor_parallel_size must be in [1, 8]")
+        if (
+            not isinstance(self.tensor_parallel_size, int)
+            or isinstance(self.tensor_parallel_size, bool)
+            or not 1 <= self.tensor_parallel_size <= 8
+        ):
+            raise ValueError("tensor_parallel_size must be an integer in [1, 8]")
         if self.kv_cache_dtype not in ("auto", "int8"):
             raise ValueError("kv_cache_dtype must be 'auto' or 'int8'")
         if self.kv_dequant_backend not in ("triton", "torch", "fused"):
@@ -169,6 +174,7 @@ class Config:
         self.hf_config = AutoConfig.from_pretrained(self.model)
         self.model_spec = resolve_model_spec(self.hf_config)
         self.model_config = self.model_spec.text_config
+        validate_cache_parallelism(self.model_spec, self.tensor_parallel_size)
         quantization = self.model_spec.quantization
         if quantization.format == "gptq_int4":
             if self.weight_quant_backend == "auto":

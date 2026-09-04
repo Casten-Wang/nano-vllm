@@ -102,3 +102,25 @@ def test_invalid_tensor_parallel_size_is_rejected():
         assert "attention heads cannot be sharded" in str(error)
     else:
         raise AssertionError("TP=3 should not be accepted")
+
+
+def test_linear_attention_head_topology_is_validated_explicitly():
+    spec = qwen35_spec()
+    spec.text_config.linear_num_key_heads = 6
+
+    try:
+        cache_plan_module.validate_cache_parallelism(spec, 4)
+    except ValueError as error:
+        assert "6 heads cannot be sharded across TP=4" in str(error)
+    else:
+        raise AssertionError("an incompatible linear-attention layout was accepted")
+
+
+def test_cache_parallelism_rejects_non_integer_tp_size():
+    for value in (True, 4.0):
+        try:
+            cache_plan_module.validate_cache_parallelism(qwen35_spec(), value)
+        except ValueError as error:
+            assert "positive integer" in str(error)
+        else:
+            raise AssertionError(f"invalid TP size was accepted: {value!r}")
