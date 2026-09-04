@@ -52,6 +52,17 @@ class CudaGraphParityHelperTest(unittest.TestCase):
             {"decode_contiguous_view"},
         )
 
+    def test_reports_only_slots_reused_between_primer_and_target(self):
+        artifact = {
+            "state_slot_trace": {
+                "primer": [[0, 1], [0, 1]],
+                "target": [[1, 2], [1, 2]],
+            }
+        }
+
+        self.assertEqual(module.reused_state_slots(artifact), {1})
+        self.assertEqual(module.reused_state_slots({}), set())
+
     def test_extract_decode_steps_excludes_prefill_shape_differences(self):
         artifact = {
             "logits_steps": [

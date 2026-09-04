@@ -86,6 +86,22 @@ def observed_state_access_paths(artifact: dict) -> set[str]:
     }
 
 
+def reused_state_slots(artifact: dict) -> set[int]:
+    """Return recurrent slots touched by both primer and measured requests."""
+
+    trace = artifact.get("state_slot_trace", {})
+
+    def slots(phase: str) -> set[int]:
+        return {
+            int(slot)
+            for batch in trace.get(phase, ())
+            for slot in batch
+            if slot is not None
+        }
+
+    return slots("primer") & slots("target")
+
+
 def has_isolated_kv_capture(capture_stats: dict) -> bool:
     """Require capture padding to use the KV store kernel's skip sentinel."""
 
@@ -132,8 +148,21 @@ def run_worker(args: argparse.Namespace) -> None:
         enable_dynamic_chunked_prefill=False,
     )
 
+    state_slot_trace = {"primer": [], "target": []}
+    worker_phase = "target"
+    original_prepare_state_slots = llm.model_runner.prepare_state_slots
+
+    def capture_prepare_state_slots(seqs, *args, **kwargs):
+        state_slot_trace[worker_phase].append(
+            [getattr(seq, "state_slot", None) for seq in seqs]
+        )
+        return original_prepare_state_slots(seqs, *args, **kwargs)
+
+    llm.model_runner.prepare_state_slots = capture_prepare_state_slots
+
     primer = None
     if args.worker_mode == "graph":
+        worker_phase = "primer"
         primer_lengths = [min(8, args.max_model_len - 2)] * (
             args.worker_primer_batch_size
         )
@@ -152,6 +181,7 @@ def run_worker(args: argparse.Namespace) -> None:
             "batch_size": args.worker_primer_batch_size,
             "execution_stats": llm.model_runner.call("get_execution_stats"),
         }
+        worker_phase = "target"
 
     hidden_steps = []
     logits_steps = []
@@ -201,6 +231,7 @@ def run_worker(args: argparse.Namespace) -> None:
         "logits_steps": logits_steps,
         "execution_stats": execution_stats,
         "shape_trace": shape_trace,
+        "state_slot_trace": state_slot_trace,
         "cudagraph_capture_stats": cudagraph_capture_stats,
         "primer": primer,
         "config": {
@@ -424,6 +455,8 @@ def compare_artifacts(
             and "decode_graph_indexed" in graph_state_paths
         )
     )
+    reused_slots = reused_state_slots(graph)
+    expected_state_slot_reuse = not hybrid or bool(reused_slots)
     passed = (
         token_match
         and hidden_match
@@ -435,6 +468,7 @@ def compare_artifacts(
         and expected_eager_attention_path
         and expected_graph_attention_path
         and expected_state_access_paths
+        and expected_state_slot_reuse
     )
     return {
         "passed": passed,
@@ -461,6 +495,8 @@ def compare_artifacts(
         "expected_state_access_paths": expected_state_access_paths,
         "eager_state_access_paths": sorted(eager_state_paths),
         "graph_state_access_paths": sorted(graph_state_paths),
+        "expected_state_slot_reuse": expected_state_slot_reuse,
+        "reused_state_slots": sorted(reused_slots),
         "hidden_step_results": hidden_step_results,
         "step_results": step_results,
     }
