@@ -157,6 +157,29 @@ def load_json(path: Path) -> dict:
     return json.loads(path.read_text())
 
 
+def load_run_manifest(run_dir: Path, run_id: str) -> dict:
+    manifest = load_json(run_dir / "manifest.json")
+    if manifest.get("run_id") != run_id:
+        raise ValueError(
+            "rental manifest run_id does not match requested run_id: "
+            f"{manifest.get('run_id')!r} != {run_id!r}"
+        )
+    source_commit = manifest.get("source_commit")
+    if (
+        not isinstance(source_commit, str)
+        or len(source_commit) != 40
+        or any(
+            character not in "0123456789abcdef"
+            for character in source_commit
+        )
+    ):
+        raise ValueError(
+            "rental manifest source_commit must be a full lowercase 40-character "
+            "Git SHA"
+        )
+    return manifest
+
+
 def checkpoint_manifest_matches_remote(local: dict, remote: dict) -> bool:
     remote_shards = {
         item.get("name"): item
@@ -3078,6 +3101,8 @@ def compare_scheduler_trace_modes(baseline: dict, optimized: dict) -> dict:
 
 
 def summarize(run_dir: Path, run_id: str) -> dict:
+    manifest = load_run_manifest(run_dir, run_id)
+    manifest_source_commit = manifest["source_commit"]
     official_audit = load_json(
         run_dir / "preflight" / "official_checkpoint_header_audit.json"
     )
@@ -4330,6 +4355,7 @@ def summarize(run_dir: Path, run_id: str) -> dict:
         "cuda_measurements": cuda_measurements,
         "clean_worktrees": clean_worktrees,
         "single_commit": len(commits) == 1,
+        "artifacts_match_manifest_commit": commits == {manifest_source_commit},
         "single_checkpoint": len(checkpoint_digests) == 1,
     }
     microbenchmark_promoted = all(
@@ -4348,6 +4374,7 @@ def summarize(run_dir: Path, run_id: str) -> dict:
     )
     return {
         "run_id": run_id,
+        "manifest_source_commit": manifest_source_commit,
         "model": quality["model"],
         "evidence": evidence,
         "valid": all(evidence.values()),

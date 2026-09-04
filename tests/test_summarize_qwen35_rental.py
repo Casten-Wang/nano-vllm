@@ -14,11 +14,32 @@ SPEC = spec_from_file_location(
 assert SPEC is not None and SPEC.loader is not None
 MODULE = module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
+SOURCE_COMMIT = "a" * 40
 
 
 def write(path, value):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value))
+
+
+def test_run_manifest_is_required(tmp_path):
+    with pytest.raises(ValueError, match="manifest.json"):
+        MODULE.load_run_manifest(tmp_path, "rental-a")
+
+
+@pytest.mark.parametrize(
+    "manifest, message",
+    (
+        ({"run_id": "other", "source_commit": SOURCE_COMMIT}, "run_id"),
+        ({"run_id": "rental-a", "source_commit": "abc"}, "40-character"),
+        ({"run_id": "rental-a", "source_commit": "A" * 40}, "lowercase"),
+    ),
+)
+def test_run_manifest_rejects_invalid_identity(tmp_path, manifest, message):
+    write(tmp_path / "manifest.json", manifest)
+
+    with pytest.raises(ValueError, match=message):
+        MODULE.load_run_manifest(tmp_path, "rental-a")
 
 
 def write_gptq_summary_inputs(root, run_id, *, backend="triton"):
@@ -752,7 +773,7 @@ def write_attention_case(
     write(
         root / f"attention/tp4/{name}.json",
         {
-            "commit": "abc",
+            "commit": SOURCE_COMMIT,
             "git_dirty": False,
             "cuda_available": True,
             "batch_size": batch_size,
@@ -793,7 +814,7 @@ def write_cudagraph_case(
     write(
         root / f"{base}/tp4/{context_name}/run_1/summary.json",
         {
-            "commit": "abc",
+            "commit": SOURCE_COMMIT,
             "git_dirty": False,
             "cuda_available": True,
             "kv_cache_dtype": "int8",
@@ -835,7 +856,7 @@ def write_long_prefill_case(root, *, max_abs_error=0.01):
     write(
         root / "kernels_long/tp4.json",
         {
-            "commit": "abc",
+            "commit": SOURCE_COMMIT,
             "git_dirty": False,
             "cuda_available": True,
             "configuration": {
@@ -880,7 +901,7 @@ def write_mixed_case(root):
         write(
             root / f"mixed/tp4/r{repeat}.json",
             {
-                "commit": "abc",
+                "commit": SOURCE_COMMIT,
                 "git_dirty": False,
                 "cuda_available": True,
                 "tensor_parallel_size": 4,
@@ -934,7 +955,7 @@ def write_pressure_case(root):
             write(
                 root / f"pressure/tp4/{case_name}/r{repeat}.json",
                 {
-                    "commit": "abc",
+                    "commit": SOURCE_COMMIT,
                     "checkpoint_manifest": {"digest": "weights"},
                     "git_dirty": False,
                     "cuda_available": True,
@@ -1004,7 +1025,7 @@ def write_fairness_case(root):
             write(
                 root / f"fairness/{mode}/tp4/r{repeat}.json",
                 {
-                    "commit": "abc",
+                    "commit": SOURCE_COMMIT,
                     "checkpoint_manifest": {"digest": "weights"},
                     "git_dirty": False,
                     "cuda_available": True,
@@ -1095,7 +1116,7 @@ def scheduler_trace_result(mode, repeat=1):
         for index in range(8)
     ]
     return {
-        "commit": "abc",
+        "commit": SOURCE_COMMIT,
         "checkpoint_manifest": {"digest": "weights"},
         "git_dirty": False,
         "cuda_available": True,
@@ -1485,6 +1506,10 @@ def test_scheduler_fairness_comparison_rejects_ttft_regression(tmp_path):
 def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     run_id = "rental-a"
     write(
+        tmp_path / "manifest.json",
+        {"run_id": run_id, "source_commit": SOURCE_COMMIT},
+    )
+    write(
         tmp_path / "preflight/official_checkpoint_header_audit.json",
         {
             "valid": True,
@@ -1662,7 +1687,7 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     rows = [
         {
             "label": "sorted",
-            "commit": "abc",
+            "commit": SOURCE_COMMIT,
             "tensor_parallel_size": 4,
             "recurrent_state_dtype": "model",
             "kv_cache_dtype": "auto",
@@ -1722,7 +1747,7 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
         },
         {
             "label": "batched",
-            "commit": "abc",
+            "commit": SOURCE_COMMIT,
             "tensor_parallel_size": 4,
             "recurrent_state_dtype": "model",
             "kv_cache_dtype": "auto",
@@ -1816,7 +1841,7 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     write(
         tmp_path / f"performance/{run_id}_matrix_summary.json",
         {
-            "commits": ["abc"],
+            "commits": [SOURCE_COMMIT],
             "workload": {
                 "checkpoint_manifest_digest": "weights",
                 "max_num_seqs": 64,
@@ -1861,7 +1886,11 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     quality_dir = tmp_path / f"quality/{run_id}_qwen35_tp4"
     write(
         quality_dir / f"{quality_dir.name}.json",
-        {"commit": "abc", "git_dirty": False, "checkpoint_manifest": {"digest": "weights"}},
+        {
+            "commit": SOURCE_COMMIT,
+            "git_dirty": False,
+            "checkpoint_manifest": {"digest": "weights"},
+        },
     )
     write(quality_dir / "batch0_len128_cases.json", [{"prompt_ids": [1, 2]}])
     conv_quality_dir = (
@@ -1872,7 +1901,7 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     write(
         conv_quality_dir / f"{conv_quality_dir.name}.json",
         {
-            "commit": "abc",
+            "commit": SOURCE_COMMIT,
             "git_dirty": False,
             "checkpoint_manifest": {"digest": "weights"},
         },
@@ -1880,7 +1909,7 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     write(
         tmp_path / "kernels/tp4.json",
         {
-            "commit": "abc",
+            "commit": SOURCE_COMMIT,
             "git_dirty": False,
             "cuda_available": True,
             "results": {
@@ -2418,6 +2447,8 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     assert report["valid"], {
         key: value for key, value in report["evidence"].items() if not value
     }
+    assert report["manifest_source_commit"] == SOURCE_COMMIT
+    assert report["evidence"]["artifacts_match_manifest_commit"]
     assert report["evidence"]["official_checkpoint_headers_valid"]
     assert report["evidence"]["local_checkpoint_matches_official"]
     assert (
@@ -2470,6 +2501,20 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     assert install["valid"]
     assert install["peak_device_bytes_reduction"] == 5_000
     assert install["latency_ratio_vs_reference"] == 1.1
+    write(
+        tmp_path / "manifest.json",
+        {"run_id": run_id, "source_commit": "b" * 40},
+    )
+    wrong_commit_report = MODULE.summarize(tmp_path, run_id)
+    assert wrong_commit_report["evidence"]["single_commit"]
+    assert not wrong_commit_report["evidence"][
+        "artifacts_match_manifest_commit"
+    ]
+    assert not wrong_commit_report["valid"]
+    write(
+        tmp_path / "manifest.json",
+        {"run_id": run_id, "source_commit": SOURCE_COMMIT},
+    )
     transfer_path = tmp_path / "pd_transfer/tp4/int8-model.json"
     transfer_result = json.loads(transfer_path.read_text())
     transfer_result["cuda_install"]["latency_ratio_vs_reference"] = 1.3
