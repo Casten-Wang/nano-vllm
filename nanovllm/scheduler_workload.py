@@ -316,6 +316,7 @@ def _request_preemption_summary(
     def summarize(items: list[dict[str, object]]) -> dict[str, float | int]:
         counts = [int(item["preemption_count"]) for item in items]
         progress = [int(item["preempted_token_progress"]) for item in items]
+        recomputed = [int(item["recomputed_tokens"]) for item in items]
         preempted_requests = sum(count > 0 for count in counts)
         return {
             "request_count": len(items),
@@ -328,6 +329,9 @@ def _request_preemption_summary(
             "total_preempted_token_progress": sum(progress),
             "p95_preempted_token_progress": _percentile(progress, 0.95),
             "max_preempted_token_progress": max(progress, default=0),
+            "total_recomputed_tokens": sum(recomputed),
+            "p95_recomputed_tokens": _percentile(recomputed, 0.95),
+            "max_recomputed_tokens": max(recomputed, default=0),
         }
 
     return {
@@ -466,6 +470,7 @@ def replay_scheduler_workload(
                 "preempted_token_progress": int(
                     metric.get("preempted_token_progress", 0)
                 ),
+                "recomputed_tokens": int(metric.get("recomputed_tokens", 0)),
                 "ttft_s": metric["ttft_s"],
                 "tpot_s": metric["tpot_s"],
                 "latency_s": metric["latency_s"],

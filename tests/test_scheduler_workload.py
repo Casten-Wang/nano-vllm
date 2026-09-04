@@ -201,6 +201,7 @@ class FakeEngine:
                 "output_tokens": actual,
                 "preemption_count": seq_id,
                 "preempted_token_progress": seq_id * 8,
+                "recomputed_tokens": seq_id * 4,
                 "ttft_s": float(seq_id + 1),
                 "tpot_s": 0.5,
                 "latency_s": float(seq_id + 2),
@@ -256,6 +257,7 @@ def test_replay_injects_at_logical_steps_and_preserves_raw_evidence():
     assert result["request_samples"][1]["completion_step"] == 3
     assert result["request_samples"][1]["preemption_count"] == 1
     assert result["request_samples"][1]["preempted_token_progress"] == 8
+    assert result["request_samples"][1]["recomputed_tokens"] == 4
     assert result["preemption"] == {
         "all": {
             "request_count": 2,
@@ -266,6 +268,9 @@ def test_replay_injects_at_logical_steps_and_preserves_raw_evidence():
             "total_preempted_token_progress": 8,
             "p95_preempted_token_progress": pytest.approx(7.6),
             "max_preempted_token_progress": 8,
+            "total_recomputed_tokens": 4,
+            "p95_recomputed_tokens": pytest.approx(3.8),
+            "max_recomputed_tokens": 4,
         },
         "by_class": {
             "decode-heavy": {
@@ -277,6 +282,9 @@ def test_replay_injects_at_logical_steps_and_preserves_raw_evidence():
                 "total_preempted_token_progress": 8,
                 "p95_preempted_token_progress": 8,
                 "max_preempted_token_progress": 8,
+                "total_recomputed_tokens": 4,
+                "p95_recomputed_tokens": 4,
+                "max_recomputed_tokens": 4,
             },
             "short": {
                 "request_count": 1,
@@ -287,6 +295,9 @@ def test_replay_injects_at_logical_steps_and_preserves_raw_evidence():
                 "total_preempted_token_progress": 0,
                 "p95_preempted_token_progress": 0,
                 "max_preempted_token_progress": 0,
+                "total_recomputed_tokens": 0,
+                "p95_recomputed_tokens": 0,
+                "max_recomputed_tokens": 0,
             },
         },
     }

@@ -45,6 +45,8 @@ class Sequence:
         # them instead of relying only on engine-wide totals.
         self.num_preemptions = 0
         self.preempted_token_progress = 0
+        self.computed_token_ranges: list[tuple[int, int]] = []
+        self.recomputed_tokens = 0
         self.temperature = sampling_params.temperature
         self.top_k = sampling_params.top_k
         self.top_p = sampling_params.top_p
@@ -89,6 +91,41 @@ class Sequence:
         self.token_ids.append(token_id)
         self.last_token = token_id
         self.num_tokens += 1
+
+    def record_computed_span(self, start: int, count: int) -> int:
+        """Record an executed token span and return its prior overlap."""
+
+        if any(
+            not isinstance(value, int) or isinstance(value, bool)
+            for value in (start, count)
+        ):
+            raise TypeError("computed token span must use integer bounds")
+        if start < 0 or count < 0:
+            raise ValueError("computed token span must be non-negative")
+        end = start + count
+        if count == 0:
+            return 0
+        overlap = sum(
+            max(min(end, range_end) - max(start, range_start), 0)
+            for range_start, range_end in self.computed_token_ranges
+        )
+        merged = []
+        inserted = False
+        for range_start, range_end in self.computed_token_ranges:
+            if range_end < start:
+                merged.append((range_start, range_end))
+            elif end < range_start:
+                if not inserted:
+                    merged.append((start, end))
+                    inserted = True
+                merged.append((range_start, range_end))
+            else:
+                start = min(start, range_start)
+                end = max(end, range_end)
+        if not inserted:
+            merged.append((start, end))
+        self.computed_token_ranges = merged
+        return overlap
 
     def __getstate__(self):
         last_state = self.last_token if not self.is_prefill else self.token_ids

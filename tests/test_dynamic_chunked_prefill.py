@@ -498,6 +498,8 @@ def test_remote_prefill_terminal_first_token_releases_resources(
 
     assert seq.status is SequenceStatus.FINISHED
     assert seq.completion_token_ids == [first_token_id]
+    assert seq.computed_token_ranges == [(0, seq.num_prompt_tokens)]
+    assert seq.recomputed_tokens == 0
     assert not scheduler.running
     assert scheduler.block_manager.num_used_blocks == 0
     assert scheduler.state_manager.num_used_slots == 0
@@ -1301,6 +1303,53 @@ def test_min_recompute_can_reclaim_partial_waiting_prefill():
     assert scheduler.preempted_token_progress == 4
     assert partial.num_preemptions == 1
     assert partial.preempted_token_progress == 4
+
+
+def test_recomputed_tokens_count_only_replayed_scheduler_inputs():
+    scheduler = make_scheduler(
+        max_tokens=4,
+        max_seqs=1,
+        block_size=4,
+        num_blocks=4,
+    )
+    seq = Sequence([1, 2, 3, 4, 5, 6])
+    scheduler.add(seq)
+
+    first = scheduler.schedule()
+    scheduler.postprocess_mixed(first, [7])
+    second = scheduler.schedule()
+    scheduler.postprocess_mixed(second, [8])
+
+    assert seq.computed_token_ranges == [(0, 6)]
+    assert seq.recomputed_tokens == 0
+    scheduler.running.remove(seq)
+    scheduler.preempt(seq)
+    replay = scheduler.schedule()
+    # The first full block is recovered by prefix cache. Inputs at positions
+    # 4, 5, and 6 run again; only 4 and 5 overlap prior execution.
+    assert seq.num_cached_tokens == 4
+    assert seq.num_scheduled_tokens == 3
+    scheduler.postprocess_mixed(replay, [9])
+
+    assert seq.num_preemptions == 1
+    assert seq.preempted_token_progress == 6
+    assert seq.recomputed_tokens == 2
+    assert seq.computed_token_ranges == [(0, 7)]
+
+
+def test_computed_token_ranges_preserve_disjoint_prefix_cache_gaps():
+    seq = Sequence(list(range(12)))
+
+    assert seq.record_computed_span(8, 2) == 0
+    assert seq.record_computed_span(4, 3) == 0
+    assert seq.computed_token_ranges == [(4, 7), (8, 10)]
+    assert seq.record_computed_span(6, 3) == 2
+    assert seq.computed_token_ranges == [(4, 10)]
+
+    with pytest.raises(TypeError, match="integer bounds"):
+        seq.record_computed_span(True, 1)
+    with pytest.raises(ValueError, match="non-negative"):
+        seq.record_computed_span(-1, 1)
 
 
 def test_prefill_pressure_reclaims_another_partial_waiting_request():

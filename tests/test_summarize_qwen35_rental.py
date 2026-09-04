@@ -1076,6 +1076,9 @@ def scheduler_trace_result(mode, repeat=1):
             "preempted_token_progress": (
                 64 if not optimized and class_index == 0 and index < 2 else 0
             ),
+            "recomputed_tokens": (
+                16 if not optimized and class_index == 0 and index < 2 else 0
+            ),
             "ttft_s": 0.1 + repeat * 0.001,
             "tpot_s": 0.02,
             "latency_s": 0.2 + repeat * 0.001,
@@ -1138,6 +1141,9 @@ def scheduler_trace_result(mode, repeat=1):
                         54.4 if not optimized else 0.0
                     ),
                     "max_preempted_token_progress": 0 if optimized else 64,
+                    "total_recomputed_tokens": 0 if optimized else 32,
+                    "p95_recomputed_tokens": 13.6 if not optimized else 0.0,
+                    "max_recomputed_tokens": 0 if optimized else 16,
                 },
                 "by_class": {
                     workload_class: {
@@ -1174,6 +1180,21 @@ def scheduler_trace_result(mode, repeat=1):
                         ),
                         "max_preempted_token_progress": (
                             64
+                            if not optimized and workload_class == "decode-heavy"
+                            else 0
+                        ),
+                        "total_recomputed_tokens": (
+                            32
+                            if not optimized and workload_class == "decode-heavy"
+                            else 0
+                        ),
+                        "p95_recomputed_tokens": (
+                            16.0
+                            if not optimized and workload_class == "decode-heavy"
+                            else 0.0
+                        ),
+                        "max_recomputed_tokens": (
+                            16
                             if not optimized and workload_class == "decode-heavy"
                             else 0
                         ),

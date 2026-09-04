@@ -395,6 +395,7 @@ class Scheduler:
         session.commit(now=now)
         self.remote_prefills.pop(transfer_id)
         seq.num_cached_tokens = seq.num_prompt_tokens
+        seq.record_computed_span(0, seq.num_prompt_tokens)
         seq.num_scheduled_tokens = 0
         seq.is_prefill = False
         seq.first_token_time = perf_counter()
@@ -1086,6 +1087,11 @@ class Scheduler:
     def postprocess_one(self, seq: Sequence, token_id: int, is_prefill: bool):
         if self.prefix_cache_enabled:
             self.block_manager.hash_blocks(seq)
+        computed_start = seq.num_cached_tokens
+        seq.recomputed_tokens += seq.record_computed_span(
+            computed_start,
+            seq.num_scheduled_tokens,
+        )
         seq.num_cached_tokens += seq.num_scheduled_tokens
         seq.num_scheduled_tokens = 0
         if is_prefill and seq.num_cached_tokens < seq.num_tokens:

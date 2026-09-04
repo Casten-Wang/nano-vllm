@@ -145,6 +145,7 @@ class EngineMetricsTest(unittest.TestCase):
                     num_completion_tokens=2,
                     num_preemptions=seq_id,
                     preempted_token_progress=seq_id * 8,
+                    recomputed_tokens=seq_id * 4,
                 )
             )
 
@@ -169,6 +170,7 @@ class EngineMetricsTest(unittest.TestCase):
                 "output_tokens": 2,
                 "preemption_count": 0,
                 "preempted_token_progress": 0,
+                "recomputed_tokens": 0,
                 "ttft_s": 0.5,
                 "tpot_s": 0.5,
                 "latency_s": 1.0,
