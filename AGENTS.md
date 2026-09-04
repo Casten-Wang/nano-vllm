@@ -51,6 +51,16 @@
 
 ## External Design Research
 
+- Treat external contribution research as opportunity-driven, not as a
+  per-turn polling loop. Check external issues and pull requests when a concrete
+  implementation idea, overlap question, review milestone, maintainer event,
+  or scheduled low-frequency refresh makes the result actionable. Do not spend
+  routine development turns repeatedly confirming unchanged PR state.
+- When no actionable external candidate is available, immediately return to
+  product development for Qwen3.6 framework reliability, scheduling, memory,
+  parallelism, or PD disaggregation. The priority of upstream contribution does
+  not mean that external browsing should displace useful local engineering.
+
 - Before designing a runtime, kernel, quantization, parallelism, scheduling, or
   memory optimization, inspect current primary-source implementations and
   relevant issues or pull requests in established projects. Use this research
