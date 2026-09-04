@@ -1,7 +1,6 @@
 import argparse
 import itertools
 import json
-import os
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -244,11 +243,6 @@ def checkpoint_audit_command(args: argparse.Namespace) -> list[str]:
 
 
 def visible_gpu_count() -> int:
-    visible = os.environ.get("CUDA_VISIBLE_DEVICES")
-    if visible is not None:
-        devices = [item.strip() for item in visible.split(",") if item.strip()]
-        return 0 if devices == ["-1"] else len(devices)
-
     import torch
 
     return torch.cuda.device_count()

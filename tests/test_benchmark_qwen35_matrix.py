@@ -358,6 +358,17 @@ def test_gpu_memory_probe_records_rank_hardware_identity(monkeypatch):
     ]
 
 
+def test_visible_gpu_count_uses_cuda_runtime_instead_of_env_text(monkeypatch):
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,0")
+    monkeypatch.setitem(
+        sys.modules,
+        "torch",
+        SimpleNamespace(cuda=SimpleNamespace(device_count=lambda: 1)),
+    )
+
+    assert MODULE.visible_gpu_count() == 1
+
+
 def test_memory_preflight_rejects_partial_hardware_identity():
     with pytest.raises(ValueError, match="hardware identity"):
         MODULE.validate_memory_capacity(
