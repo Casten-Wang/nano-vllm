@@ -136,6 +136,8 @@ def test_socket_wire_round_trip_preserves_rank_payload(int8):
     assert received.transfer_id == payload.transfer_id
     assert received.tensor_parallel_rank == payload.tensor_parallel_rank
     assert received.cached_tokens == payload.cached_tokens
+    assert received.cache_fingerprint == payload.cache_fingerprint
+    assert received.token_fingerprint == payload.token_fingerprint
     torch.testing.assert_close(received.kv_blocks, payload.kv_blocks.cpu())
     if int8:
         torch.testing.assert_close(received.kv_scales, payload.kv_scales.cpu())

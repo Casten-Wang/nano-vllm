@@ -28,7 +28,7 @@ from nanovllm.engine.heterogeneous_cache_transfer import (
 
 
 WIRE_MAGIC = b"NVCT"
-WIRE_VERSION = 2
+WIRE_VERSION = 3
 WIRE_HEADER = struct.Struct("!4sBQQ")
 WIRE_DIGEST_BYTES = hashlib.sha256().digest_size
 MAX_HEADER_BYTES = 64 * 1024
@@ -37,7 +37,7 @@ _CHUNK_BYTES = 1024 * 1024
 _TRANSFER_ACK = b"\x01"
 _TRANSFER_NACK = b"\x00"
 PEER_WIRE_MAGIC = b"NVHP"
-PEER_WIRE_VERSION = 2
+PEER_WIRE_VERSION = 3
 
 _DTYPE_TO_NAME = {
     torch.float16: "float16",
@@ -107,6 +107,7 @@ def send_rank_cache_transfer(sock, payload: RankCacheTransfer) -> int:
             "block_size": payload.block_size,
             "cached_tokens": payload.cached_tokens,
             "cache_fingerprint": payload.cache_fingerprint,
+            "token_fingerprint": payload.token_fingerprint,
             "tensors": descriptors,
         },
         separators=(",", ":"),
@@ -153,6 +154,7 @@ def send_peer_cache_fragment(sock, fragment: PeerCacheFragment) -> int:
             "block_size": fragment.block_size,
             "cached_tokens": fragment.cached_tokens,
             "cache_fingerprint": fragment.cache_fingerprint,
+            "token_fingerprint": fragment.token_fingerprint,
             "slices": descriptors,
         },
         separators=(",", ":"),
@@ -251,6 +253,7 @@ def receive_rank_cache_transfer(
     block_size = header.get("block_size")
     cached_tokens = header.get("cached_tokens")
     cache_fingerprint = header.get("cache_fingerprint")
+    token_fingerprint = header.get("token_fingerprint")
     if (
         not isinstance(format_version, int)
         or isinstance(format_version, bool)
@@ -271,6 +274,8 @@ def receive_rank_cache_transfer(
         or cached_tokens <= 0
         or not isinstance(cache_fingerprint, str)
         or not cache_fingerprint
+        or not isinstance(token_fingerprint, str)
+        or not token_fingerprint
     ):
         raise ValueError("cache transfer wire header metadata is invalid")
     expectations = (
@@ -387,6 +392,7 @@ def receive_rank_cache_transfer(
             block_size=block_size,
             cached_tokens=cached_tokens,
             cache_fingerprint=cache_fingerprint,
+            token_fingerprint=token_fingerprint,
             kv_blocks=kv_blocks,
             kv_scales=kv_scales,
             recurrent_states=recurrent,
@@ -439,6 +445,7 @@ def receive_peer_cache_fragment(
         raise ValueError("peer cache fragment wire header is invalid")
     transfer_id = header.get("transfer_id")
     cache_fingerprint = header.get("cache_fingerprint")
+    token_fingerprint = header.get("token_fingerprint")
     integer_names = (
         "src_rank",
         "dst_rank",
@@ -453,6 +460,8 @@ def receive_peer_cache_fragment(
         or not transfer_id
         or not isinstance(cache_fingerprint, str)
         or not cache_fingerprint
+        or not isinstance(token_fingerprint, str)
+        or not token_fingerprint
         or any(
             not isinstance(value, int) or isinstance(value, bool)
             for value in integers.values()
@@ -553,6 +562,7 @@ def receive_peer_cache_fragment(
         block_size=integers["block_size"],
         cached_tokens=integers["cached_tokens"],
         cache_fingerprint=cache_fingerprint,
+        token_fingerprint=token_fingerprint,
         slices=tuple(slices),
     )
     if fragment.nbytes != body_bytes:

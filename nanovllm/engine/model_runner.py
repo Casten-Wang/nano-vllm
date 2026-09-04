@@ -72,6 +72,20 @@ def _runner_cache_fingerprint(runner: object) -> str:
     return getattr(runner, "cache_transfer_fingerprint", LEGACY_CACHE_FINGERPRINT)
 
 
+def _sequence_token_fingerprint(seq: object, cached_tokens: int) -> str:
+    """Fingerprint real sequences while preserving lightweight test doubles."""
+
+    from nanovllm.engine.cache_transfer import (
+        LEGACY_CACHE_FINGERPRINT,
+        build_token_fingerprint,
+    )
+
+    token_ids = getattr(seq, "token_ids", None)
+    if token_ids is None:
+        return LEGACY_CACHE_FINGERPRINT
+    return build_token_fingerprint(token_ids, cached_tokens)
+
+
 def dtype_nbytes(dtype: torch.dtype) -> int:
     return torch.empty((), dtype=dtype, device="cpu").element_size()
 
@@ -1624,6 +1638,9 @@ class ModelRunner:
             block_size=self.block_size,
             cached_tokens=seq.num_cached_tokens,
             cache_fingerprint=_runner_cache_fingerprint(self),
+            token_fingerprint=_sequence_token_fingerprint(
+                seq, seq.num_cached_tokens
+            ),
             recurrent_states=recurrent,
             convolution_states=convolution,
             to_host=to_host,
@@ -1958,6 +1975,9 @@ class ModelRunner:
             block_size=self.block_size,
             cached_tokens=seq.num_cached_tokens,
             cache_fingerprint=_runner_cache_fingerprint(self),
+            token_fingerprint=_sequence_token_fingerprint(
+                seq, seq.num_cached_tokens
+            ),
             plan=plan,
             host_staging_pool=self._host_staging_pool(),
         )
@@ -2083,6 +2103,10 @@ class ModelRunner:
             tensor_parallel_rank=self.rank,
             tensor_parallel_size=self.world_size,
             block_size=self.block_size,
+            cache_fingerprint=_runner_cache_fingerprint(self),
+            token_fingerprint=_sequence_token_fingerprint(
+                seq, expected_cached_tokens
+            ),
             recurrent_states=recurrent,
             convolution_states=convolution,
         )

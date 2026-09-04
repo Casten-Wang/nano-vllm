@@ -10,6 +10,7 @@ from nanovllm.engine.cache_transfer import (
     HostStagingBufferPool,
     RankCacheTransfer,
     build_cache_transfer_fingerprint,
+    build_token_fingerprint,
     estimate_rank_cache_transfer_bytes,
     export_rank_cache,
     import_rank_cache,
@@ -79,6 +80,12 @@ def test_cache_transfer_fingerprint_tracks_identity_and_cache_layout():
     assert baseline != build_cache_transfer_fingerprint(
         config("qwen36-revision-a", block_size=512)
     )
+
+
+def test_token_fingerprint_tracks_order_and_cached_prefix_only():
+    baseline = build_token_fingerprint([11, 22, 33, 44], 3)
+    assert baseline == build_token_fingerprint([11, 22, 33, 99], 3)
+    assert baseline != build_token_fingerprint([11, 33, 22, 44], 3)
 
 
 def make_qwen36_model_spec():
@@ -817,10 +824,13 @@ def test_model_runner_exports_and_imports_complete_hybrid_state():
         make_float_cache(fill=False),
         0.0,
     )
+    source.cache_transfer_fingerprint = "same-model"
+    destination.cache_transfer_fingerprint = "same-model"
     source_seq = SimpleNamespace(
         block_table=[3, 1],
         state_slot=1,
         num_cached_tokens=3,
+        token_ids=[11, 22, 33, 44],
     )
     destination_seq = SimpleNamespace(
         block_table=[0, 2],
@@ -828,6 +838,7 @@ def test_model_runner_exports_and_imports_complete_hybrid_state():
         status=SequenceStatus.TRANSFERRING,
         num_prompt_tokens=3,
         num_cached_tokens=0,
+        token_ids=[11, 22, 33],
     )
 
     payload = source.export_sequence_cache(
@@ -869,6 +880,74 @@ def test_model_runner_exports_and_imports_complete_hybrid_state():
             destination_pool.convolution[0, 0],
             source_pool.convolution[0, 1],
         )
+
+
+def test_model_runner_rejects_equal_length_wrong_prompt_before_install():
+    source, _ = make_runner(make_float_cache(), 5.0)
+    destination, _ = make_runner(make_float_cache(fill=False), 0.0)
+    source.cache_transfer_fingerprint = "same-model"
+    destination.cache_transfer_fingerprint = "same-model"
+    source_seq = SimpleNamespace(
+        block_table=[3, 1],
+        state_slot=1,
+        num_cached_tokens=3,
+        token_ids=[11, 22, 33, 44],
+    )
+    destination_seq = SimpleNamespace(
+        block_table=[0, 2],
+        state_slot=0,
+        status=SequenceStatus.TRANSFERRING,
+        num_prompt_tokens=3,
+        num_cached_tokens=0,
+        token_ids=[11, 22, 34],
+    )
+    payload = source.export_sequence_cache(
+        source_seq,
+        transfer_id="request-token-identity/attempt-1",
+    )
+
+    with pytest.raises(ValueError, match="token fingerprint"):
+        destination.import_sequence_cache(
+            destination_seq,
+            payload,
+            transfer_id="request-token-identity/attempt-1",
+        )
+
+    assert torch.count_nonzero(destination.kv_cache) == 0
+
+
+def test_model_runner_rejects_wrong_model_before_install():
+    source, _ = make_runner(make_float_cache(), 5.0)
+    destination, _ = make_runner(make_float_cache(fill=False), 0.0)
+    source.cache_transfer_fingerprint = "source-model"
+    destination.cache_transfer_fingerprint = "destination-model"
+    source_seq = SimpleNamespace(
+        block_table=[3, 1],
+        state_slot=1,
+        num_cached_tokens=3,
+        token_ids=[11, 22, 33],
+    )
+    destination_seq = SimpleNamespace(
+        block_table=[0, 2],
+        state_slot=0,
+        status=SequenceStatus.TRANSFERRING,
+        num_prompt_tokens=3,
+        num_cached_tokens=0,
+        token_ids=[11, 22, 33],
+    )
+    payload = source.export_sequence_cache(
+        source_seq,
+        transfer_id="request-model-identity/attempt-1",
+    )
+
+    with pytest.raises(ValueError, match="fingerprint does not match destination"):
+        destination.import_sequence_cache(
+            destination_seq,
+            payload,
+            transfer_id="request-model-identity/attempt-1",
+        )
+
+    assert torch.count_nonzero(destination.kv_cache) == 0
 
 
 def test_import_avoids_full_payload_device_conversion(monkeypatch):

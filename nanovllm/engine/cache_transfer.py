@@ -62,6 +62,22 @@ def build_cache_transfer_fingerprint(config: object) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def build_token_fingerprint(token_ids: list[int], cached_tokens: int) -> str:
+    """Hash the exact token prefix represented by transferred cache state."""
+
+    if (
+        not _is_plain_int(cached_tokens)
+        or cached_tokens <= 0
+        or cached_tokens > len(token_ids)
+    ):
+        raise ValueError("cached token prefix length is invalid")
+    prefix = token_ids[:cached_tokens]
+    if any(not _is_plain_int(token_id) or token_id < 0 for token_id in prefix):
+        raise ValueError("cached token prefix must contain non-negative integers")
+    encoded = json.dumps(prefix, separators=(",", ":")).encode("ascii")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def _is_plain_int(value: object) -> bool:
     """Reject bools at transfer boundaries even though bool subclasses int."""
 
@@ -224,6 +240,7 @@ class RankCacheTransfer:
     recurrent_states: tuple[torch.Tensor, ...]
     convolution_states: tuple[torch.Tensor, ...]
     cache_fingerprint: str = LEGACY_CACHE_FINGERPRINT
+    token_fingerprint: str = LEGACY_CACHE_FINGERPRINT
     host_staging_lease: HostStagingLease | None = None
 
     @property
@@ -545,6 +562,7 @@ def export_rank_cache(
     block_size: int,
     cached_tokens: int,
     cache_fingerprint: str = LEGACY_CACHE_FINGERPRINT,
+    token_fingerprint: str = LEGACY_CACHE_FINGERPRINT,
     recurrent_states: tuple[torch.Tensor, ...] = (),
     convolution_states: tuple[torch.Tensor, ...] = (),
     to_host: bool = False,
@@ -569,6 +587,8 @@ def export_rank_cache(
         raise ValueError("cache transfer cached token count must be a positive integer")
     if not isinstance(cache_fingerprint, str) or not cache_fingerprint:
         raise ValueError("cache transfer fingerprint must be a non-empty string")
+    if not isinstance(token_fingerprint, str) or not token_fingerprint:
+        raise ValueError("cache transfer token fingerprint must be a non-empty string")
     expected_blocks = (cached_tokens + block_size - 1) // block_size
     if len(block_ids) != expected_blocks:
         raise ValueError(
@@ -663,6 +683,7 @@ def export_rank_cache(
         block_size=block_size,
         cached_tokens=cached_tokens,
         cache_fingerprint=cache_fingerprint,
+        token_fingerprint=token_fingerprint,
         kv_blocks=kv_blocks,
         kv_scales=kv_scales,
         recurrent_states=exported_recurrent,
@@ -682,6 +703,7 @@ def import_rank_cache(
     tensor_parallel_size: int,
     block_size: int,
     cache_fingerprint: str | None = None,
+    token_fingerprint: str | None = None,
     recurrent_states: tuple[torch.Tensor, ...] = (),
     convolution_states: tuple[torch.Tensor, ...] = (),
 ) -> None:
@@ -711,6 +733,15 @@ def import_rank_cache(
         )
     ):
         raise ValueError("cache transfer fingerprint does not match destination")
+    if (
+        token_fingerprint is not None
+        and (
+            not isinstance(token_fingerprint, str)
+            or not token_fingerprint
+            or payload.token_fingerprint != token_fingerprint
+        )
+    ):
+        raise ValueError("cache transfer token fingerprint does not match destination")
     if (
         not _is_plain_int(payload.format_version)
         or payload.format_version != TRANSFER_FORMAT_VERSION
