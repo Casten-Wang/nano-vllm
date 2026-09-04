@@ -175,6 +175,9 @@ validate_initial_cache_capacity = model_runner_module.validate_initial_cache_cap
 validate_allocated_recurrent_state = (
     model_runner_module.validate_allocated_recurrent_state
 )
+validate_kv_cache_model_length_capacity = (
+    model_runner_module.validate_kv_cache_model_length_capacity
+)
 plan_local_kv_cache_capacity = model_runner_module.plan_local_kv_cache_capacity
 
 
@@ -264,6 +267,36 @@ class TPControlTest(unittest.TestCase):
                     "convolution_bytes_local_rank": 60,
                 },
             )
+
+    def test_kv_cache_capacity_holds_one_max_length_request(self):
+        self.assertEqual(
+            validate_kv_cache_model_length_capacity(
+                num_blocks=16,
+                block_size=256,
+                max_model_len=4096,
+            ),
+            4096,
+        )
+
+    def test_kv_cache_capacity_rejects_short_shared_tp_pool(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            r"max_model_len=4096 exceeds KV cache capacity of 3840 tokens",
+        ):
+            validate_kv_cache_model_length_capacity(
+                num_blocks=15,
+                block_size=256,
+                max_model_len=4096,
+            )
+
+    def test_kv_cache_capacity_rejects_invalid_inputs(self):
+        for name, values in (
+            ("num_blocks", dict(num_blocks=0, block_size=256, max_model_len=1)),
+            ("block_size", dict(num_blocks=1, block_size=True, max_model_len=1)),
+            ("max_model_len", dict(num_blocks=1, block_size=256, max_model_len=0)),
+        ):
+            with self.subTest(name=name), self.assertRaisesRegex(ValueError, name):
+                validate_kv_cache_model_length_capacity(**values)
 
     def test_kv_block_override_caps_synchronized_capacity(self):
         runner = object.__new__(ModelRunner)

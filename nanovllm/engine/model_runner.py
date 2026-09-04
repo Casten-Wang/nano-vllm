@@ -252,6 +252,32 @@ def validate_allocated_recurrent_state(
         )
 
 
+def validate_kv_cache_model_length_capacity(
+    *,
+    num_blocks: int,
+    block_size: int,
+    max_model_len: int,
+) -> int:
+    """Require the shared KV pool to hold one maximum-length request."""
+
+    for name, value in (
+        ("num_blocks", num_blocks),
+        ("block_size", block_size),
+        ("max_model_len", max_model_len),
+    ):
+        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+            raise ValueError(f"{name} must be a positive integer")
+    capacity_tokens = num_blocks * block_size
+    if capacity_tokens < max_model_len:
+        raise ValueError(
+            f"max_model_len={max_model_len} exceeds KV cache capacity of "
+            f"{capacity_tokens} tokens; increase gpu_memory_utilization, "
+            "increase tensor_parallel_size, reduce max_num_seqs for hybrid "
+            "state, or decrease max_model_len"
+        )
+    return capacity_tokens
+
+
 def plan_local_kv_cache_capacity(
     *,
     free_bytes: int,
@@ -1340,6 +1366,11 @@ class ModelRunner:
             block_bytes=block_bytes,
         )
         config.num_kvcache_blocks = self._synchronize_kv_block_count(local_num_blocks)
+        validate_kv_cache_model_length_capacity(
+            num_blocks=config.num_kvcache_blocks,
+            block_size=self.block_size,
+            max_model_len=config.max_model_len,
+        )
         self.kv_cache_capacity_stats = {
             **capacity_stats,
             "shared_num_blocks": config.num_kvcache_blocks,
@@ -1420,6 +1451,11 @@ class ModelRunner:
             block_bytes=block_bytes,
         )
         config.num_kvcache_blocks = self._synchronize_kv_block_count(local_num_blocks)
+        validate_kv_cache_model_length_capacity(
+            num_blocks=config.num_kvcache_blocks,
+            block_size=self.block_size,
+            max_model_len=config.max_model_len,
+        )
         self.kv_cache_capacity_stats = {
             **capacity_stats,
             "shared_num_blocks": config.num_kvcache_blocks,
