@@ -3343,9 +3343,11 @@ def test_host_input_preparation_summary_preserves_all_configurations():
                     "host_decode_preparation_total_time_s": average_s * 32,
                     "host_decode_preparation_max_time_s": average_s * 2,
                     "host_decode_preparation_average_time_s": average_s,
+                    "host_decode_preparation_rank_skew": 1.25,
                 },
                 "coefficient_of_variation": {
                     "host_decode_preparation_average_time_s": 0.05,
+                    "host_decode_preparation_rank_skew": 0.02,
                 },
             }
         )
@@ -3361,6 +3363,8 @@ def test_host_input_preparation_summary_preserves_all_configurations():
         "max_time_s": 0.002,
         "average_time_s": 0.001,
         "average_time_cv": 0.05,
+        "rank_skew": 1.25,
+        "rank_skew_cv": 0.02,
         "valid": True,
     }
 

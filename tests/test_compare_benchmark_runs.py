@@ -417,8 +417,17 @@ def test_comparison_uses_slowest_tensor_parallel_rank_preparation_time():
 
     candidate_decode = comparison["runs"][1]["input_preparation"]["decode"]
     assert candidate_decode["average_time_s"] == 0.05
+    assert candidate_decode["slowest_rank"] == 0
+    assert candidate_decode["rank_skew"] == 1.0
     assert [item["rank"] for item in candidate_decode["by_rank"]] == [0, 1]
     assert comparison["runs"][1]["input_preparation_vs_baseline"]["decode"] == 0.5
+    summary = MODULE.summarize_repeats(
+        [baseline, candidate],
+        ["r1", "r2"],
+    )
+    assert summary["statistics"]["host_decode_preparation_rank_skew"][
+        "median"
+    ] == 1.5
 
 
 def test_comparison_rejects_incomplete_tensor_parallel_preparation_stats():

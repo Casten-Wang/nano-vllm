@@ -228,11 +228,18 @@ def input_preparation_metrics(result: dict, *, label: str) -> dict[str, dict]:
             raise ValueError(
                 f"{label}.execution_stats_by_rank recorded different call counts"
             )
+        slowest = max(
+            samples,
+            key=lambda item: (item["average_time_s"], -item["rank"]),
+        )
+        fastest_average = min(item["average_time_s"] for item in samples)
         aggregated[step_kind] = {
             "call_count": samples[0]["call_count"],
             "total_time_s": max(item["total_time_s"] for item in samples),
             "max_time_s": max(item["max_time_s"] for item in samples),
-            "average_time_s": max(item["average_time_s"] for item in samples),
+            "average_time_s": slowest["average_time_s"],
+            "slowest_rank": slowest["rank"],
+            "rank_skew": ratio(slowest["average_time_s"], fastest_average),
             "by_rank": samples,
         }
     return aggregated
@@ -467,6 +474,17 @@ def summarize_repeats(results: list[dict], labels: list[str]) -> dict:
                 "total_time_s",
                 "max_time_s",
                 "average_time_s",
+            )
+        },
+        **{
+            f"host_{step_kind}_preparation_rank_skew": [
+                preparation[step_kind]["rank_skew"]
+                for preparation in preparation_by_run
+            ]
+            for step_kind in sorted(preparation_step_sets[0])
+            if all(
+                preparation[step_kind].get("rank_skew") is not None
+                for preparation in preparation_by_run
             )
         },
     }

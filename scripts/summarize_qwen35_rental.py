@@ -541,10 +541,24 @@ def summarize_host_input_preparation(performance_runs: list[dict]) -> dict:
                 and values["max_time_s"] <= values["total_time_s"]
             )
             row_valid = row_valid and values_valid
+            rank_skew_name = f"host_{step_kind}_preparation_rank_skew"
+            rank_skew = median.get(rank_skew_name)
+            rank_skew_valid = (
+                rank_skew is None
+                or (
+                    isinstance(rank_skew, (int, float))
+                    and not isinstance(rank_skew, bool)
+                    and math.isfinite(rank_skew)
+                    and rank_skew >= 1
+                )
+            )
+            row_valid = row_valid and rank_skew_valid
             by_step[step_kind] = {
                 **values,
                 "average_time_cv": variation.get(names["average_time_s"]),
-                "valid": values_valid,
+                "rank_skew": rank_skew,
+                "rank_skew_cv": variation.get(rank_skew_name),
+                "valid": values_valid and rank_skew_valid,
             }
         rows.append(
             {
