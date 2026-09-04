@@ -89,6 +89,8 @@ LATENCY_METRIC_NAMES = (
     "p99_request_latency_s",
 )
 
+INPUT_PREPARATION_STEP_KINDS = ("prefill", "decode", "mixed")
+
 
 def ratio(value: float, baseline: float) -> float | None:
     return value / baseline if baseline else None
@@ -127,6 +129,61 @@ def distribution(values: list[float]) -> dict:
         "population_stdev": stdev,
         "coefficient_of_variation": stdev / mean if mean else None,
     }
+
+
+def input_preparation_metrics(result: dict, *, label: str) -> dict[str, dict]:
+    raw = result.get("execution_stats", {}).get("input_preparation_stats", {})
+    if not isinstance(raw, dict):
+        raise ValueError(f"{label}.input_preparation_stats must be a dictionary")
+    unsupported = sorted(set(raw) - set(INPUT_PREPARATION_STEP_KINDS))
+    if unsupported:
+        raise ValueError(
+            f"{label}.input_preparation_stats has unsupported steps: "
+            + ", ".join(unsupported)
+        )
+    metrics = {}
+    for step_kind in INPUT_PREPARATION_STEP_KINDS:
+        stats = raw.get(step_kind)
+        if stats is None:
+            continue
+        if not isinstance(stats, dict):
+            raise ValueError(
+                f"{label}.input_preparation_stats.{step_kind} must be a dictionary"
+            )
+        call_count = stats.get("call_count")
+        if (
+            isinstance(call_count, bool)
+            or not isinstance(call_count, int)
+            or call_count <= 0
+        ):
+            raise ValueError(
+                f"{label}.input_preparation_stats.{step_kind}.call_count "
+                "must be a positive integer"
+            )
+        total_time_s = stats.get("total_time_s")
+        max_time_s = stats.get("max_time_s")
+        validate_measurement(
+            total_time_s,
+            label=(
+                f"{label}.input_preparation_stats.{step_kind}.total_time_s"
+            ),
+        )
+        validate_measurement(
+            max_time_s,
+            label=f"{label}.input_preparation_stats.{step_kind}.max_time_s",
+        )
+        if max_time_s > total_time_s:
+            raise ValueError(
+                f"{label}.input_preparation_stats.{step_kind}.max_time_s "
+                "cannot exceed total_time_s"
+            )
+        metrics[step_kind] = {
+            "call_count": call_count,
+            "total_time_s": total_time_s,
+            "max_time_s": max_time_s,
+            "average_time_s": total_time_s / call_count,
+        }
+    return metrics
 
 
 def load_result(path: Path) -> dict:
@@ -195,6 +252,11 @@ def compare_results(results: list[dict], labels: list[str]) -> dict:
                 result.get("metrics", {}).get(name),
                 label=f"{label}.metrics.{name}",
             )
+    preparation_by_run = [
+        input_preparation_metrics(result, label=label)
+        for label, result in zip(labels, results)
+    ]
+    baseline_preparation = preparation_by_run[0]
     baseline_checkpoint = baseline["checkpoint_manifest"]["digest"]
     mismatches = []
     for label, result in zip(labels[1:], results[1:]):
@@ -227,7 +289,7 @@ def compare_results(results: list[dict], labels: list[str]) -> dict:
     baseline_memory = baseline["peak_torch_allocated_mib"]
     baseline_digest = baseline["generated_token_ids"]["digest"]
     rows = []
-    for label, result in zip(labels, results):
+    for label, result, preparation in zip(labels, results, preparation_by_run):
         throughput = result["output_throughput_tok_s"]
         memory = result["peak_torch_allocated_mib"]
         latency_metrics = {
@@ -259,6 +321,15 @@ def compare_results(results: list[dict], labels: list[str]) -> dict:
                 ),
                 "execution_valid": result["execution_validation"]["valid"],
                 "generation_valid": result["generation_validation"]["valid"],
+                "input_preparation": preparation,
+                "input_preparation_vs_baseline": {
+                    step_kind: ratio(
+                        stats["average_time_s"],
+                        baseline_preparation[step_kind]["average_time_s"],
+                    )
+                    for step_kind, stats in preparation.items()
+                    if step_kind in baseline_preparation
+                },
             }
         )
     return {
@@ -311,6 +382,16 @@ def summarize_repeats(results: list[dict], labels: list[str]) -> dict:
         for result in results
     ]
     observed_in_all_repeats = sorted(set.intersection(*observed_path_sets))
+    preparation_by_run = [
+        input_preparation_metrics(result, label=label)
+        for label, result in zip(labels, results)
+    ]
+    preparation_step_sets = [set(item) for item in preparation_by_run]
+    if any(
+        steps != preparation_step_sets[0]
+        for steps in preparation_step_sets[1:]
+    ):
+        raise ValueError("benchmark repeats recorded different input preparation paths")
 
     metrics = {
         "output_throughput_tok_s": [
@@ -323,6 +404,19 @@ def summarize_repeats(results: list[dict], labels: list[str]) -> dict:
         "peak_torch_allocated_mib": [
             result["peak_torch_allocated_mib"] for result in results
         ],
+        **{
+            f"host_{step_kind}_preparation_{metric_name}": [
+                preparation[step_kind][metric_name]
+                for preparation in preparation_by_run
+            ]
+            for step_kind in sorted(preparation_step_sets[0])
+            for metric_name in (
+                "call_count",
+                "total_time_s",
+                "max_time_s",
+                "average_time_s",
+            )
+        },
     }
     return {
         "commit": baseline["commit"],
@@ -363,10 +457,21 @@ def compare_repeat_summaries(summaries: list[dict], labels: list[str]) -> dict:
             "benchmark summaries are not comparable: " + ", ".join(mismatches)
         )
 
+    optional_metric_names = sorted(
+        set.intersection(
+            *(set(summary["statistics"]) for summary in summaries)
+        )
+        - {
+            "output_throughput_tok_s",
+            *LATENCY_METRIC_NAMES,
+            "peak_torch_allocated_mib",
+        }
+    )
     metric_names = (
         "output_throughput_tok_s",
         *LATENCY_METRIC_NAMES,
         "peak_torch_allocated_mib",
+        *optional_metric_names,
     )
     rows = []
     for label, summary in zip(labels, summaries):
@@ -425,6 +530,11 @@ def compare_repeat_summaries(summaries: list[dict], labels: list[str]) -> dict:
             "latency": {
                 name: ratio(median[name], baseline_median[name])
                 for name in LATENCY_METRIC_NAMES
+            },
+            "input_preparation": {
+                name: ratio(median[name], baseline_median[name])
+                for name in optional_metric_names
+                if name.startswith("host_")
             },
         }
     digests = {row["generated_token_ids_digest"] for row in rows}

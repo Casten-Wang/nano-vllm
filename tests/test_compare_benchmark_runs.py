@@ -93,6 +93,20 @@ def result(
             ],
         },
         "generation_validation": {"valid": True},
+        "execution_stats": {
+            "input_preparation_stats": {
+                "prefill": {
+                    "call_count": 2,
+                    "total_time_s": 0.4,
+                    "max_time_s": 0.25,
+                },
+                "decode": {
+                    "call_count": 4,
+                    "total_time_s": 0.2,
+                    "max_time_s": 0.08,
+                },
+            },
+        },
         "metrics": {
             "avg_ttft_s": 2.0,
             "p50_ttft_s": 1.8,
@@ -152,6 +166,9 @@ def result(
 def test_comparison_reports_relative_metrics_and_output_parity():
     baseline = result()
     candidate = result(throughput=125.0, memory=750.0)
+    candidate["execution_stats"]["input_preparation_stats"]["decode"][
+        "total_time_s"
+    ] = 0.1
 
     comparison = MODULE.compare_results(
         [baseline, candidate],
@@ -171,6 +188,11 @@ def test_comparison_reports_relative_metrics_and_output_parity():
         "0123456789abcdef",
     ]
     assert comparison["checkpoint_identity_strength"] == "content-addressed"
+    assert candidate_row["input_preparation"]["prefill"]["average_time_s"] == 0.2
+    assert candidate_row["input_preparation_vs_baseline"] == {
+        "prefill": 1.0,
+        "decode": 0.5,
+    }
 
 
 def test_comparison_allows_explicit_optimization_variables_to_change():
@@ -286,6 +308,9 @@ def test_repeat_summary_reports_distribution_and_stability():
     assert throughput["population_stdev"] == pytest.approx(8.1649658)
     assert throughput["coefficient_of_variation"] == pytest.approx(0.081649658)
     assert summary["statistics"]["p99_request_latency_s"]["median"] == 4.5
+    assert summary["statistics"]["host_decode_preparation_average_time_s"][
+        "median"
+    ] == 0.05
     assert summary["all_output_digests_match"]
     assert summary["generated_token_ids_digest"] == "same"
     assert summary["execution_paths"] == {
@@ -334,11 +359,66 @@ def test_matrix_summary_compares_configuration_medians_and_quality():
     ]
     assert comparison["runs"][1]["vs_baseline"]["output_throughput"] == 1.25
     assert comparison["runs"][1]["vs_baseline"]["peak_memory"] == 0.75
+    assert comparison["runs"][1]["vs_baseline"]["input_preparation"][
+        "host_decode_preparation_average_time_s"
+    ] == 1.0
     assert comparison["runs"][1]["vs_baseline"]["latency"]["p99_ttft_s"] == 1.0
     assert comparison["all_repeat_output_digests_match"]
     assert not comparison["all_output_digests_match"]
     assert comparison["all_execution_paths_valid"]
     assert comparison["all_generation_valid"]
+
+
+def test_comparison_supports_legacy_results_without_preparation_stats():
+    baseline = result()
+    candidate = result()
+    del baseline["execution_stats"]
+    del candidate["execution_stats"]
+
+    comparison = MODULE.compare_results(
+        [baseline, candidate],
+        ["baseline", "candidate"],
+    )
+
+    assert comparison["runs"][0]["input_preparation"] == {}
+    assert comparison["runs"][1]["input_preparation_vs_baseline"] == {}
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("call_count", 0, "must be a positive integer"),
+        ("call_count", True, "must be a positive integer"),
+        ("total_time_s", float("nan"), "finite non-negative number"),
+        ("max_time_s", 0.5, "cannot exceed total_time_s"),
+    ],
+)
+def test_comparison_rejects_invalid_preparation_stats(field, value, message):
+    candidate = result()
+    candidate["execution_stats"]["input_preparation_stats"]["decode"][
+        field
+    ] = value
+
+    with pytest.raises(ValueError, match=message):
+        MODULE.compare_results(
+            [result(), candidate],
+            ["baseline", "candidate"],
+        )
+
+
+def test_comparison_rejects_unknown_preparation_step():
+    candidate = result()
+    candidate["execution_stats"]["input_preparation_stats"]["prefilll"] = {
+        "call_count": 1,
+        "total_time_s": 0.1,
+        "max_time_s": 0.1,
+    }
+
+    with pytest.raises(ValueError, match="unsupported steps: prefilll"):
+        MODULE.compare_results(
+            [result(), candidate],
+            ["baseline", "candidate"],
+        )
 
 
 def test_comparison_rejects_missing_tail_latency_metrics():
