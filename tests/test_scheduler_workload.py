@@ -165,6 +165,7 @@ class FakeMetrics:
 class FakeScheduler:
     def __init__(self, engine):
         self.engine = engine
+        self.last_scheduled_seq_ids = ()
 
     def capacity_snapshot(self):
         return {
@@ -193,6 +194,7 @@ class FakeEngine:
 
     def step(self):
         seq_id, prompt, output_len = self.active.pop(0)
+        self.scheduler.last_scheduled_seq_ids = (seq_id,)
         actual = output_len - int(self.wrong_output)
         self.metrics.request_samples.append(
             {
@@ -256,6 +258,10 @@ def test_replay_injects_at_logical_steps_and_preserves_raw_evidence():
     assert [step["logical_step"] for step in result["step_samples"]] == [0, 3]
     assert result["step_samples"][0]["admitted_request_ids"] == ["first"]
     assert result["step_samples"][1]["admitted_request_ids"] == ["second"]
+    assert result["step_samples"][0]["scheduled_request_ids"] == ["first"]
+    assert result["step_samples"][1]["scheduled_request_ids"] == ["second"]
+    assert result["request_samples"][1]["first_schedule_step"] == 3
+    assert result["request_samples"][1]["scheduler_wait_steps"] == 0
     assert result["request_samples"][1]["completion_step"] == 3
     assert result["request_samples"][1]["preemption_count"] == 1
     assert result["request_samples"][1]["preempted_token_progress"] == 8
@@ -315,6 +321,34 @@ def test_replay_injects_at_logical_steps_and_preserves_raw_evidence():
     }
 
 
+def test_replay_reports_logical_scheduler_wait_by_workload_class():
+    result = MODULE.replay_scheduler_workload(
+        FakeEngine(),
+        MODULE.SchedulerWorkload.from_dict(
+            workload(
+                [
+                    request(request_id="first", workload_class="short"),
+                    request(request_id="second", workload_class="decode-heavy"),
+                ]
+            )
+        ),
+        prompt_factory=lambda item: [1] * item.input_len,
+        sampling_params_factory=lambda item: item.output_len,
+    )
+
+    assert result["request_samples"][0]["scheduler_wait_steps"] == 0
+    assert result["request_samples"][1]["scheduler_wait_steps"] == 1
+    assert result["latency"]["all"]["p95_scheduler_wait_steps"] == pytest.approx(
+        0.95
+    )
+    assert (
+        result["latency"]["by_class"]["decode-heavy"][
+            "max_scheduler_wait_steps"
+        ]
+        == 1
+    )
+
+
 def test_replay_rejects_duplicate_engine_sequence_ids():
     with pytest.raises(RuntimeError, match="duplicate seq_id"):
         MODULE.replay_scheduler_workload(
@@ -327,6 +361,38 @@ def test_replay_rejects_duplicate_engine_sequence_ids():
                     ]
                 )
             ),
+            prompt_factory=lambda item: [1] * item.input_len,
+            sampling_params_factory=lambda item: item.output_len,
+        )
+
+
+def test_replay_rejects_unknown_scheduled_sequence_id():
+    class UnknownScheduledEngine(FakeEngine):
+        def step(self):
+            result = super().step()
+            self.scheduler.last_scheduled_seq_ids = (999,)
+            return result
+
+    with pytest.raises(RuntimeError, match="scheduler selected unknown seq_id=999"):
+        MODULE.replay_scheduler_workload(
+            UnknownScheduledEngine(),
+            MODULE.SchedulerWorkload.from_dict(workload()),
+            prompt_factory=lambda item: [1] * item.input_len,
+            sampling_params_factory=lambda item: item.output_len,
+        )
+
+
+def test_replay_rejects_missing_first_schedule_evidence():
+    class MissingScheduleEngine(FakeEngine):
+        def step(self):
+            result = super().step()
+            self.scheduler.last_scheduled_seq_ids = ()
+            return result
+
+    with pytest.raises(RuntimeError, match="first-schedule samples are incomplete"):
+        MODULE.replay_scheduler_workload(
+            MissingScheduleEngine(),
+            MODULE.SchedulerWorkload.from_dict(workload()),
             prompt_factory=lambda item: [1] * item.input_len,
             sampling_params_factory=lambda item: item.output_len,
         )

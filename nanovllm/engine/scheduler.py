@@ -95,6 +95,7 @@ class Scheduler:
         self.prefill_stopped_by_kv_capacity = 0
         self.prefill_stopped_by_decode_kv_reservation = 0
         self.last_decode_kv_reserve_blocks = 0
+        self.last_scheduled_seq_ids: tuple[int, ...] = ()
 
     def _mark_prefill_stop(self, reason: str) -> None:
         """Record the first admission boundary reached in this step."""
@@ -511,6 +512,7 @@ class Scheduler:
             self.current_prefill_starvation_steps = 0
         self.schedule_steps += 1
         seqs = result.seqs if isinstance(result, ScheduleResult) else result[0]
+        self.last_scheduled_seq_ids = tuple(seq.seq_id for seq in seqs)
         first_scheduled = [seq for seq in seqs if seq.first_scheduled_time is None]
         if first_scheduled:
             scheduled_at = perf_counter()

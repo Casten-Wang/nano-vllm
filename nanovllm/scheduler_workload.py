@@ -283,6 +283,7 @@ def _request_latency_summary(samples: list[dict[str, object]]) -> dict[str, obje
     def summarize(items: list[dict[str, object]]) -> dict[str, float | int]:
         result: dict[str, float | int] = {"request_count": len(items)}
         for name in (
+            "scheduler_wait_steps",
             "time_to_first_schedule_s",
             "first_token_service_s",
             "ttft_s",
@@ -371,6 +372,7 @@ def replay_scheduler_workload(
     engine_steps = 0
     idle_fast_forwards = 0
     request_by_seq_id: dict[int, SchedulerRequest] = {}
+    first_schedule_step_by_seq_id: dict[int, int] = {}
     completion_step_by_seq_id: dict[int, int] = {}
     output_by_seq_id: dict[int, list[int]] = {}
     step_samples = []
@@ -418,6 +420,11 @@ def replay_scheduler_workload(
             prefill_tokens=prefill_tokens,
             decode_tokens=decode_tokens,
         )
+        scheduled_seq_ids = engine.scheduler.last_scheduled_seq_ids
+        for seq_id in scheduled_seq_ids:
+            if seq_id not in request_by_seq_id:
+                raise RuntimeError(f"scheduler selected unknown seq_id={seq_id}")
+            first_schedule_step_by_seq_id.setdefault(seq_id, logical_step)
         finished = []
         for seq_id, token_ids in outputs:
             if seq_id not in request_by_seq_id:
@@ -434,6 +441,10 @@ def replay_scheduler_workload(
                 "elapsed_s": elapsed,
                 "admitted_request_ids": admitted,
                 "finished_request_ids": finished,
+                "scheduled_request_ids": [
+                    request_by_seq_id[seq_id].request_id
+                    for seq_id in scheduled_seq_ids
+                ],
                 "prefill_tokens": prefill_tokens,
                 "decode_tokens": decode_tokens,
                 "capacity": capacity,
@@ -451,6 +462,8 @@ def replay_scheduler_workload(
     }
     if set(metric_by_seq_id) != set(request_by_seq_id):
         raise RuntimeError("request latency samples are incomplete")
+    if set(first_schedule_step_by_seq_id) != set(request_by_seq_id):
+        raise RuntimeError("request first-schedule samples are incomplete")
 
     request_samples = []
     output_records = []
@@ -462,13 +475,19 @@ def replay_scheduler_workload(
                 f"{request.output_len} tokens"
             )
         metric = metric_by_seq_id[seq_id]
+        first_schedule_step = first_schedule_step_by_seq_id[seq_id]
+        scheduler_wait_steps = first_schedule_step - request.arrival_step
+        if scheduler_wait_steps < 0:
+            raise RuntimeError("request was scheduled before its logical arrival")
         request_samples.append(
             {
                 "request_id": request.request_id,
                 "seq_id": seq_id,
                 "workload_class": request.workload_class,
                 "arrival_step": request.arrival_step,
+                "first_schedule_step": first_schedule_step,
                 "completion_step": completion_step_by_seq_id[seq_id],
+                "scheduler_wait_steps": scheduler_wait_steps,
                 "input_tokens": request.input_len,
                 "requested_output_tokens": request.output_len,
                 "output_tokens": len(token_ids),
