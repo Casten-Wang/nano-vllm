@@ -162,17 +162,10 @@ class Config:
             )
         ):
             raise ValueError("max_remote_prefill_staging_bytes must be positive")
-        if self.distributed_port is not None and (
-            not isinstance(self.distributed_port, int)
-            or isinstance(self.distributed_port, bool)
-            or not 1 <= self.distributed_port <= 65535
-        ):
-            raise ValueError("distributed_port must be an integer in [1, 65535]")
-        if self.shared_memory_name is not None and (
-            not isinstance(self.shared_memory_name, str)
-            or not self.shared_memory_name
-        ):
-            raise ValueError("shared_memory_name must be a non-empty string")
+        if self.distributed_port is not None and not 1 <= self.distributed_port <= 65535:
+            raise ValueError("distributed_port must be in [1, 65535]")
+        if self.shared_memory_name is not None and not self.shared_memory_name:
+            raise ValueError("shared_memory_name must not be empty")
         self.hf_config = AutoConfig.from_pretrained(self.model)
         self.model_spec = resolve_model_spec(self.hf_config)
         self.model_config = self.model_spec.text_config

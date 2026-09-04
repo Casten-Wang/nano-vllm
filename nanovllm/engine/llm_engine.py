@@ -1,11 +1,11 @@
 import atexit
 from dataclasses import fields
 import os
+import socket
 import uuid
 from time import perf_counter
 from tqdm.auto import tqdm
 from transformers import AutoTokenizer
-import torch.distributed as dist
 import torch.multiprocessing as mp
 
 from nanovllm.config import Config, resolve_eos_token_ids
@@ -27,16 +27,12 @@ from nanovllm.engine.remote_prefill_router import RemotePrefillDemand
 MAX_RETAINED_REMOTE_PREFILL_ERRORS = 256
 
 
-def _create_distributed_store(port: int | None):
-    """Reserve one engine-local rendezvous endpoint for its full lifetime."""
+def _find_free_port() -> int:
+    """Ask the OS for an unused local TCP port for the NCCL rendezvous."""
 
-    return dist.TCPStore(
-        "127.0.0.1",
-        port or 0,
-        None,
-        True,
-        wait_for_workers=False,
-    )
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
 
 
 def _validate_cache_transfer_endpoints(
@@ -196,10 +192,8 @@ class LLMEngine:
         config_fields = {field.name for field in fields(Config)}
         config_kwargs = {k: v for k, v in kwargs.items() if k in config_fields}
         config = Config(model, **config_kwargs)
-        self.distributed_store = _create_distributed_store(
-            config.distributed_port
-        )
-        config.distributed_port = self.distributed_store.port
+        if config.distributed_port is None:
+            config.distributed_port = _find_free_port()
         if config.tensor_parallel_size > 1:
             if config.shared_memory_name is None:
                 config.shared_memory_name = (
@@ -279,8 +273,6 @@ class LLMEngine:
                 process.terminate()
         for process in self.ps:
             process.join(timeout=5.0)
-
-        del self.distributed_store
 
         if shutdown_error is not None:
             raise shutdown_error

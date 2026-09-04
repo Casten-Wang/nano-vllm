@@ -357,10 +357,9 @@ class ModelRunner:
         port = config.distributed_port
         if port is None:
             raise ValueError("distributed_port must be assigned before ModelRunner starts")
-        store = dist.TCPStore("127.0.0.1", port, None, False)
         dist.init_process_group(
             "nccl",
-            store=store,
+            f"tcp://127.0.0.1:{port}",
             world_size=self.world_size,
             rank=rank,
         )

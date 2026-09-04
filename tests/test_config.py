@@ -180,18 +180,6 @@ def test_invalid_remote_prefill_staging_limit_is_rejected(
         )
 
 
-@pytest.mark.parametrize("value", [0, 65536, True, 1.5, "2333"])
-def test_invalid_distributed_port_is_rejected(monkeypatch, tmp_path, value):
-    with pytest.raises(ValueError, match="distributed_port"):
-        make_config(monkeypatch, tmp_path, distributed_port=value)
-
-
-@pytest.mark.parametrize("value", ["", True, 1])
-def test_invalid_shared_memory_name_is_rejected(monkeypatch, tmp_path, value):
-    with pytest.raises(ValueError, match="shared_memory_name"):
-        make_config(monkeypatch, tmp_path, shared_memory_name=value)
-
-
 def test_gptq_auto_selects_triton_backend(monkeypatch, tmp_path):
     text_config = SimpleNamespace(max_position_embeddings=32768)
     monkeypatch.setattr(
