@@ -298,6 +298,46 @@ def _request_latency_summary(samples: list[dict[str, object]]) -> dict[str, obje
     }
 
 
+def _request_preemption_summary(
+    samples: list[dict[str, object]],
+) -> dict[str, object]:
+    """Summarize scheduler pressure without calling it recomputation.
+
+    Prefix caching can recover some discarded token progress after a
+    preemption, so this reports the observable scheduler transition and its
+    upper-bound cost rather than claiming that every discarded token ran
+    again.
+    """
+
+    by_class: dict[str, list[dict[str, object]]] = {}
+    for sample in samples:
+        by_class.setdefault(str(sample["workload_class"]), []).append(sample)
+
+    def summarize(items: list[dict[str, object]]) -> dict[str, float | int]:
+        counts = [int(item["preemption_count"]) for item in items]
+        progress = [int(item["preempted_token_progress"]) for item in items]
+        preempted_requests = sum(count > 0 for count in counts)
+        return {
+            "request_count": len(items),
+            "preempted_request_count": preempted_requests,
+            "preempted_request_rate": (
+                preempted_requests / len(items) if items else 0.0
+            ),
+            "total_preemption_count": sum(counts),
+            "max_preemptions_per_request": max(counts, default=0),
+            "total_preempted_token_progress": sum(progress),
+            "p95_preempted_token_progress": _percentile(progress, 0.95),
+            "max_preempted_token_progress": max(progress, default=0),
+        }
+
+    return {
+        "all": summarize(samples),
+        "by_class": {
+            name: summarize(items) for name, items in sorted(by_class.items())
+        },
+    }
+
+
 def replay_scheduler_workload(
     engine,
     workload: SchedulerWorkload,
@@ -457,6 +497,7 @@ def replay_scheduler_workload(
             "token_count": sum(len(record["token_ids"]) for record in output_records),
         },
         "latency": _request_latency_summary(request_samples),
+        "preemption": _request_preemption_summary(request_samples),
         "step_samples": step_samples,
         "engine_metrics": engine.metrics.to_dict(),
     }

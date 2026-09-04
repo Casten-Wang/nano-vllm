@@ -2548,6 +2548,9 @@ def summarize_scheduler_trace_repeats(
         replay = result.get("replay", {})
         workload = replay.get("workload", {})
         latency = replay.get("latency", {}).get("all", {})
+        preemption = replay.get("preemption", {})
+        preemption_all = preemption.get("all", {})
+        preemption_by_class = preemption.get("by_class", {})
         output = replay.get("output_token_ids", {})
         samples = replay.get("request_samples", [])
         steps = replay.get("step_samples", [])
@@ -2579,6 +2582,12 @@ def summarize_scheduler_trace_repeats(
             and all(
                 item.get("output_tokens")
                 == item.get("requested_output_tokens")
+                and isinstance(item.get("preemption_count"), int)
+                and not isinstance(item.get("preemption_count"), bool)
+                and item["preemption_count"] >= 0
+                and isinstance(item.get("preempted_token_progress"), int)
+                and not isinstance(item.get("preempted_token_progress"), bool)
+                and item["preempted_token_progress"] >= 0
                 and isinstance(item.get("arrival_step"), int)
                 and isinstance(item.get("completion_step"), int)
                 and item["completion_step"] >= item["arrival_step"]
@@ -2589,6 +2598,52 @@ def summarize_scheduler_trace_repeats(
                     for name in ("ttft_s", "tpot_s", "latency_s")
                 )
                 for item in samples
+            )
+        )
+        total_request_preemptions = (
+            sum(item["preemption_count"] for item in samples)
+            if sample_contract_valid
+            else None
+        )
+        total_request_preempted_progress = (
+            sum(item["preempted_token_progress"] for item in samples)
+            if sample_contract_valid
+            else None
+        )
+        preempted_request_count = (
+            sum(item["preemption_count"] > 0 for item in samples)
+            if sample_contract_valid
+            else None
+        )
+        preemption_contract_valid = (
+            sample_contract_valid
+            and isinstance(preemption_all, dict)
+            and isinstance(preemption_by_class, dict)
+            and set(preemption_by_class) == set(expected_class_counts)
+            and preemption_all.get("request_count") == len(samples)
+            and preemption_all.get("preempted_request_count")
+            == preempted_request_count
+            and preemption_all.get("total_preemption_count")
+            == total_request_preemptions
+            and preemption_all.get("total_preempted_token_progress")
+            == total_request_preempted_progress
+            and all(
+                preemption_by_class[name].get("request_count") == expected_count
+                and preemption_by_class[name].get("total_preemption_count")
+                == sum(
+                    item["preemption_count"]
+                    for item in samples
+                    if item["workload_class"] == name
+                )
+                and preemption_by_class[name].get(
+                    "total_preempted_token_progress"
+                )
+                == sum(
+                    item["preempted_token_progress"]
+                    for item in samples
+                    if item["workload_class"] == name
+                )
+                for name, expected_count in expected_class_counts.items()
             )
         )
         step_contract_valid = (
@@ -2654,11 +2709,14 @@ def summarize_scheduler_trace_repeats(
                     "max_prefill_starvation_steps",
                 )
             )
+            and scheduler_metrics["preemption_count"]
+            == total_request_preemptions
         )
         valid = (
             configuration_valid
             and path_valid
             and sample_contract_valid
+            and preemption_contract_valid
             and step_contract_valid
             and workload.get("name") == "mixed"
             and workload.get("request_count") == 24
@@ -2678,6 +2736,7 @@ def summarize_scheduler_trace_repeats(
                 "configuration_valid": configuration_valid,
                 "path_valid": path_valid,
                 "sample_contract_valid": sample_contract_valid,
+                "preemption_contract_valid": preemption_contract_valid,
                 "step_contract_valid": step_contract_valid,
                 "measurements_valid": measurements_valid,
                 "scheduler_metrics_valid": scheduler_metrics_valid,
@@ -2689,6 +2748,8 @@ def summarize_scheduler_trace_repeats(
                 "workload_digest": workload.get("digest"),
                 "output_digest": output.get("digest"),
                 **scheduler_metrics,
+                "preempted_request_count": preempted_request_count,
+                "preempted_token_progress": total_request_preempted_progress,
                 **numeric,
             }
         )
@@ -2711,6 +2772,8 @@ def summarize_scheduler_trace_repeats(
         "p95_ttft_s",
         "p95_tpot_s",
         "p95_latency_s",
+        "preempted_request_count",
+        "preempted_token_progress",
     )
     def median_or_none(name: str):
         values = [row[name] for row in rows]
@@ -2763,6 +2826,8 @@ def compare_scheduler_trace_modes(baseline: dict, optimized: dict) -> dict:
         "p95_ttft_s",
         "p95_tpot_s",
         "p95_latency_s",
+        "preempted_request_count",
+        "preempted_token_progress",
         "peak_torch_allocated_mib",
     ):
         base = baseline[name]

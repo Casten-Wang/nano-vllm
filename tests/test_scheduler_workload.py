@@ -256,6 +256,40 @@ def test_replay_injects_at_logical_steps_and_preserves_raw_evidence():
     assert result["request_samples"][1]["completion_step"] == 3
     assert result["request_samples"][1]["preemption_count"] == 1
     assert result["request_samples"][1]["preempted_token_progress"] == 8
+    assert result["preemption"] == {
+        "all": {
+            "request_count": 2,
+            "preempted_request_count": 1,
+            "preempted_request_rate": 0.5,
+            "total_preemption_count": 1,
+            "max_preemptions_per_request": 1,
+            "total_preempted_token_progress": 8,
+            "p95_preempted_token_progress": pytest.approx(7.6),
+            "max_preempted_token_progress": 8,
+        },
+        "by_class": {
+            "decode-heavy": {
+                "request_count": 1,
+                "preempted_request_count": 1,
+                "preempted_request_rate": 1.0,
+                "total_preemption_count": 1,
+                "max_preemptions_per_request": 1,
+                "total_preempted_token_progress": 8,
+                "p95_preempted_token_progress": 8,
+                "max_preempted_token_progress": 8,
+            },
+            "short": {
+                "request_count": 1,
+                "preempted_request_count": 0,
+                "preempted_request_rate": 0.0,
+                "total_preemption_count": 0,
+                "max_preemptions_per_request": 0,
+                "total_preempted_token_progress": 0,
+                "p95_preempted_token_progress": 0,
+                "max_preempted_token_progress": 0,
+            },
+        },
+    }
     assert result["output_token_ids"]["request_count"] == 2
     assert result["output_token_ids"]["token_count"] == 8
     assert len(result["output_token_ids"]["digest"]) == 64

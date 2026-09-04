@@ -1070,6 +1070,12 @@ def scheduler_trace_result(mode, repeat=1):
             "input_tokens": 128,
             "requested_output_tokens": 4,
             "output_tokens": 4,
+            "preemption_count": (
+                1 if not optimized and class_index == 0 and index < 2 else 0
+            ),
+            "preempted_token_progress": (
+                64 if not optimized and class_index == 0 and index < 2 else 0
+            ),
             "ttft_s": 0.1 + repeat * 0.001,
             "tpot_s": 0.02,
             "latency_s": 0.2 + repeat * 0.001,
@@ -1119,6 +1125,61 @@ def scheduler_trace_result(mode, repeat=1):
                     "p95_tpot_s": 0.02,
                     "p95_latency_s": 0.22 if optimized else 0.25,
                 }
+            },
+            "preemption": {
+                "all": {
+                    "request_count": 24,
+                    "preempted_request_count": 0 if optimized else 2,
+                    "preempted_request_rate": 0.0 if optimized else 2 / 24,
+                    "total_preemption_count": 0 if optimized else 2,
+                    "max_preemptions_per_request": 0 if optimized else 1,
+                    "total_preempted_token_progress": 0 if optimized else 128,
+                    "p95_preempted_token_progress": (
+                        54.4 if not optimized else 0.0
+                    ),
+                    "max_preempted_token_progress": 0 if optimized else 64,
+                },
+                "by_class": {
+                    workload_class: {
+                        "request_count": 8,
+                        "preempted_request_count": (
+                            2
+                            if not optimized and workload_class == "decode-heavy"
+                            else 0
+                        ),
+                        "preempted_request_rate": (
+                            0.25
+                            if not optimized and workload_class == "decode-heavy"
+                            else 0.0
+                        ),
+                        "total_preemption_count": (
+                            2
+                            if not optimized and workload_class == "decode-heavy"
+                            else 0
+                        ),
+                        "max_preemptions_per_request": (
+                            1
+                            if not optimized and workload_class == "decode-heavy"
+                            else 0
+                        ),
+                        "total_preempted_token_progress": (
+                            128
+                            if not optimized and workload_class == "decode-heavy"
+                            else 0
+                        ),
+                        "p95_preempted_token_progress": (
+                            64.0
+                            if not optimized and workload_class == "decode-heavy"
+                            else 0.0
+                        ),
+                        "max_preempted_token_progress": (
+                            64
+                            if not optimized and workload_class == "decode-heavy"
+                            else 0
+                        ),
+                    }
+                    for workload_class in classes
+                },
             },
             "step_samples": [
                 {
@@ -1193,6 +1254,24 @@ def test_scheduler_trace_rejects_unbalanced_classes_and_missing_metrics():
     assert not summary["runs"][0]["sample_contract_valid"]
     assert not summary["runs"][1]["scheduler_metrics_valid"]
     assert summary["preemption_count"] is None
+
+
+def test_scheduler_trace_rejects_inconsistent_request_preemption_summary():
+    results = [scheduler_trace_result("baseline", repeat) for repeat in (1, 2)]
+    results[0]["replay"]["preemption"]["all"][
+        "total_preemption_count"
+    ] = 99
+    results[1]["replay"]["request_samples"][0]["preemption_count"] = 2
+
+    summary = MODULE.summarize_scheduler_trace_repeats(
+        results,
+        expected_tp_size=4,
+        mode="baseline",
+    )
+
+    assert not summary["valid"]
+    assert not summary["runs"][0]["preemption_contract_valid"]
+    assert not summary["runs"][1]["scheduler_metrics_valid"]
 
 
 def load_fairness_repeats(root, mode):
