@@ -428,7 +428,8 @@ class LLMEngine:
         )
         if transfer_id in getattr(self, "_remote_prefill_receive_tokens", {}):
             raise ValueError("cache receive id is already active")
-        seq, session = self.scheduler.remote_prefills[transfer_id]
+        seq = self._require_live_remote_prefill_reservation(transfer_id)
+        _, session = self.scheduler.remote_prefills[transfer_id]
         expected_by_rank = self._remote_prefill_receive_expected_bytes[
             transfer_id
         ]

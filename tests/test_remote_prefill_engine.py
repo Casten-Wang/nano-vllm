@@ -412,6 +412,33 @@ def test_expired_reservation_cannot_start_receive():
     assert engine.metrics.to_dict()["remote_prefill_reservation_timed_out"] == 1
 
 
+def test_expired_reservation_cannot_enter_synchronous_receive():
+    engine = make_engine()
+    seq_id = engine.add_remote_prefill_request(
+        [1, 2, 3, 4],
+        SamplingParams(max_tokens=4),
+        transfer_id="request/attempt-1",
+        timeout_s=10.0,
+    )
+    _, session = engine.scheduler.remote_prefills["request/attempt-1"]
+    session.deadline = 0.0
+    engine.model_runner.call_rank_results.reset_mock()
+
+    with pytest.raises(TimeoutError, match="before receive started"):
+        engine.receive_remote_prefill(
+            "request/attempt-1",
+            9,
+            [("127.0.0.1", 20001)],
+        )
+
+    engine.model_runner.call_rank_results.assert_not_called()
+    assert not engine.scheduler.remote_prefills
+    assert not engine._remote_prefill_receive_reserved_staged_bytes
+    assert not engine._remote_prefill_receive_expected_bytes
+    assert [seq.seq_id for seq in engine.scheduler.waiting] == [seq_id]
+    assert engine.metrics.to_dict()["remote_prefill_reservation_timed_out"] == 1
+
+
 def test_expired_reservation_cannot_start_heterogeneous_receive():
     engine = make_engine(tensor_parallel_size=2)
     seq_id = engine.add_heterogeneous_remote_prefill_request(
@@ -579,7 +606,15 @@ def test_engine_receive_timeout_during_ack_releases_destination():
         timeout_s=10.0,
     )
     _, session = engine.scheduler.remote_prefills["request/attempt-1"]
-    session.deadline = 0.0
+    original = engine.model_runner.call_rank_results.side_effect
+
+    def expire_after_receive(method_name, *args):
+        result = original(method_name, *args)
+        if method_name == "receive_sequence_cache_from_endpoint":
+            session.deadline = 0.0
+        return result
+
+    engine.model_runner.call_rank_results.side_effect = expire_after_receive
 
     with pytest.raises(RuntimeError, match="terminal"):
         engine.receive_remote_prefill(
