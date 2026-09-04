@@ -135,6 +135,11 @@ def make_engine(*, tensor_parallel_size=1):
                 {"rank": rank, "staged_bytes": 100 + rank}
                 for rank in range(tensor_parallel_size)
             ]
+        if method_name == "send_sequence_cache_to_endpoint":
+            return [
+                {"rank": rank, "sent_bytes": 100 + rank}
+                for rank in range(tensor_parallel_size)
+            ]
         if method_name in {
             "poll_sequence_cache_send",
             "poll_heterogeneous_sequence_cache_send",
@@ -1327,6 +1332,35 @@ def test_engine_keeps_prefill_source_when_receiver_rejects_payload():
             seq.seq_id,
             "request/attempt-1",
             [("127.0.0.1", 20001)],
+        )
+
+    assert seq.status is SequenceStatus.RUNNING
+    assert list(engine.scheduler.running) == [seq]
+    assert engine.scheduler.block_manager.num_used_blocks == 1
+    assert engine.scheduler.state_manager.num_used_slots == 1
+
+
+def test_engine_keeps_prefill_source_when_sent_bytes_differ_from_preflight():
+    engine = make_engine(tensor_parallel_size=2)
+    seq = Sequence([1, 2, 3, 4], SamplingParams(max_tokens=4))
+    engine.scheduler.add(seq)
+    result = engine.scheduler.schedule()
+    engine.scheduler.postprocess_mixed(result, [9])
+    original = engine.model_runner.call_rank_results.side_effect
+
+    def truncate_one_rank(method_name, *args):
+        results = original(method_name, *args)
+        if method_name == "send_sequence_cache_to_endpoint":
+            results[1]["sent_bytes"] -= 1
+        return results
+
+    engine.model_runner.call_rank_results.side_effect = truncate_one_rank
+
+    with pytest.raises(RuntimeError, match="differ from the preflight"):
+        engine.send_remote_prefill(
+            seq.seq_id,
+            "request/attempt-1",
+            [("127.0.0.1", 20001), ("127.0.0.1", 20002)],
         )
 
     assert seq.status is SequenceStatus.RUNNING

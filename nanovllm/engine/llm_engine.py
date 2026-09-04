@@ -1248,11 +1248,15 @@ class LLMEngine:
             endpoints,
             timeout_s,
         )
-        _validate_rank_results(
+        sent_by_rank = _validate_rank_results(
             rank_results,
             self.config.tensor_parallel_size,
             "sent_bytes",
         )
+        if sent_by_rank != estimated_by_rank:
+            raise RuntimeError(
+                "cache send payload bytes differ from the preflight estimate"
+            )
         first_token_id = seq.completion_token_ids[0]
         self.scheduler.complete_remote_prefill_source(seq)
         return first_token_id
