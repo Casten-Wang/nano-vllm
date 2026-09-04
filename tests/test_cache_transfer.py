@@ -12,6 +12,7 @@ from nanovllm.engine.cache_transfer import (
     estimate_rank_cache_transfer_bytes,
     export_rank_cache,
     import_rank_cache,
+    validate_cache_transfer_payload_limit,
 )
 from nanovllm.engine.model_runner import (
     ModelRunner,
@@ -905,6 +906,15 @@ def test_transfer_session_rejects_invalid_timeout(timeout_s):
             started_at=10.0,
             timeout_s=timeout_s,
         )
+
+
+@pytest.mark.parametrize(
+    "max_payload_bytes",
+    [0, -1, 1.5, float("nan"), float("inf"), True, "1"],
+)
+def test_cache_transfer_rejects_invalid_payload_limit(max_payload_bytes):
+    with pytest.raises(ValueError, match="must be a positive integer"):
+        validate_cache_transfer_payload_limit(max_payload_bytes)
 
 
 def test_transfer_session_rank_failure_aborts_all_rank_commit():

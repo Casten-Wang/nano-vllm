@@ -15,6 +15,7 @@ from nanovllm.engine.scheduler import ScheduleResult, Scheduler
 from nanovllm.engine.cache_transfer import (
     CacheTransferPhase,
     CacheTransferSession,
+    validate_cache_transfer_payload_limit,
     validate_cache_transfer_timeout,
 )
 from nanovllm.engine.model_runner import CONTROL_STATUS_SIZE, ModelRunner
@@ -429,6 +430,9 @@ class LLMEngine:
         """Receive every TP rank, then atomically admit the request to decode."""
 
         timeout_s = validate_cache_transfer_timeout(timeout_s)
+        max_payload_bytes = validate_cache_transfer_payload_limit(
+            max_payload_bytes
+        )
         self._validate_token_ids(
             [first_token_id],
             value_name="first_token_id",
@@ -564,6 +568,9 @@ class LLMEngine:
         """Start CPU-side rank receives while decode scheduling continues."""
 
         timeout_s = validate_cache_transfer_timeout(timeout_s)
+        max_payload_bytes = validate_cache_transfer_payload_limit(
+            max_payload_bytes
+        )
         self._validate_token_ids(
             [first_token_id],
             value_name="first_token_id",
@@ -668,6 +675,9 @@ class LLMEngine:
         """Start source-peer receives without admitting decode early."""
 
         timeout_s = validate_cache_transfer_timeout(timeout_s)
+        max_payload_bytes = validate_cache_transfer_payload_limit(
+            max_payload_bytes
+        )
         self._validate_token_ids([first_token_id], value_name="first_token_id")
         source_sizes = getattr(
             self,

@@ -475,6 +475,42 @@ def test_remote_prefill_entrypoints_reject_invalid_timeout_before_work(operation
     assert engine.remote_prefill_capacity_snapshot() == capacity_before
 
 
+@pytest.mark.parametrize(
+    "operation",
+    [
+        lambda engine: engine.receive_remote_prefill(
+            "request/attempt-1",
+            9,
+            [("127.0.0.1", 20001)],
+            max_payload_bytes=float("nan"),
+        ),
+        lambda engine: engine.start_remote_prefill_receive(
+            "request/attempt-1",
+            9,
+            [("127.0.0.1", 20001)],
+            max_payload_bytes=float("nan"),
+        ),
+        lambda engine: engine.start_heterogeneous_remote_prefill_receive(
+            "request/attempt-1",
+            9,
+            [("127.0.0.1", 20001)],
+            max_payload_bytes=float("nan"),
+        ),
+    ],
+)
+def test_receive_entrypoints_reject_invalid_payload_limit_before_work(operation):
+    engine = make_engine()
+    capacity_before = engine.remote_prefill_capacity_snapshot()
+
+    with pytest.raises(ValueError, match="must be a positive integer"):
+        operation(engine)
+
+    engine.model_runner.call_rank_results.assert_not_called()
+    engine.model_runner.build_heterogeneous_cache_receive_plan_for_blocks.assert_not_called()
+    assert engine.scheduler.is_finished()
+    assert engine.remote_prefill_capacity_snapshot() == capacity_before
+
+
 def test_expired_reservation_cannot_start_receive():
     engine = make_engine()
     seq_id = engine.add_remote_prefill_request(

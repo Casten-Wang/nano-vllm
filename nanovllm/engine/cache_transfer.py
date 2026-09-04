@@ -37,6 +37,20 @@ def validate_cache_transfer_timeout(timeout_s: object) -> float:
     return validated_timeout_s
 
 
+def validate_cache_transfer_payload_limit(max_payload_bytes: object) -> int:
+    """Return one positive plain-integer wire allocation limit."""
+
+    if (
+        not isinstance(max_payload_bytes, int)
+        or isinstance(max_payload_bytes, bool)
+        or max_payload_bytes <= 0
+    ):
+        raise ValueError(
+            "cache transfer max_payload_bytes must be a positive integer"
+        )
+    return max_payload_bytes
+
+
 class HostStagingLease:
     """Exclusive ownership of one contiguous host staging allocation."""
 

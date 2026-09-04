@@ -17,6 +17,8 @@ from nanovllm.engine.cache_transfer import (
     HostStagingBufferPool,
     RankCacheTransfer,
     TRANSFER_FORMAT_VERSION,
+    validate_cache_transfer_payload_limit,
+    validate_cache_transfer_timeout,
 )
 from nanovllm.engine.heterogeneous_cache_transfer import (
     PeerCacheFragment,
@@ -221,8 +223,7 @@ def receive_rank_cache_transfer(
 ) -> RankCacheTransfer:
     """Receive and verify one payload into newly owned CPU tensors."""
 
-    if max_payload_bytes <= 0:
-        raise ValueError("max_payload_bytes must be positive")
+    max_payload_bytes = validate_cache_transfer_payload_limit(max_payload_bytes)
     prefix = _recv_bytes(sock, WIRE_HEADER.size)
     magic, wire_version, header_bytes, body_bytes = WIRE_HEADER.unpack(prefix)
     if magic != WIRE_MAGIC or wire_version != WIRE_VERSION:
@@ -409,12 +410,7 @@ def receive_peer_cache_fragment(
 ) -> PeerCacheFragment:
     """Receive and verify one heterogeneous-TP peer fragment."""
 
-    if (
-        not isinstance(max_payload_bytes, int)
-        or isinstance(max_payload_bytes, bool)
-        or max_payload_bytes <= 0
-    ):
-        raise ValueError("max_payload_bytes must be positive")
+    max_payload_bytes = validate_cache_transfer_payload_limit(max_payload_bytes)
     prefix = _recv_bytes(sock, WIRE_HEADER.size)
     magic, wire_version, header_bytes, body_bytes = WIRE_HEADER.unpack(prefix)
     if magic != PEER_WIRE_MAGIC or wire_version != PEER_WIRE_VERSION:
@@ -572,10 +568,10 @@ class RankCacheReceiver:
             raise ValueError("cache transfer receiver host must not be empty")
         if not isinstance(port, int) or isinstance(port, bool) or not 0 <= port <= 65535:
             raise ValueError("cache transfer receiver port must be in [0, 65535]")
-        if timeout_s <= 0:
-            raise ValueError("cache transfer receiver timeout must be positive")
-        if max_payload_bytes <= 0:
-            raise ValueError("max_payload_bytes must be positive")
+        timeout_s = validate_cache_transfer_timeout(timeout_s)
+        max_payload_bytes = validate_cache_transfer_payload_limit(
+            max_payload_bytes
+        )
         self.max_payload_bytes = max_payload_bytes
         self.host_staging_pool = host_staging_pool
         self._expected_header = {
@@ -607,8 +603,7 @@ class RankCacheReceiver:
         timeout_s: float = 30.0,
         on_verified: Callable[[RankCacheTransfer], None] | None = None,
     ) -> RankCacheTransfer:
-        if timeout_s <= 0:
-            raise ValueError("cache transfer connection timeout must be positive")
+        timeout_s = validate_cache_transfer_timeout(timeout_s)
         connection, _peer = self._listener.accept()
         with connection:
             connection.settimeout(timeout_s)
@@ -847,14 +842,11 @@ class PendingPeerCacheReceiveGroup:
             )
         ):
             raise ValueError("peer cache receiver expected peers are invalid")
-        if timeout_s <= 0:
-            raise ValueError("peer cache receiver timeout must be positive")
-        if (
-            not isinstance(max_payload_bytes, int)
-            or isinstance(max_payload_bytes, bool)
-            or max_payload_bytes <= 0
-            or max(expected_peer_bytes.values()) > max_payload_bytes
-        ):
+        timeout_s = validate_cache_transfer_timeout(timeout_s)
+        max_payload_bytes = validate_cache_transfer_payload_limit(
+            max_payload_bytes
+        )
+        if max(expected_peer_bytes.values()) > max_payload_bytes:
             raise ValueError("peer cache receiver payload limit is invalid")
         self._transfer_id = transfer_id
         self._dst_rank = dst_rank
@@ -1025,8 +1017,7 @@ class PendingPeerCacheSend:
             or not 1 <= port <= 65535
         ):
             raise ValueError("peer cache endpoint port must be in [1, 65535]")
-        if timeout_s <= 0:
-            raise ValueError("peer cache endpoint timeout must be positive")
+        timeout_s = validate_cache_transfer_timeout(timeout_s)
         self._host = host
         self._port = port
         self._fragment = fragment
@@ -1233,8 +1224,7 @@ class PendingRankCacheSend:
             raise ValueError("cache transfer endpoint host must not be empty")
         if not isinstance(port, int) or isinstance(port, bool) or not 1 <= port <= 65535:
             raise ValueError("cache transfer endpoint port must be in [1, 65535]")
-        if timeout_s <= 0:
-            raise ValueError("cache transfer endpoint timeout must be positive")
+        timeout_s = validate_cache_transfer_timeout(timeout_s)
         self._host = host
         self._port = port
         self._payload = payload
@@ -1407,8 +1397,7 @@ def send_rank_cache_to_endpoint(
         raise ValueError("cache transfer endpoint host must not be empty")
     if not isinstance(port, int) or isinstance(port, bool) or not 1 <= port <= 65535:
         raise ValueError("cache transfer endpoint port must be in [1, 65535]")
-    if timeout_s <= 0:
-        raise ValueError("cache transfer endpoint timeout must be positive")
+    timeout_s = validate_cache_transfer_timeout(timeout_s)
     deadline = monotonic() + timeout_s
     try:
         while True:
