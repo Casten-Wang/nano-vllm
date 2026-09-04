@@ -1,6 +1,8 @@
 from argparse import Namespace
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
+import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -311,6 +313,63 @@ def test_memory_preflight_covers_each_tp_rank():
     assert result["results"]["tp4"]["limiting_rank"] == 0
     assert result["results"]["tp4"]["shortfall_bytes_by_rank"] == [0] * 4
     assert len(result["results"]["tp8"]["memory_by_rank"]) == 8
+
+
+def test_gpu_memory_probe_records_rank_hardware_identity(monkeypatch):
+    memory = [(900, 1_000), (1_800, 2_000)]
+    properties = [
+        SimpleNamespace(
+            name="GPU-A",
+            major=8,
+            minor=0,
+            multi_processor_count=108,
+        ),
+        SimpleNamespace(
+            name="GPU-B",
+            major=9,
+            minor=0,
+            multi_processor_count=132,
+        ),
+    ]
+    cuda = SimpleNamespace(
+        device_count=lambda: 2,
+        mem_get_info=lambda index: memory[index],
+        get_device_properties=lambda index: properties[index],
+    )
+    monkeypatch.setitem(sys.modules, "torch", SimpleNamespace(cuda=cuda))
+
+    assert MODULE.gpu_memory_info_bytes() == [
+        {
+            "logical_device_index": 0,
+            "name": "GPU-A",
+            "compute_capability": [8, 0],
+            "multiprocessor_count": 108,
+            "free": 900,
+            "total": 1_000,
+        },
+        {
+            "logical_device_index": 1,
+            "name": "GPU-B",
+            "compute_capability": [9, 0],
+            "multiprocessor_count": 132,
+            "free": 1_800,
+            "total": 2_000,
+        },
+    ]
+
+
+def test_memory_preflight_rejects_partial_hardware_identity():
+    with pytest.raises(ValueError, match="hardware identity"):
+        MODULE.validate_memory_capacity(
+            {},
+            (1,),
+            [{"logical_device_index": 0, "free": 1, "total": 1}],
+            0,
+            1,
+            1,
+            1,
+            1.0,
+        )
 
 
 def test_memory_preflight_rejects_insufficient_rank():

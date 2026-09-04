@@ -254,20 +254,33 @@ def visible_gpu_count() -> int:
     return torch.cuda.device_count()
 
 
-def gpu_memory_info_bytes() -> list[dict[str, int]]:
+def gpu_memory_info_bytes() -> list[dict[str, object]]:
     import torch
 
-    return [
-        {"free": int(free), "total": int(total)}
-        for device in range(torch.cuda.device_count())
-        for free, total in (torch.cuda.mem_get_info(device),)
-    ]
+    result = []
+    for device in range(torch.cuda.device_count()):
+        free, total = torch.cuda.mem_get_info(device)
+        properties = torch.cuda.get_device_properties(device)
+        result.append(
+            {
+                "logical_device_index": device,
+                "name": str(properties.name),
+                "compute_capability": [
+                    int(properties.major),
+                    int(properties.minor),
+                ],
+                "multiprocessor_count": int(properties.multi_processor_count),
+                "free": int(free),
+                "total": int(total),
+            }
+        )
+    return result
 
 
 def validate_memory_capacity(
     audit_report: dict,
     tp_sizes: tuple[int, ...],
-    memory_by_device: list[dict[str, int]],
+    memory_by_device: list[dict[str, object]],
     headroom_bytes: int,
     max_num_seqs: int,
     num_seqs: int,
@@ -309,6 +322,33 @@ def validate_memory_capacity(
                 f"GPU rank {rank} memory information must satisfy "
                 "0 <= free <= total with a positive integer total"
             )
+        hardware_keys = {
+            "logical_device_index",
+            "name",
+            "compute_capability",
+            "multiprocessor_count",
+        }
+        if hardware_keys.intersection(item):
+            capability = item.get("compute_capability")
+            if (
+                item.get("logical_device_index") != rank
+                or not isinstance(item.get("name"), str)
+                or not item["name"]
+                or not isinstance(capability, list)
+                or len(capability) != 2
+                or any(
+                    not isinstance(value, int)
+                    or isinstance(value, bool)
+                    or value < 0
+                    for value in capability
+                )
+                or not isinstance(item.get("multiprocessor_count"), int)
+                or isinstance(item["multiprocessor_count"], bool)
+                or item["multiprocessor_count"] <= 0
+            ):
+                raise ValueError(
+                    f"GPU rank {rank} hardware identity is incomplete or invalid"
+                )
     if headroom_bytes < 0:
         raise ValueError("memory headroom must be non-negative")
     if max_num_seqs <= 0:
