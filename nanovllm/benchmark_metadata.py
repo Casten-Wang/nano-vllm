@@ -374,6 +374,51 @@ def validate_execution_stats(
     }
 
 
+def validate_execution_stats_by_rank(
+    execution_stats_by_rank: object,
+    *,
+    expected_world_size: int,
+    required_paths: list[str] | tuple[str, ...] = (),
+) -> dict:
+    """Validate complete, uniquely identified execution evidence for every rank."""
+
+    if (
+        not isinstance(expected_world_size, int)
+        or isinstance(expected_world_size, bool)
+        or expected_world_size <= 0
+    ):
+        raise ValueError("expected_world_size must be a positive integer")
+    if not isinstance(execution_stats_by_rank, list):
+        raise ValueError("execution_stats_by_rank must be a list")
+    by_rank = {}
+    for stats in execution_stats_by_rank:
+        if not isinstance(stats, dict):
+            raise ValueError("each rank's execution stats must be a dictionary")
+        rank = stats.get("rank")
+        if (
+            not isinstance(rank, int)
+            or isinstance(rank, bool)
+            or not 0 <= rank < expected_world_size
+            or rank in by_rank
+        ):
+            raise ValueError("execution stats contain an invalid or duplicate rank")
+        by_rank[rank] = {
+            "rank": rank,
+            **validate_execution_stats(stats, required_paths),
+        }
+    expected_ranks = set(range(expected_world_size))
+    if set(by_rank) != expected_ranks:
+        missing = sorted(expected_ranks - set(by_rank))
+        raise ValueError(f"execution stats are missing ranks: {missing}")
+    validations = [by_rank[rank] for rank in range(expected_world_size)]
+    invalid_ranks = [item["rank"] for item in validations if not item["valid"]]
+    return {
+        "valid": not invalid_ranks,
+        "invalid_ranks": invalid_ranks,
+        "by_rank": validations,
+    }
+
+
 def validate_generation_completion(
     output_lengths: list[int],
     *,

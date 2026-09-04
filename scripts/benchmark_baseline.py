@@ -21,6 +21,7 @@ from nanovllm.benchmark_metadata import (
     model_config_metadata,
     token_ids_digest,
     validate_execution_stats,
+    validate_execution_stats_by_rank,
     validate_generation_completion,
 )
 
@@ -327,22 +328,17 @@ def main() -> None:
         item["peak_reserved_bytes"] for item in cuda_memory_by_rank
     )
     required_paths = [item.strip() for item in args.require_paths.split(",") if item.strip()]
-    execution_validation_by_rank = [
-        {
-            "rank": item["rank"],
-            **validate_execution_stats(item, required_paths),
-        }
-        for item in execution_stats_by_rank
-    ]
-    execution_validation = dict(execution_validation_by_rank[0])
-    execution_validation["valid"] = all(
-        item["valid"] for item in execution_validation_by_rank
+    ranked_execution_validation = validate_execution_stats_by_rank(
+        execution_stats_by_rank,
+        expected_world_size=args.tensor_parallel_size,
+        required_paths=required_paths,
     )
-    execution_validation["all_ranks_valid"] = execution_validation["valid"]
-    execution_validation["invalid_ranks"] = [
-        item["rank"]
-        for item in execution_validation_by_rank
-        if not item["valid"]
+    execution_validation_by_rank = ranked_execution_validation["by_rank"]
+    execution_validation = dict(execution_validation_by_rank[0])
+    execution_validation["valid"] = ranked_execution_validation["valid"]
+    execution_validation["all_ranks_valid"] = ranked_execution_validation["valid"]
+    execution_validation["invalid_ranks"] = ranked_execution_validation[
+        "invalid_ranks"
     ]
     generation_validation = validate_generation_completion(
         [len(output["token_ids"]) for output in outputs],

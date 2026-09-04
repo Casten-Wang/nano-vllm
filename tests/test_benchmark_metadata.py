@@ -318,6 +318,56 @@ class BenchmarkMetadataTest(unittest.TestCase):
         self.assertEqual(result["dropped_execution_signature_steps"], 2)
         self.assertIn("capacity was exceeded", result["reason"])
 
+    def test_ranked_execution_validation_requires_every_rank(self):
+        stats = {
+            "model_path_counts": {"decode_eager": 3},
+            "attention_path_counts": {"float_flash_decode": 3},
+        }
+        result = module.validate_execution_stats_by_rank(
+            [{"rank": 1, **stats}, {"rank": 0, **stats}],
+            expected_world_size=2,
+            required_paths=["decode_eager"],
+        )
+
+        self.assertTrue(result["valid"])
+        self.assertEqual([item["rank"] for item in result["by_rank"]], [0, 1])
+        self.assertEqual(result["invalid_ranks"], [])
+
+        with self.assertRaisesRegex(ValueError, "missing ranks: \\[1\\]"):
+            module.validate_execution_stats_by_rank(
+                [{"rank": 0, **stats}],
+                expected_world_size=2,
+            )
+
+    def test_ranked_execution_validation_surfaces_one_invalid_rank(self):
+        result = module.validate_execution_stats_by_rank(
+            [
+                {
+                    "rank": 0,
+                    "model_path_counts": {"decode_eager": 1},
+                    "attention_path_counts": {"float_flash_decode": 1},
+                },
+                {
+                    "rank": 1,
+                    "model_path_counts": {},
+                    "attention_path_counts": {},
+                },
+            ],
+            expected_world_size=2,
+            required_paths=["decode_eager"],
+        )
+
+        self.assertFalse(result["valid"])
+        self.assertEqual(result["invalid_ranks"], [1])
+        self.assertEqual(result["by_rank"][1]["reason"], "no execution path was recorded")
+
+    def test_ranked_execution_validation_rejects_duplicate_rank(self):
+        with self.assertRaisesRegex(ValueError, "invalid or duplicate rank"):
+            module.validate_execution_stats_by_rank(
+                [{"rank": 0}, {"rank": 0}],
+                expected_world_size=2,
+            )
+
     def test_generation_completion_accepts_exact_finished_workload(self):
         result = module.validate_generation_completion(
             [32, 32, 32],
