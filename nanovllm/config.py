@@ -31,27 +31,28 @@ def _require_bool(value: object, name: str) -> None:
 
 def resolve_eos_token_ids(
     model: str,
-    fallback: int | list[int] | tuple[int, ...] | None,
+    model_eos: int | list[int] | tuple[int, ...] | None,
+    tokenizer_eos: int | list[int] | tuple[int, ...] | None,
 ) -> tuple[int, ...]:
-    """Resolve every generation EOS token from a local model directory."""
+    """Resolve the union of checkpoint, model, and tokenizer EOS ids."""
 
     path = Path(model) / "generation_config.json"
-    value = fallback
+    generation_eos = None
     if path.is_file():
         with path.open(encoding="utf-8") as handle:
-            configured = json.load(handle).get("eos_token_id")
-        if configured is not None:
-            value = configured
-    if value is None:
-        return ()
-    if isinstance(value, bool):
-        raise ValueError("eos_token_id must contain integer token ids")
-    if isinstance(value, int):
-        values = (value,)
-    elif isinstance(value, (list, tuple)) and value:
-        values = tuple(value)
-    else:
-        raise ValueError("eos_token_id must be an integer or non-empty list")
+            generation_eos = json.load(handle).get("eos_token_id")
+    values = []
+    for value in (generation_eos, model_eos, tokenizer_eos):
+        if value is None:
+            continue
+        if isinstance(value, bool):
+            raise ValueError("eos_token_id must contain integer token ids")
+        if isinstance(value, int):
+            values.append(value)
+        elif isinstance(value, (list, tuple)):
+            values.extend(value)
+        else:
+            raise ValueError("eos_token_id must be an integer or list")
     if any(
         isinstance(token_id, bool) or not isinstance(token_id, int)
         for token_id in values

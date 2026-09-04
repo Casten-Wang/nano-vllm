@@ -545,14 +545,16 @@ def test_generation_config_resolves_all_eos_tokens(tmp_path):
         encoding="utf-8",
     )
 
-    assert config_module.resolve_eos_token_ids(str(tmp_path), 7) == (
+    assert config_module.resolve_eos_token_ids(str(tmp_path), 7, 8) == (
         248046,
         248044,
+        7,
+        8,
     )
 
 
-def test_generation_config_falls_back_to_tokenizer_eos(tmp_path):
-    assert config_module.resolve_eos_token_ids(str(tmp_path), 7) == (7,)
+def test_generation_config_combines_model_and_tokenizer_eos(tmp_path):
+    assert config_module.resolve_eos_token_ids(str(tmp_path), [7, 8], 8) == (7, 8)
 
 
 def test_generation_config_null_falls_back_to_tokenizer_eos(tmp_path):
@@ -561,14 +563,23 @@ def test_generation_config_null_falls_back_to_tokenizer_eos(tmp_path):
         encoding="utf-8",
     )
 
-    assert config_module.resolve_eos_token_ids(str(tmp_path), 7) == (7,)
+    assert config_module.resolve_eos_token_ids(str(tmp_path), 6, 7) == (6, 7)
 
 
 def test_model_without_eos_uses_empty_stop_set(tmp_path):
-    assert config_module.resolve_eos_token_ids(str(tmp_path), None) == ()
+    assert config_module.resolve_eos_token_ids(str(tmp_path), None, None) == ()
 
 
-@pytest.mark.parametrize("value", [[], -1, [1, -2], True, [1, "2"]])
+def test_empty_generation_eos_keeps_other_sources(tmp_path):
+    (tmp_path / "generation_config.json").write_text(
+        json.dumps({"eos_token_id": []}),
+        encoding="utf-8",
+    )
+
+    assert config_module.resolve_eos_token_ids(str(tmp_path), 6, 7) == (6, 7)
+
+
+@pytest.mark.parametrize("value", [-1, [1, -2], True, [1, "2"], "1"])
 def test_invalid_generation_eos_metadata_is_rejected(tmp_path, value):
     (tmp_path / "generation_config.json").write_text(
         json.dumps({"eos_token_id": value}),
@@ -576,7 +587,7 @@ def test_invalid_generation_eos_metadata_is_rejected(tmp_path, value):
     )
 
     with pytest.raises(ValueError, match="eos_token_id"):
-        config_module.resolve_eos_token_ids(str(tmp_path), 7)
+        config_module.resolve_eos_token_ids(str(tmp_path), 7, 8)
 
 
 def test_malformed_generation_config_is_not_silently_ignored(tmp_path):
@@ -586,7 +597,7 @@ def test_malformed_generation_config_is_not_silently_ignored(tmp_path):
     )
 
     with pytest.raises(json.JSONDecodeError):
-        config_module.resolve_eos_token_ids(str(tmp_path), 7)
+        config_module.resolve_eos_token_ids(str(tmp_path), 7, 8)
 
 
 def test_sampling_chunk_size_must_be_positive(monkeypatch, tmp_path):

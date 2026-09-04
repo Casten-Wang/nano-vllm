@@ -239,6 +239,7 @@ class LLMEngine:
         self.tokenizer = AutoTokenizer.from_pretrained(config.model, use_fast=True)
         config.eos = resolve_eos_token_ids(
             config.model,
+            getattr(config.model_config, "eos_token_id", None),
             self.tokenizer.eos_token_id,
         )
         self.scheduler = Scheduler(config)
