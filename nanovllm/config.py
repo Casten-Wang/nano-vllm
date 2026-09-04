@@ -15,7 +15,7 @@ from nanovllm.models.model_spec import (
 
 def resolve_eos_token_ids(
     model: str,
-    fallback: int | list[int] | tuple[int, ...],
+    fallback: int | list[int] | tuple[int, ...] | None,
 ) -> tuple[int, ...]:
     """Resolve every generation EOS token from a local model directory."""
 
@@ -23,7 +23,11 @@ def resolve_eos_token_ids(
     value = fallback
     if path.is_file():
         with path.open(encoding="utf-8") as handle:
-            value = json.load(handle).get("eos_token_id", fallback)
+            configured = json.load(handle).get("eos_token_id")
+        if configured is not None:
+            value = configured
+    if value is None:
+        return ()
     if isinstance(value, bool):
         raise ValueError("eos_token_id must contain integer token ids")
     if isinstance(value, int):
@@ -37,6 +41,8 @@ def resolve_eos_token_ids(
         for token_id in values
     ):
         raise ValueError("eos_token_id must contain integer token ids")
+    if any(token_id < 0 for token_id in values):
+        raise ValueError("eos_token_id must contain non-negative token ids")
     return tuple(dict.fromkeys(values))
 
 
