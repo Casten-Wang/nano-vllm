@@ -22,7 +22,8 @@ from nanovllm.benchmark_metadata import (
     checkpoint_manifest_metadata,
     collect_benchmark_metadata,
     model_config_metadata,
-    validate_execution_stats,
+    validate_execution_stats_by_rank,
+    validate_ranked_records,
 )
 from nanovllm.scheduler_workload import (
     PROFILE_NAMES,
@@ -238,17 +239,45 @@ def main() -> None:
     final_manifest = checkpoint_manifest_metadata(args.model)
     if final_manifest["digest"] != checkpoint_manifest["digest"]:
         raise RuntimeError("checkpoint files changed during the benchmark run")
-    execution_stats = llm.model_runner.call("get_execution_stats")
+    execution_stats_by_rank = llm.model_runner.call("get_execution_stats_by_rank")
     required_paths = [
         item.strip() for item in args.require_paths.split(",") if item.strip()
     ]
-    execution_validation = validate_execution_stats(
-        execution_stats,
-        required_paths,
+    ranked_execution_validation = validate_execution_stats_by_rank(
+        execution_stats_by_rank,
+        expected_world_size=args.tensor_parallel_size,
+        required_paths=required_paths,
     )
+    execution_stats_by_rank = validate_ranked_records(
+        execution_stats_by_rank,
+        expected_world_size=args.tensor_parallel_size,
+        record_name="execution_stats_by_rank",
+    )
+    execution_stats = execution_stats_by_rank[0]
+    execution_validation_by_rank = ranked_execution_validation["by_rank"]
+    execution_validation = dict(execution_validation_by_rank[0])
+    execution_validation["valid"] = ranked_execution_validation["valid"]
+    execution_validation["all_ranks_valid"] = ranked_execution_validation["valid"]
+    execution_validation["invalid_ranks"] = ranked_execution_validation[
+        "invalid_ranks"
+    ]
     cuda_memory_by_rank = llm.model_runner.call("get_cuda_memory_stats")
     runtime_buffer_by_rank = llm.model_runner.call("get_runtime_buffer_stats_by_rank")
     kv_cache_by_rank = llm.model_runner.call("get_kv_cache_stats_by_rank")
+    ranked_records = {
+        "cuda_memory_by_rank": cuda_memory_by_rank,
+        "runtime_buffer_storage_by_rank": runtime_buffer_by_rank,
+        "kv_cache_storage_by_rank": kv_cache_by_rank,
+    }
+    for name, records in ranked_records.items():
+        ranked_records[name] = validate_ranked_records(
+            records,
+            expected_world_size=args.tensor_parallel_size,
+            record_name=name,
+        )
+    cuda_memory_by_rank = ranked_records["cuda_memory_by_rank"]
+    runtime_buffer_by_rank = ranked_records["runtime_buffer_storage_by_rank"]
+    kv_cache_by_rank = ranked_records["kv_cache_storage_by_rank"]
     result = {
         **collect_benchmark_metadata(),
         "model": args.model,
@@ -302,9 +331,11 @@ def main() -> None:
         "kv_cache_storage_by_rank": kv_cache_by_rank,
         "prefix_cache": llm.scheduler.block_manager.cache_stats(),
         "execution_stats": execution_stats,
+        "execution_stats_by_rank": execution_stats_by_rank,
         "shape_trace": llm.model_runner.call("get_shape_trace"),
         "cudagraph_capture_stats": llm.model_runner.call("get_cudagraph_capture_stats"),
         "execution_validation": execution_validation,
+        "execution_validation_by_rank": execution_validation_by_rank,
     }
     output = args.output
     if output is None:

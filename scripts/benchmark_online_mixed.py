@@ -21,8 +21,9 @@ from nanovllm.benchmark_metadata import (
     kv_cache_storage_metadata,
     model_config_metadata,
     token_ids_digest,
-    validate_execution_stats,
+    validate_execution_stats_by_rank,
     validate_generation_completion,
+    validate_ranked_records,
 )
 
 
@@ -348,7 +349,7 @@ def main() -> None:
         )
         return ordered[index]
 
-    execution_stats = llm.model_runner.call("get_execution_stats")
+    execution_stats_by_rank = llm.model_runner.call("get_execution_stats_by_rank")
     shape_trace = llm.model_runner.call("get_shape_trace")
     cudagraph_capture_stats = llm.model_runner.call("get_cudagraph_capture_stats")
     cuda_memory_by_rank = llm.model_runner.call("get_cuda_memory_stats")
@@ -359,6 +360,22 @@ def main() -> None:
         "get_runtime_buffer_stats_by_rank"
     )
     kv_cache_by_rank = llm.model_runner.call("get_kv_cache_stats_by_rank")
+    ranked_records = {
+        "cuda_memory_by_rank": cuda_memory_by_rank,
+        "recurrent_state_storage_by_rank": recurrent_state_by_rank,
+        "runtime_buffer_storage_by_rank": runtime_buffer_by_rank,
+        "kv_cache_storage_by_rank": kv_cache_by_rank,
+    }
+    for name, records in ranked_records.items():
+        ranked_records[name] = validate_ranked_records(
+            records,
+            expected_world_size=args.tensor_parallel_size,
+            record_name=name,
+        )
+    cuda_memory_by_rank = ranked_records["cuda_memory_by_rank"]
+    recurrent_state_by_rank = ranked_records["recurrent_state_storage_by_rank"]
+    runtime_buffer_by_rank = ranked_records["runtime_buffer_storage_by_rank"]
+    kv_cache_by_rank = ranked_records["kv_cache_storage_by_rank"]
     peak_allocated_bytes = max(
         item["peak_allocated_bytes"] for item in cuda_memory_by_rank
     )
@@ -366,7 +383,24 @@ def main() -> None:
         item["peak_reserved_bytes"] for item in cuda_memory_by_rank
     )
     required_paths = [item.strip() for item in args.require_paths.split(",") if item.strip()]
-    execution_validation = validate_execution_stats(execution_stats, required_paths)
+    ranked_execution_validation = validate_execution_stats_by_rank(
+        execution_stats_by_rank,
+        expected_world_size=args.tensor_parallel_size,
+        required_paths=required_paths,
+    )
+    execution_stats_by_rank = validate_ranked_records(
+        execution_stats_by_rank,
+        expected_world_size=args.tensor_parallel_size,
+        record_name="execution_stats_by_rank",
+    )
+    execution_stats = execution_stats_by_rank[0]
+    execution_validation_by_rank = ranked_execution_validation["by_rank"]
+    execution_validation = dict(execution_validation_by_rank[0])
+    execution_validation["valid"] = ranked_execution_validation["valid"]
+    execution_validation["all_ranks_valid"] = ranked_execution_validation["valid"]
+    execution_validation["invalid_ranks"] = ranked_execution_validation[
+        "invalid_ranks"
+    ]
     expected_requests = args.initial_seqs + args.injected_seqs
     generation_validation = validate_generation_completion(
         list(finished_output_lengths.values()),
@@ -474,9 +508,11 @@ def main() -> None:
         "metrics": llm.metrics.to_dict(),
         "prefix_cache": llm.scheduler.block_manager.cache_stats(),
         "execution_stats": execution_stats,
+        "execution_stats_by_rank": execution_stats_by_rank,
         "shape_trace": shape_trace,
         "cudagraph_capture_stats": cudagraph_capture_stats,
         "execution_validation": execution_validation,
+        "execution_validation_by_rank": execution_validation_by_rank,
         "generation_validation": generation_validation,
     }
 
