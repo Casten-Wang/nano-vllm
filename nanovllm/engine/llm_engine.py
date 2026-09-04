@@ -24,6 +24,9 @@ from nanovllm.engine.metrics import EngineMetrics
 from nanovllm.engine.remote_prefill_router import RemotePrefillDemand
 
 
+MAX_RETAINED_REMOTE_PREFILL_ERRORS = 256
+
+
 def _find_free_port() -> int:
     """Ask the OS for an unused local TCP port for the NCCL rendezvous."""
 
@@ -1103,7 +1106,7 @@ class LLMEngine:
                         transfer_id,
                         f"batched cache receive poll failed: {exc}",
                     )
-                    errors[transfer_id] = str(exc)
+                    self._record_remote_prefill_error(errors, transfer_id, exc)
         for transfer_id in transfer_ids:
             if transfer_id not in getattr(self, "_remote_prefill_receive_tokens", {}):
                 continue
@@ -1124,7 +1127,7 @@ class LLMEngine:
                         transfer_id,
                         f"cache receive poll failed: {exc}",
                     )
-                errors[transfer_id] = str(exc)
+                self._record_remote_prefill_error(errors, transfer_id, exc)
 
     def _poll_remote_prefill_reservations(self) -> list[Sequence]:
         """Expire unstarted destinations and release engine-owned capacity."""
@@ -1282,6 +1285,30 @@ class LLMEngine:
             ),
         })
         return snapshot
+
+    @staticmethod
+    def _record_remote_prefill_error(
+        errors: dict[str, str],
+        transfer_id: str,
+        error: BaseException,
+    ) -> None:
+        """Retain recent asynchronous failures without unbounded growth."""
+
+        errors.pop(transfer_id, None)
+        errors[transfer_id] = str(error)
+        while len(errors) > MAX_RETAINED_REMOTE_PREFILL_ERRORS:
+            errors.pop(next(iter(errors)))
+
+    def drain_remote_prefill_errors(self) -> dict[str, dict[str, str]]:
+        """Return and clear asynchronous transfer failures since the last drain."""
+
+        result = {
+            "receive": dict(self._remote_prefill_receive_errors),
+            "send": dict(self._remote_prefill_send_errors),
+        }
+        self._remote_prefill_receive_errors.clear()
+        self._remote_prefill_send_errors.clear()
+        return result
 
     def _remote_prefill_block_count(self, num_prompt_tokens: int) -> int:
         """Validate a prompt length once for every preflight path."""
@@ -1736,7 +1763,11 @@ class LLMEngine:
         except BaseException as exc:
             if transfer_id in getattr(self, "_remote_prefill_send_started_at", {}):
                 self._abort_remote_prefill_send(transfer_id, outcome="failed")
-            getattr(self, "_remote_prefill_send_errors", {})[transfer_id] = str(exc)
+            self._record_remote_prefill_error(
+                getattr(self, "_remote_prefill_send_errors", {}),
+                transfer_id,
+                exc,
+            )
             raise
 
     def _poll_remote_prefill_sends(self) -> None:
@@ -1772,7 +1803,11 @@ class LLMEngine:
                         transfer_id,
                         outcome="failed",
                     )
-                    self._remote_prefill_send_errors[transfer_id] = str(exc)
+                    self._record_remote_prefill_error(
+                        self._remote_prefill_send_errors,
+                        transfer_id,
+                        exc,
+                    )
         for transfer_id in transfer_ids:
             if transfer_id not in getattr(self, "_remote_prefill_send_started_at", {}):
                 continue
@@ -1793,7 +1828,11 @@ class LLMEngine:
                         transfer_id,
                         outcome="failed",
                     )
-                self._remote_prefill_send_errors[transfer_id] = str(exc)
+                self._record_remote_prefill_error(
+                    self._remote_prefill_send_errors,
+                    transfer_id,
+                    exc,
+                )
 
     def step(self):
         self._poll_remote_prefill_receives()

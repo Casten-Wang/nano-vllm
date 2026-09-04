@@ -6,6 +6,7 @@ import pytest
 
 from nanovllm.engine.llm_engine import (
     LLMEngine,
+    MAX_RETAINED_REMOTE_PREFILL_ERRORS,
     _validate_cache_transfer_endpoints,
 )
 from nanovllm.engine.metrics import EngineMetrics
@@ -253,6 +254,56 @@ def make_engine(*, tensor_parallel_size=1):
     engine._test_send_state = send_state
     engine.metrics = EngineMetrics()
     return engine
+
+
+def test_remote_prefill_errors_are_bounded_and_consumed_once():
+    engine = make_engine()
+    for index in range(MAX_RETAINED_REMOTE_PREFILL_ERRORS + 2):
+        engine._record_remote_prefill_error(
+            engine._remote_prefill_receive_errors,
+            f"receive-{index}",
+            RuntimeError(f"receive failure {index}"),
+        )
+    engine._record_remote_prefill_error(
+        engine._remote_prefill_send_errors,
+        "send-1",
+        RuntimeError("send failure"),
+    )
+
+    failures = engine.drain_remote_prefill_errors()
+
+    assert len(failures["receive"]) == MAX_RETAINED_REMOTE_PREFILL_ERRORS
+    assert "receive-0" not in failures["receive"]
+    assert "receive-1" not in failures["receive"]
+    newest = f"receive-{MAX_RETAINED_REMOTE_PREFILL_ERRORS + 1}"
+    assert failures["receive"][newest] == (
+        f"receive failure {MAX_RETAINED_REMOTE_PREFILL_ERRORS + 1}"
+    )
+    assert failures["send"] == {"send-1": "send failure"}
+    assert engine.drain_remote_prefill_errors() == {"receive": {}, "send": {}}
+
+
+def test_background_receive_failure_is_available_to_controller():
+    engine = make_engine()
+    seq_id = engine.add_remote_prefill_request(
+        [1, 2, 3, 4],
+        SamplingParams(max_tokens=4),
+        transfer_id="request/attempt-1",
+    )
+    engine.start_remote_prefill_receive(
+        "request/attempt-1",
+        9,
+        [("127.0.0.1", 20001)],
+    )
+    engine._test_async_state.update(value="failed", error="checksum mismatch")
+
+    engine._poll_remote_prefill_receives()
+
+    assert engine.scheduler.waiting[0].seq_id == seq_id
+    assert engine.drain_remote_prefill_errors() == {
+        "receive": {"request/attempt-1": "rank 0: checksum mismatch"},
+        "send": {},
+    }
 
 
 @pytest.mark.parametrize(
@@ -1560,6 +1611,24 @@ def test_async_send_failure_restores_source_at_original_running_position():
     assert first.block_table
     assert first.state_slot is not None
     assert engine.metrics.to_dict()["remote_prefill_send_failed"] == 1
+
+
+def test_background_send_failure_is_available_to_controller():
+    engine = make_engine(tensor_parallel_size=2)
+    seq = _prepare_remote_prefill_source(engine, 1)
+    engine.start_remote_prefill_send(
+        seq.seq_id,
+        "request/attempt-1",
+        [("127.0.0.1", 20001), ("127.0.0.1", 20002)],
+    )
+    engine._test_send_state.update(value="failed", error="receiver rejected")
+
+    engine._poll_remote_prefill_sends()
+
+    assert seq.status is SequenceStatus.RUNNING
+    failures = engine.drain_remote_prefill_errors()
+    assert failures["receive"] == {}
+    assert "receiver rejected" in failures["send"]["request/attempt-1"]
 
 
 def test_async_send_start_aborts_when_staged_size_differs_from_estimate():
