@@ -3228,6 +3228,7 @@ class ModelRunner:
             "supported": True,
             "max_batch_size": max_bs,
             "max_num_blocks": max_num_blocks,
+            "kv_padding_slot": -1,
             "hybrid_recurrent_state": (
                 config.model_spec is not None and config.model_spec.is_hybrid
             ),

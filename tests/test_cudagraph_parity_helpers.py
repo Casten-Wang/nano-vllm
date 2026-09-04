@@ -14,6 +14,22 @@ SPEC.loader.exec_module(module)
 
 
 class CudaGraphParityHelperTest(unittest.TestCase):
+    def test_capture_safety_requires_supported_minus_one_padding(self):
+        self.assertTrue(
+            module.has_isolated_kv_capture(
+                {"supported": True, "kv_padding_slot": -1}
+            )
+        )
+        for stats in (
+            {},
+            {"supported": False, "kv_padding_slot": -1},
+            {"supported": True, "kv_padding_slot": 0},
+        ):
+            with self.subTest(stats=stats):
+                self.assertFalse(
+                    module.has_isolated_kv_capture(stats)
+                )
+
     def test_extracts_recorded_state_access_paths(self):
         artifact = {
             "shape_trace": {

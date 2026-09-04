@@ -86,6 +86,15 @@ def observed_state_access_paths(artifact: dict) -> set[str]:
     }
 
 
+def has_isolated_kv_capture(capture_stats: dict) -> bool:
+    """Require capture padding to use the KV store kernel's skip sentinel."""
+
+    return (
+        capture_stats.get("supported") is True
+        and capture_stats.get("kv_padding_slot") == -1
+    )
+
+
 def run_worker(args: argparse.Namespace) -> None:
     import torch
 
@@ -658,6 +667,11 @@ def main() -> None:
         and scenario["graph_capture_stats"].get("recurrent_padding_slot") is not None
         for scenario in scenario_results
     )
+    kv_capture_isolated = all(
+        has_isolated_kv_capture(scenario["graph_capture_stats"])
+        for scenario in scenario_results
+    )
+    all_passed = all_passed and kv_capture_isolated
     summary = {
         **collect_benchmark_metadata(torch),
         "passed": all_passed,
@@ -672,6 +686,7 @@ def main() -> None:
         "atol": args.atol,
         "rtol": args.rtol,
         "hybrid_graph_captured": hybrid_graph_captured,
+        "kv_capture_isolated": kv_capture_isolated,
         "scenarios": scenario_results,
     }
     summary_path = run_dir / "summary.json"

@@ -4523,6 +4523,10 @@ def summarize(run_dir: Path, run_id: str) -> dict:
                 "hybrid_graph_captured",
                 False,
             ),
+            "kv_capture_isolated": result.get(
+                "kv_capture_isolated",
+                False,
+            ),
             "kv_cache_dtype": result["kv_cache_dtype"],
             "expected_attention_path": expected_attention_path,
             "attention_path_observed": all(
@@ -4566,6 +4570,9 @@ def summarize(run_dir: Path, run_id: str) -> dict:
             "passed": result["passed"],
             "hybrid_graph_captured": result.get(
                 "hybrid_graph_captured", False
+            ),
+            "kv_capture_isolated": result.get(
+                "kv_capture_isolated", False
             ),
             "decode_conv_backend": result.get(
                 "qwen35_decode_conv_backend"
@@ -4630,6 +4637,7 @@ def summarize(run_dir: Path, run_id: str) -> dict:
         and all(
             item["passed"]
             and item["hybrid_graph_captured"]
+            and item["kv_capture_isolated"]
             and item["kv_cache_dtype"] == "int8"
             and item["attention_path_observed"]
             and item["scratch_isolation_observed"]
@@ -4646,6 +4654,7 @@ def summarize(run_dir: Path, run_id: str) -> dict:
         and all(
             item["passed"]
             and item["hybrid_graph_captured"]
+            and item["kv_capture_isolated"]
             and item["decode_conv_backend"] == "channel_accumulate"
             for cases in decode_conv_cudagraph.values()
             for item in cases.values()

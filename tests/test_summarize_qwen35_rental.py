@@ -1119,6 +1119,7 @@ def write_cudagraph_case(
             "kv_cache_dtype": "int8",
             "passed": True,
             "hybrid_graph_captured": True,
+            "kv_capture_isolated": True,
             "qwen35_decode_conv_backend": decode_conv_backend,
             "scenarios": [
                 {
@@ -2820,6 +2821,17 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     assert report["hybrid_cudagraph"]["by_tp"]["tp4"]["short"][
         "scratch_isolation_observed"
     ]
+    assert report["hybrid_cudagraph"]["by_tp"]["tp4"]["short"][
+        "kv_capture_isolated"
+    ]
+    graph_path = tmp_path / "cudagraph/tp4/short/run_1/summary.json"
+    graph_result = json.loads(graph_path.read_text())
+    graph_result.pop("kv_capture_isolated")
+    write(graph_path, graph_result)
+    graph_failure = MODULE.summarize(tmp_path, run_id)
+    assert not graph_failure["hybrid_cudagraph"]["all_tp_passed"]
+    graph_result["kv_capture_isolated"] = True
+    write(graph_path, graph_result)
     assert report["evidence"]["long_prefill_kernel_evidence"]
     assert report["evidence"]["mixed_workload_evidence"]
     assert report["evidence"]["mixed_moe_dispatch_evidence"]
