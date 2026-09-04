@@ -1080,6 +1080,7 @@ def manifest_plan(
         "fp8_runtime_backend": getattr(
             args, "fp8_runtime_backend", "reference"
         ),
+        "source_commit": source_commit(),
         "source_tree_sha256": source_tree_sha256(),
         "stages": [
             {"name": name, "command": command}
@@ -1101,6 +1102,24 @@ def visible_gpu_count() -> int:
     import torch
 
     return torch.cuda.device_count()
+
+
+def source_commit() -> str:
+    """Return the exact committed source revision used by a validation run."""
+
+    try:
+        value = subprocess.check_output(
+            ["git", "-C", str(ROOT), "rev-parse", "--verify", "HEAD"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise ValueError("cannot resolve validation source commit") from error
+    if len(value) != 40 or any(
+        character not in "0123456789abcdef" for character in value
+    ):
+        raise ValueError("validation source commit is not a full Git SHA")
+    return value
 
 
 def write_manifest(path: Path, manifest: dict) -> None:
@@ -1379,6 +1398,7 @@ def prepare_manifest(
             "fp8_runtime_backend": manifest.get(
                 "fp8_runtime_backend", "reference"
             ),
+            "source_commit": manifest.get("source_commit"),
             "source_tree_sha256": manifest.get("source_tree_sha256"),
             "stages": manifest.get("stages"),
         } != plan:

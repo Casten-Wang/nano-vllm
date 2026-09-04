@@ -588,6 +588,18 @@ def test_manifest_preserves_hugging_face_model_id():
     plan = MODULE.manifest_plan(arguments, MODULE.commands(arguments))
 
     assert plan["model"] == "Qwen/Qwen3.6-35B-A3B"
+    assert len(plan["source_commit"]) == 40
+
+
+def test_manifest_rejects_resume_from_different_source_commit(tmp_path):
+    arguments = args()
+    plan = MODULE.manifest_plan(arguments, MODULE.commands(arguments))
+    path = tmp_path / "manifest.json"
+    MODULE.prepare_manifest(path, plan, resume=False)
+    changed = {**plan, "source_commit": "0" * 40}
+
+    with pytest.raises(ValueError, match="does not match"):
+        MODULE.prepare_manifest(path, changed, resume=True)
 
 
 def test_main_rejects_insufficient_gpus_before_building_stages(monkeypatch):
