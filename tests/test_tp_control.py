@@ -462,6 +462,36 @@ class TPControlTest(unittest.TestCase):
             150,
         )
 
+    def test_multi_rank_execution_stats_are_gathered(self):
+        runner = object.__new__(ModelRunner)
+        runner.rank = 0
+        runner.world_size = 2
+        runner.execution_stats = SimpleNamespace(
+            to_dict=lambda: {"model_path_counts": {"decode_eager": 3}}
+        )
+        original_gather = getattr(model_runner_module.dist, "all_gather_object", None)
+
+        def gather(output, local):
+            output[:] = [local, {
+                "rank": 1,
+                "model_path_counts": {"decode_eager": 3},
+            }]
+
+        model_runner_module.dist.all_gather_object = gather
+        try:
+            stats = runner.get_execution_stats_by_rank()
+        finally:
+            if original_gather is None:
+                del model_runner_module.dist.all_gather_object
+            else:
+                model_runner_module.dist.all_gather_object = original_gather
+
+        self.assertEqual([item["rank"] for item in stats], [0, 1])
+        self.assertEqual(
+            stats[1]["model_path_counts"],
+            {"decode_eager": 3},
+        )
+
     def test_multi_rank_recurrent_state_stats_are_gathered(self):
         runner = object.__new__(ModelRunner)
         runner.rank = 0

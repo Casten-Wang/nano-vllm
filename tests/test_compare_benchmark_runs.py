@@ -384,6 +384,56 @@ def test_comparison_supports_legacy_results_without_preparation_stats():
     assert comparison["runs"][1]["input_preparation_vs_baseline"] == {}
 
 
+def test_comparison_uses_slowest_tensor_parallel_rank_preparation_time():
+    baseline = result()
+    candidate = result()
+    for item, rank1_total in ((baseline, 0.4), (candidate, 0.2)):
+        rank0 = {
+            "rank": 0,
+            **item["execution_stats"],
+        }
+        rank1 = {
+            "rank": 1,
+            "input_preparation_stats": {
+                "prefill": {
+                    "call_count": 2,
+                    "total_time_s": rank1_total,
+                    "max_time_s": rank1_total / 2,
+                },
+                "decode": {
+                    "call_count": 4,
+                    "total_time_s": rank1_total,
+                    "max_time_s": rank1_total / 2,
+                },
+            },
+        }
+        item["tensor_parallel_size"] = 2
+        item["execution_stats_by_rank"] = [rank0, rank1]
+
+    comparison = MODULE.compare_results(
+        [baseline, candidate],
+        ["baseline", "candidate"],
+    )
+
+    candidate_decode = comparison["runs"][1]["input_preparation"]["decode"]
+    assert candidate_decode["average_time_s"] == 0.05
+    assert [item["rank"] for item in candidate_decode["by_rank"]] == [0, 1]
+    assert comparison["runs"][1]["input_preparation_vs_baseline"]["decode"] == 0.5
+
+
+def test_comparison_rejects_incomplete_tensor_parallel_preparation_stats():
+    candidate = result()
+    candidate["execution_stats_by_rank"] = [
+        {"rank": 0, **candidate["execution_stats"]}
+    ]
+
+    with pytest.raises(ValueError, match="execution_stats_by_rank is incomplete"):
+        MODULE.compare_results(
+            [result(), candidate],
+            ["baseline", "candidate"],
+        )
+
+
 @pytest.mark.parametrize(
     ("field", "value", "message"),
     [

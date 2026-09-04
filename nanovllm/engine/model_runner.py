@@ -550,6 +550,14 @@ class ModelRunner:
     def get_execution_stats(self):
         return self.execution_stats.to_dict()
 
+    def get_execution_stats_by_rank(self):
+        local = {"rank": self.rank, **self.get_execution_stats()}
+        if self.world_size == 1:
+            return [local]
+        gathered = [None] * self.world_size
+        dist.all_gather_object(gathered, local)
+        return gathered
+
     def reset_shape_trace(self):
         self.shape_trace.reset()
 

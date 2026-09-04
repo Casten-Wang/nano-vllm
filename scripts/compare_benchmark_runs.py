@@ -131,8 +131,7 @@ def distribution(values: list[float]) -> dict:
     }
 
 
-def input_preparation_metrics(result: dict, *, label: str) -> dict[str, dict]:
-    raw = result.get("execution_stats", {}).get("input_preparation_stats", {})
+def _parse_input_preparation(raw: object, *, label: str) -> dict[str, dict]:
     if not isinstance(raw, dict):
         raise ValueError(f"{label}.input_preparation_stats must be a dictionary")
     unsupported = sorted(set(raw) - set(INPUT_PREPARATION_STEP_KINDS))
@@ -184,6 +183,59 @@ def input_preparation_metrics(result: dict, *, label: str) -> dict[str, dict]:
             "average_time_s": total_time_s / call_count,
         }
     return metrics
+
+
+def input_preparation_metrics(result: dict, *, label: str) -> dict[str, dict]:
+    by_rank = result.get("execution_stats_by_rank")
+    if by_rank is None:
+        raw = result.get("execution_stats", {}).get(
+            "input_preparation_stats",
+            {},
+        )
+        return _parse_input_preparation(raw, label=label)
+    if not isinstance(by_rank, list) or not by_rank:
+        raise ValueError(f"{label}.execution_stats_by_rank must be a non-empty list")
+    expected_ranks = set(range(result["tensor_parallel_size"]))
+    rank_metrics = {}
+    for item in by_rank:
+        if not isinstance(item, dict):
+            raise ValueError(f"{label}.execution_stats_by_rank entries must be dictionaries")
+        rank = item.get("rank")
+        if (
+            not isinstance(rank, int)
+            or isinstance(rank, bool)
+            or rank not in expected_ranks
+            or rank in rank_metrics
+        ):
+            raise ValueError(f"{label}.execution_stats_by_rank has invalid ranks")
+        rank_metrics[rank] = _parse_input_preparation(
+            item.get("input_preparation_stats", {}),
+            label=f"{label}.rank{rank}",
+        )
+    if set(rank_metrics) != expected_ranks:
+        raise ValueError(f"{label}.execution_stats_by_rank is incomplete")
+    step_sets = [set(metrics) for metrics in rank_metrics.values()]
+    if any(steps != step_sets[0] for steps in step_sets[1:]):
+        raise ValueError(f"{label}.execution_stats_by_rank recorded different paths")
+    aggregated = {}
+    for step_kind in sorted(step_sets[0]):
+        samples = [
+            {"rank": rank, **metrics[step_kind]}
+            for rank, metrics in sorted(rank_metrics.items())
+        ]
+        call_counts = {item["call_count"] for item in samples}
+        if len(call_counts) != 1:
+            raise ValueError(
+                f"{label}.execution_stats_by_rank recorded different call counts"
+            )
+        aggregated[step_kind] = {
+            "call_count": samples[0]["call_count"],
+            "total_time_s": max(item["total_time_s"] for item in samples),
+            "max_time_s": max(item["max_time_s"] for item in samples),
+            "average_time_s": max(item["average_time_s"] for item in samples),
+            "by_rank": samples,
+        }
+    return aggregated
 
 
 def load_result(path: Path) -> dict:

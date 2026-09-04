@@ -133,6 +133,19 @@ def write_markdown(path: Path, result: dict) -> None:
                 f"| host_{step_kind}_preparation_max_s | {stats['max_time_s']:.6f} |",
             ]
         )
+    for rank_stats in result.get("execution_stats_by_rank", []):
+        rank = rank_stats["rank"]
+        for step_kind in ("prefill", "decode", "mixed"):
+            stats = rank_stats.get("input_preparation_stats", {}).get(step_kind)
+            if stats is None:
+                continue
+            lines.extend(
+                [
+                    f"| host_rank{rank}_{step_kind}_preparation_calls | {stats['call_count']} |",
+                    f"| host_rank{rank}_{step_kind}_preparation_total_s | {stats['total_time_s']:.6f} |",
+                    f"| host_rank{rank}_{step_kind}_preparation_max_s | {stats['max_time_s']:.6f} |",
+                ]
+            )
     path.write_text("\n".join(lines) + "\n")
 
 
@@ -290,7 +303,10 @@ def main() -> None:
     output_tokens = sum(len(output["token_ids"]) for output in outputs)
     input_tokens = args.num_seqs * args.input_len
     output_throughput = output_tokens / total_time if total_time > 0 else 0.0
-    execution_stats = llm.model_runner.call("get_execution_stats")
+    execution_stats_by_rank = llm.model_runner.call(
+        "get_execution_stats_by_rank"
+    )
+    execution_stats = execution_stats_by_rank[0]
     shape_trace = llm.model_runner.call("get_shape_trace")
     cudagraph_capture_stats = llm.model_runner.call("get_cudagraph_capture_stats")
     cuda_memory_by_rank = llm.model_runner.call("get_cuda_memory_stats")
@@ -311,7 +327,23 @@ def main() -> None:
         item["peak_reserved_bytes"] for item in cuda_memory_by_rank
     )
     required_paths = [item.strip() for item in args.require_paths.split(",") if item.strip()]
-    execution_validation = validate_execution_stats(execution_stats, required_paths)
+    execution_validation_by_rank = [
+        {
+            "rank": item["rank"],
+            **validate_execution_stats(item, required_paths),
+        }
+        for item in execution_stats_by_rank
+    ]
+    execution_validation = dict(execution_validation_by_rank[0])
+    execution_validation["valid"] = all(
+        item["valid"] for item in execution_validation_by_rank
+    )
+    execution_validation["all_ranks_valid"] = execution_validation["valid"]
+    execution_validation["invalid_ranks"] = [
+        item["rank"]
+        for item in execution_validation_by_rank
+        if not item["valid"]
+    ]
     generation_validation = validate_generation_completion(
         [len(output["token_ids"]) for output in outputs],
         expected_num_seqs=args.num_seqs,
@@ -390,9 +422,11 @@ def main() -> None:
         "metrics": llm.metrics.to_dict(),
         "prefix_cache": block_manager.cache_stats(),
         "execution_stats": execution_stats,
+        "execution_stats_by_rank": execution_stats_by_rank,
         "shape_trace": shape_trace,
         "cudagraph_capture_stats": cudagraph_capture_stats,
         "execution_validation": execution_validation,
+        "execution_validation_by_rank": execution_validation_by_rank,
         "generation_validation": generation_validation,
     }
 
