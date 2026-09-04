@@ -6,9 +6,10 @@ import argparse
 import hashlib
 import json
 import math
-from pathlib import Path
 import statistics
+from pathlib import Path
 
+from nanovllm.benchmark_metadata import runtime_environment_identity
 
 MOE_RUNTIME_MIN_THROUGHPUT_RATIO = 0.99
 MOE_RUNTIME_MIN_TPOT_SPEEDUP = 1.02
@@ -204,6 +205,21 @@ def benchmark_environments_match(reference: dict, candidate: dict) -> bool:
         benchmark_environment_is_complete(reference)
         and benchmark_environment_is_complete(candidate)
         and reference == candidate
+    )
+
+
+def manifest_environment_matches_benchmark(
+    manifest_environment: object,
+    benchmark_environment: object,
+) -> bool:
+    """Bind final benchmark evidence to the runner's startup environment."""
+
+    return (
+        isinstance(manifest_environment, dict)
+        and benchmark_environment_is_complete(manifest_environment)
+        and isinstance(benchmark_environment, dict)
+        and runtime_environment_identity(benchmark_environment)
+        == manifest_environment
     )
 
 
@@ -4676,6 +4692,12 @@ def summarize(run_dir: Path, run_id: str) -> dict:
         ),
         "software_environment_valid": benchmark_environment_is_complete(
             performance_environment
+        ),
+        "manifest_environment_matches_benchmark": (
+            manifest_environment_matches_benchmark(
+                manifest.get("runtime_environment"),
+                performance_environment,
+            )
         ),
         "pd_transfer_baseline_valid": (
             set(pd_transfer) == expected_tp_names

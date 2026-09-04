@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import importlib
 import hashlib
+import importlib
 import json
 import os
 import platform
@@ -13,6 +13,22 @@ from datetime import datetime
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+RUNTIME_ENVIRONMENT_FIELDS = (
+    "python_version",
+    "torch_version",
+    "cuda_version",
+    "nccl_version",
+    "transformers_version",
+    "triton_version",
+    "flash_attn_version",
+    "cuda_device_count",
+    "cuda_devices",
+    "nvidia_smi_gpus",
+    "nvidia_smi_topology",
+    "cuda_visible_devices",
+    "cuda_device_order",
+    "nccl_environment",
+)
 
 
 def _sha256_bytes(value: bytes) -> str:
@@ -344,6 +360,18 @@ def collect_benchmark_metadata(torch_module=None) -> dict:
             if name in os.environ
         },
     }
+
+
+def runtime_environment_identity(metadata: dict) -> dict:
+    """Select stable runtime identity fields from benchmark metadata."""
+
+    return {field: metadata.get(field) for field in RUNTIME_ENVIRONMENT_FIELDS}
+
+
+def collect_runtime_environment(torch_module=None) -> dict:
+    """Capture stable software, driver, and topology identity for a run."""
+
+    return runtime_environment_identity(collect_benchmark_metadata(torch_module))
 
 
 def validate_execution_stats(

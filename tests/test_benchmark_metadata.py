@@ -3,8 +3,8 @@ import json
 import os
 import tempfile
 import unittest
-from unittest.mock import patch
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 MODULE_PATH = ROOT / "nanovllm" / "benchmark_metadata.py"
@@ -288,6 +288,24 @@ class BenchmarkMetadataTest(unittest.TestCase):
         self.assertEqual(result["cuda_visible_devices"], "3,1")
         self.assertEqual(result["cuda_device_order"], "PCI_BUS_ID")
         self.assertEqual(result["nccl_environment"]["NCCL_ALGO"], "Ring")
+
+    def test_runtime_environment_identity_excludes_volatile_fields(self):
+        metadata = {
+            field: f"value-{field}"
+            for field in module.RUNTIME_ENVIRONMENT_FIELDS
+        }
+        metadata.update(
+            {
+                "benchmark_timestamp": "later",
+                "command": ["different"],
+                "working_directory": "/different",
+            }
+        )
+
+        identity = module.runtime_environment_identity(metadata)
+
+        self.assertEqual(set(identity), set(module.RUNTIME_ENVIRONMENT_FIELDS))
+        self.assertNotIn("benchmark_timestamp", identity)
 
     def test_execution_validation_requires_observed_paths(self):
         result = module.validate_execution_stats(

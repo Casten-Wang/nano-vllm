@@ -1,11 +1,10 @@
-from importlib.util import module_from_spec, spec_from_file_location
-from copy import deepcopy
 import hashlib
 import json
+from copy import deepcopy
+from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 
 import pytest
-
 
 ROOT = Path(__file__).parents[1]
 SPEC = spec_from_file_location(
@@ -57,6 +56,11 @@ def benchmark_environment(device_count=8):
             for rank in range(device_count)
         ],
         "nvidia_smi_topology": "GPU0 X GPU1 NV8",
+        "cuda_visible_devices": ",".join(
+            str(rank) for rank in range(device_count)
+        ),
+        "cuda_device_order": "PCI_BUS_ID",
+        "nccl_environment": {"NCCL_ALGO": "Ring"},
     }
 
 
@@ -75,6 +79,15 @@ def test_benchmark_environment_comparison_rejects_software_drift():
     assert MODULE.benchmark_environments_match(reference, candidate)
     candidate["torch_version"] = "2.9.0+cu130"
     assert not MODULE.benchmark_environments_match(reference, candidate)
+
+
+def test_manifest_environment_rejects_startup_runtime_drift():
+    startup = MODULE.runtime_environment_identity(benchmark_environment(4))
+    benchmark = benchmark_environment(4)
+
+    assert MODULE.manifest_environment_matches_benchmark(startup, benchmark)
+    benchmark["torch_version"] = "2.9.0+cu130"
+    assert not MODULE.manifest_environment_matches_benchmark(startup, benchmark)
 
 
 def test_preflight_hardware_matches_benchmark_environment():
@@ -120,11 +133,22 @@ def bind_manifest_artifacts(root, run_id):
                 "sha256": hashlib.sha256(payload).hexdigest(),
             }
         )
+    performance_path = (
+        root / "performance" / f"{run_id}_matrix_summary.json"
+    )
+    performance_environment = (
+        json.loads(performance_path.read_text()).get("environment", {})
+        if performance_path.is_file()
+        else benchmark_environment()
+    )
     write(
         root / "manifest.json",
         {
             "run_id": run_id,
             "source_commit": SOURCE_COMMIT,
+            "runtime_environment": (
+                MODULE.runtime_environment_identity(performance_environment)
+            ),
             "stages": [
                 {"name": "fixture"},
                 {"name": "final-summary"},
@@ -2769,6 +2793,7 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     assert report["manifest_source_commit"] == SOURCE_COMMIT
     assert report["evidence"]["manifest_artifact_integrity"]
     assert report["evidence"]["artifacts_match_manifest_commit"]
+    assert report["evidence"]["manifest_environment_matches_benchmark"]
     assert report["evidence"]["official_checkpoint_headers_valid"]
     assert report["evidence"]["local_checkpoint_matches_official"]
     assert (
@@ -2827,6 +2852,16 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     assert install["valid"]
     assert install["peak_device_bytes_reduction"] == 5_000
     assert install["latency_ratio_vs_reference"] == 1.1
+    manifest_path = tmp_path / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["runtime_environment"]["torch_version"] = "2.9.0+cu130"
+    write(manifest_path, manifest)
+    drift_report = MODULE.summarize(tmp_path, run_id)
+    assert not drift_report["evidence"][
+        "manifest_environment_matches_benchmark"
+    ]
+    assert not drift_report["valid"]
+    bind_manifest_artifacts(tmp_path, run_id)
     write(
         tmp_path / "manifest.json",
         {"run_id": run_id, "source_commit": "b" * 40},

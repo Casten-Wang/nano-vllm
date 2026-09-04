@@ -12,7 +12,7 @@ from pathlib import Path
 
 from nanovllm.benchmark_metadata import (
     checkpoint_manifest_metadata,
-    collect_benchmark_metadata,
+    collect_runtime_environment,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -61,22 +61,6 @@ PRESSURE_INITIAL_LENGTHS = (256, 1024)
 PRESSURE_INJECTED_LENGTHS = (512, 512)
 SOURCE_ROOTS = (ROOT / "nanovllm", ROOT / "scripts")
 SOURCE_FILES = (ROOT / "pyproject.toml",)
-RUNTIME_ENVIRONMENT_FIELDS = (
-    "python_version",
-    "torch_version",
-    "cuda_version",
-    "nccl_version",
-    "transformers_version",
-    "triton_version",
-    "flash_attn_version",
-    "cuda_device_count",
-    "cuda_devices",
-    "nvidia_smi_gpus",
-    "nvidia_smi_topology",
-    "cuda_visible_devices",
-    "cuda_device_order",
-    "nccl_environment",
-)
 REQUIRED_RUNTIME_VERSION_FIELDS = (
     "python_version",
     "torch_version",
@@ -1119,13 +1103,6 @@ def manifest_plan(
             for name, command in stages
         ],
     }
-
-
-def collect_runtime_environment() -> dict:
-    """Capture stable software, driver, and topology identity for a run."""
-
-    metadata = collect_benchmark_metadata()
-    return {field: metadata.get(field) for field in RUNTIME_ENVIRONMENT_FIELDS}
 
 
 def validate_runtime_environment(environment: dict) -> None:
