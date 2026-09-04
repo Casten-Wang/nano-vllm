@@ -36,6 +36,10 @@ def make_result_name(prefix: str) -> str:
 
 
 def write_markdown(path: Path, result: dict) -> None:
+    input_preparation_stats = result["execution_stats"].get(
+        "input_preparation_stats",
+        {},
+    )
     lines = [
         "# nano-vLLM Benchmark",
         "",
@@ -118,6 +122,17 @@ def write_markdown(path: Path, result: dict) -> None:
         f"| prefix_cache_hit_blocks | {result['prefix_cache']['prefix_cache_hit_blocks']} |",
         f"| prefix_cache_hit_rate | {result['prefix_cache']['prefix_cache_hit_rate']:.6f} |",
     ]
+    for step_kind in ("prefill", "decode", "mixed"):
+        stats = input_preparation_stats.get(step_kind)
+        if stats is None:
+            continue
+        lines.extend(
+            [
+                f"| host_{step_kind}_preparation_calls | {stats['call_count']} |",
+                f"| host_{step_kind}_preparation_total_s | {stats['total_time_s']:.6f} |",
+                f"| host_{step_kind}_preparation_max_s | {stats['max_time_s']:.6f} |",
+            ]
+        )
     path.write_text("\n".join(lines) + "\n")
 
 

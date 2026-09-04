@@ -5,6 +5,7 @@ import types
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 MODULE_PATH = ROOT / "nanovllm" / "engine" / "model_runner.py"
@@ -602,6 +603,42 @@ class TPControlTest(unittest.TestCase):
 
 
 class HybridStateContextTest(unittest.TestCase):
+
+    def test_input_preparation_timing_is_opt_in_and_measures_once(self):
+        runner = object.__new__(ModelRunner)
+        runner.execution_stats = SimpleNamespace(
+            record_input_preparation=mock.Mock()
+        )
+        prepare = mock.Mock(return_value=("ids", "positions"))
+        original_perf_counter = model_runner_module.perf_counter
+        clock = mock.Mock(side_effect=[10.0, 10.25])
+        model_runner_module.perf_counter = clock
+        try:
+            runner.execution_stats_enabled = False
+            self.assertEqual(
+                runner._prepare_inputs_with_stats("decode", prepare, [1]),
+                ("ids", "positions"),
+            )
+            clock.assert_not_called()
+            runner.execution_stats.record_input_preparation.assert_not_called()
+
+            runner.execution_stats_enabled = True
+            self.assertEqual(
+                runner._prepare_inputs_with_stats("prefill", prepare, [2]),
+                ("ids", "positions"),
+            )
+        finally:
+            model_runner_module.perf_counter = original_perf_counter
+
+        self.assertEqual(clock.call_count, 2)
+        runner.execution_stats.record_input_preparation.assert_called_once_with(
+            step_kind="prefill",
+            elapsed_s=0.25,
+        )
+        self.assertEqual(prepare.call_args_list, [
+            mock.call([1]),
+            mock.call([2]),
+        ])
 
     def test_reset_execution_stats_resets_moe_runtime_counters(self):
         runner = object.__new__(ModelRunner)

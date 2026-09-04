@@ -8,7 +8,7 @@ selection rules in one place.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from math import ceil
+from math import ceil, isfinite
 from typing import Iterable
 
 
@@ -163,6 +163,9 @@ class ExecutionStats:
     model_path_counts: dict[str, int] = field(default_factory=dict)
     attention_path_counts: dict[str, int] = field(default_factory=dict)
     state_access_path_counts: dict[str, int] = field(default_factory=dict)
+    _input_preparation_stats: dict[str, dict[str, int | float]] = field(
+        default_factory=dict
+    )
     _signature_counts: dict[tuple, int] = field(default_factory=dict)
     _dropped_signature_steps: int = 0
 
@@ -183,8 +186,29 @@ class ExecutionStats:
         self.model_path_counts.clear()
         self.attention_path_counts.clear()
         self.state_access_path_counts.clear()
+        self._input_preparation_stats.clear()
         self._signature_counts.clear()
         self._dropped_signature_steps = 0
+
+    def record_input_preparation(
+        self,
+        *,
+        step_kind: str,
+        elapsed_s: float,
+    ) -> None:
+        """Record one complete host-side model-input preparation boundary."""
+
+        if step_kind not in {"prefill", "decode", "mixed"}:
+            raise ValueError(f"unsupported step kind: {step_kind}")
+        if not isfinite(elapsed_s) or elapsed_s < 0:
+            raise ValueError("elapsed_s must be finite and non-negative")
+        stats = self._input_preparation_stats.setdefault(
+            step_kind,
+            {"call_count": 0, "total_time_s": 0.0, "max_time_s": 0.0},
+        )
+        stats["call_count"] += 1
+        stats["total_time_s"] += elapsed_s
+        stats["max_time_s"] = max(stats["max_time_s"], elapsed_s)
 
     def record(
         self,
@@ -276,6 +300,12 @@ class ExecutionStats:
             "model_path_counts": dict(self.model_path_counts),
             "attention_path_counts": dict(self.attention_path_counts),
             "state_access_path_counts": dict(self.state_access_path_counts),
+            "input_preparation_stats": {
+                step_kind: dict(stats)
+                for step_kind, stats in sorted(
+                    self._input_preparation_stats.items()
+                )
+            },
             "execution_signatures": signatures,
             "max_execution_signatures": self.max_signatures,
             "dropped_execution_signature_steps": self._dropped_signature_steps,

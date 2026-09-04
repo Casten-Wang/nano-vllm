@@ -3088,8 +3088,25 @@ class ModelRunner:
             top_k=top_k,
         )
 
+    def _prepare_inputs_with_stats(self, step_kind: str, prepare, *args):
+        if not getattr(self, "execution_stats_enabled", False):
+            return prepare(*args)
+        preparation_start = perf_counter()
+        result = prepare(*args)
+        self.execution_stats.record_input_preparation(
+            step_kind=step_kind,
+            elapsed_s=perf_counter() - preparation_start,
+        )
+        return result
+
     def run(self, seqs: list[Sequence], is_prefill: bool) -> list[int]:
-        input_ids, positions = self.prepare_prefill(seqs) if is_prefill else self.prepare_decode(seqs)
+        step_kind = "prefill" if is_prefill else "decode"
+        prepare = self.prepare_prefill if is_prefill else self.prepare_decode
+        input_ids, positions = self._prepare_inputs_with_stats(
+            step_kind,
+            prepare,
+            seqs,
+        )
         sampling_path, top_k, sample_args = self._prepare_sampling_path(seqs)
         model_output = self.run_model(
             input_ids,
@@ -3108,7 +3125,12 @@ class ModelRunner:
 
     @torch.inference_mode()
     def run_mixed(self, prefill_seqs: list[Sequence], decode_seqs: list[Sequence]) -> list[int]:
-        input_ids, positions = self.prepare_mixed(prefill_seqs, decode_seqs)
+        input_ids, positions = self._prepare_inputs_with_stats(
+            "mixed",
+            self.prepare_mixed,
+            prefill_seqs,
+            decode_seqs,
+        )
         context = get_context()
         attention_paths = select_attention_paths(
             step_kind="mixed",

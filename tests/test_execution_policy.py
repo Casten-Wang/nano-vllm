@@ -228,6 +228,39 @@ class ExecutionPolicyTest(unittest.TestCase):
         self.assertEqual(len(result["execution_signatures"]), 1)
         self.assertEqual(result["dropped_execution_signature_steps"], 1)
 
+    def test_execution_stats_aggregate_input_preparation_by_step(self):
+        stats = self.execution.ExecutionStats()
+
+        stats.record_input_preparation(step_kind="prefill", elapsed_s=0.25)
+        stats.record_input_preparation(step_kind="prefill", elapsed_s=0.75)
+        stats.record_input_preparation(step_kind="decode", elapsed_s=0.125)
+        result = stats.to_dict()["input_preparation_stats"]
+
+        self.assertEqual(
+            result["prefill"],
+            {"call_count": 2, "total_time_s": 1.0, "max_time_s": 0.75},
+        )
+        self.assertEqual(
+            result["decode"],
+            {"call_count": 1, "total_time_s": 0.125, "max_time_s": 0.125},
+        )
+
+        stats.reset()
+        self.assertEqual(stats.to_dict()["input_preparation_stats"], {})
+
+    def test_execution_stats_reject_invalid_input_preparation(self):
+        stats = self.execution.ExecutionStats()
+
+        with self.assertRaisesRegex(ValueError, "unsupported step kind"):
+            stats.record_input_preparation(step_kind="invalid", elapsed_s=1.0)
+        for elapsed_s in (-1.0, float("inf"), float("nan")):
+            with self.subTest(elapsed_s=elapsed_s):
+                with self.assertRaisesRegex(ValueError, "finite and non-negative"):
+                    stats.record_input_preparation(
+                        step_kind="decode",
+                        elapsed_s=elapsed_s,
+                    )
+
 
 if __name__ == "__main__":
     unittest.main()
