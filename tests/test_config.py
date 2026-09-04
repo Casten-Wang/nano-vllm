@@ -135,6 +135,31 @@ def test_invalid_kv_block_override_is_rejected(monkeypatch, tmp_path):
         make_config(monkeypatch, tmp_path, num_kvcache_blocks_override=0)
 
 
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("max_num_batched_tokens", True),
+        ("max_num_batched_tokens", 1.5),
+        ("max_num_seqs", True),
+        ("max_num_seqs", 1.5),
+        ("max_model_len", True),
+        ("max_model_len", 1.5),
+        ("kvcache_block_size", True),
+        ("kvcache_block_size", 256.0),
+        ("num_kvcache_blocks_override", True),
+        ("num_kvcache_blocks_override", 1.5),
+    ],
+)
+def test_scheduler_capacity_requires_integers(
+    monkeypatch,
+    tmp_path,
+    name,
+    value,
+):
+    with pytest.raises(ValueError, match=rf"{name} must be a positive integer"):
+        make_config(monkeypatch, tmp_path, **{name: value})
+
+
 @pytest.mark.parametrize("value", [0, 9, True, 4.0])
 def test_invalid_tensor_parallel_size_is_rejected(monkeypatch, tmp_path, value):
     with pytest.raises(ValueError, match="tensor_parallel_size must be an integer"):

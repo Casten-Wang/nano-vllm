@@ -14,6 +14,11 @@ from nanovllm.models.model_spec import (
 )
 
 
+def _require_positive_int(value: object, name: str) -> None:
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        raise ValueError(f"{name} must be a positive integer")
+
+
 def resolve_eos_token_ids(
     model: str,
     fallback: int | list[int] | tuple[int, ...] | None,
@@ -88,21 +93,22 @@ class Config:
     def __post_init__(self):
         if not os.path.isdir(self.model):
             raise ValueError(f"model directory does not exist: {self.model}")
-        if self.max_num_batched_tokens <= 0:
-            raise ValueError("max_num_batched_tokens must be positive")
-        if self.max_num_seqs <= 0:
-            raise ValueError("max_num_seqs must be positive")
-        if self.max_model_len <= 0:
-            raise ValueError("max_model_len must be positive")
+        _require_positive_int(
+            self.max_num_batched_tokens,
+            "max_num_batched_tokens",
+        )
+        _require_positive_int(self.max_num_seqs, "max_num_seqs")
+        _require_positive_int(self.max_model_len, "max_model_len")
         if not 0.0 < self.gpu_memory_utilization <= 1.0:
             raise ValueError("gpu_memory_utilization must be in (0, 1]")
-        if self.kvcache_block_size <= 0 or self.kvcache_block_size % 256 != 0:
+        _require_positive_int(self.kvcache_block_size, "kvcache_block_size")
+        if self.kvcache_block_size % 256 != 0:
             raise ValueError("kvcache_block_size must be a positive multiple of 256")
-        if (
-            self.num_kvcache_blocks_override is not None
-            and self.num_kvcache_blocks_override <= 0
-        ):
-            raise ValueError("num_kvcache_blocks_override must be positive")
+        if self.num_kvcache_blocks_override is not None:
+            _require_positive_int(
+                self.num_kvcache_blocks_override,
+                "num_kvcache_blocks_override",
+            )
         if (
             not isinstance(self.tensor_parallel_size, int)
             or isinstance(self.tensor_parallel_size, bool)
