@@ -72,11 +72,13 @@ class EngineMetrics:
     request_ttfts: list[float] | None = None
     request_tpots: list[float] | None = None
     request_latencies: list[float] | None = None
+    request_samples: list[dict[str, int | float]] | None = None
 
     def __post_init__(self):
         self.request_ttfts = []
         self.request_tpots = []
         self.request_latencies = []
+        self.request_samples = []
 
     def reset(self):
         active_receive_staged_bytes = self.active_remote_prefill_receive_staged_bytes
@@ -140,6 +142,7 @@ class EngineMetrics:
         self.request_ttfts.clear()
         self.request_tpots.clear()
         self.request_latencies.clear()
+        self.request_samples.clear()
 
     def record_step(
         self,
@@ -260,6 +263,14 @@ class EngineMetrics:
             self.request_ttfts.append(ttft)
             self.request_tpots.append(tpot)
             self.request_latencies.append(latency)
+            self.request_samples.append({
+                "seq_id": seq.seq_id,
+                "prompt_tokens": seq.num_prompt_tokens,
+                "output_tokens": num_output_tokens,
+                "ttft_s": ttft,
+                "tpot_s": tpot,
+                "latency_s": latency,
+            })
 
     def record_remote_prefill_receive_started(self, staged_bytes: int = 0) -> None:
         if staged_bytes < 0:
@@ -461,7 +472,7 @@ class EngineMetrics:
 
         return self.pure_decode_throughput
 
-    def to_dict(self) -> dict[str, float | int]:
+    def to_dict(self) -> dict[str, object]:
         return {
             "total_prefill_tokens": self.total_prefill_tokens,
             "total_decode_tokens": self.total_decode_tokens,
@@ -530,6 +541,7 @@ class EngineMetrics:
             "peak_remote_prefill_send_staged_bytes": self.peak_remote_prefill_send_staged_bytes,
             "remote_prefill_sent_bytes": self.remote_prefill_sent_bytes,
             "num_finished_requests": len(self.request_latencies),
+            "request_samples": list(self.request_samples),
             "avg_ttft_s": self._avg(self.request_ttfts),
             "p50_ttft_s": self._percentile(self.request_ttfts, 0.50),
             "p95_ttft_s": self._percentile(self.request_ttfts, 0.95),

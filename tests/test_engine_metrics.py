@@ -134,12 +134,14 @@ class EngineMetricsTest(unittest.TestCase):
     def test_request_latency_percentiles_capture_tail_distribution(self):
         metrics = EngineMetrics()
         sequences = []
-        for latency in (1.0, 2.0, 3.0, 10.0):
+        for seq_id, latency in enumerate((1.0, 2.0, 3.0, 10.0)):
             sequences.append(
                 SimpleNamespace(
+                    seq_id=seq_id,
                     arrival_time=0.0,
                     first_token_time=latency / 2,
                     finish_time=latency,
+                    num_prompt_tokens=8,
                     num_completion_tokens=2,
                 )
             )
@@ -157,6 +159,20 @@ class EngineMetricsTest(unittest.TestCase):
         self.assertEqual(result["p50_request_latency_s"], 2.5)
         self.assertAlmostEqual(result["p95_request_latency_s"], 8.95)
         self.assertAlmostEqual(result["p99_request_latency_s"], 9.79)
+        self.assertEqual(
+            result["request_samples"][0],
+            {
+                "seq_id": 0,
+                "prompt_tokens": 8,
+                "output_tokens": 2,
+                "ttft_s": 0.5,
+                "tpot_s": 0.5,
+                "latency_s": 1.0,
+            },
+        )
+
+        metrics.reset()
+        self.assertEqual(metrics.to_dict()["request_samples"], [])
 
     def test_empty_request_latency_percentiles_are_zero(self):
         result = EngineMetrics().to_dict()
