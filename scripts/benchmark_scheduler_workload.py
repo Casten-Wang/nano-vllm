@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 import time
@@ -158,8 +159,8 @@ def validate_args(args: argparse.Namespace) -> None:
             raise ValueError(f"{name} must be a positive integer")
     if args.prefill_starvation_threshold < 0:
         raise ValueError("prefill_starvation_threshold must be non-negative")
-    if not 0.0 < args.temperature:
-        raise ValueError("temperature must be positive")
+    if not math.isfinite(args.temperature) or args.temperature < 0.0:
+        raise ValueError("temperature must be finite and non-negative")
 
 
 def main() -> None:

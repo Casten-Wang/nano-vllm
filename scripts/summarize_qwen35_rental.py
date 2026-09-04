@@ -2530,6 +2530,263 @@ def summarize_long_prefill(result: dict, *, expected_tp_size: int) -> dict:
     }
 
 
+def summarize_scheduler_trace_repeats(
+    results: list[dict],
+    *,
+    expected_tp_size: int,
+    mode: str,
+) -> dict:
+    """Validate deterministic mixed-arrival scheduler trace repeats."""
+
+    if not results:
+        raise ValueError("scheduler trace has no repeat results")
+    if mode not in {"baseline", "optimized"}:
+        raise ValueError(f"unknown scheduler trace mode: {mode}")
+    optimized = mode == "optimized"
+    rows = []
+    for result in results:
+        replay = result.get("replay", {})
+        workload = replay.get("workload", {})
+        latency = replay.get("latency", {}).get("all", {})
+        output = replay.get("output_token_ids", {})
+        samples = replay.get("request_samples", [])
+        steps = replay.get("step_samples", [])
+        metrics = replay.get("engine_metrics", {})
+        model_paths = result.get("execution_stats", {}).get(
+            "model_path_counts", {}
+        )
+        expected_class_counts = {
+            "decode-heavy": 8,
+            "prefill-heavy": 8,
+            "short": 8,
+        }
+        sample_class_counts = (
+            {
+                name: sum(
+                    isinstance(item, dict)
+                    and item.get("workload_class") == name
+                    for item in samples
+                )
+                for name in expected_class_counts
+            }
+            if isinstance(samples, list)
+            else {}
+        )
+        sample_contract_valid = (
+            isinstance(samples, list)
+            and len(samples) == 24
+            and sample_class_counts == expected_class_counts
+            and all(
+                item.get("output_tokens")
+                == item.get("requested_output_tokens")
+                and isinstance(item.get("arrival_step"), int)
+                and isinstance(item.get("completion_step"), int)
+                and item["completion_step"] >= item["arrival_step"]
+                and all(
+                    isinstance(item.get(name), (int, float))
+                    and math.isfinite(item[name])
+                    and item[name] >= 0
+                    for name in ("ttft_s", "tpot_s", "latency_s")
+                )
+                for item in samples
+            )
+        )
+        step_contract_valid = (
+            isinstance(steps, list)
+            and bool(steps)
+            and replay.get("engine_steps") == len(steps)
+            and all(
+                isinstance(step.get("logical_step"), int)
+                and isinstance(step.get("elapsed_s"), (int, float))
+                and math.isfinite(step["elapsed_s"])
+                and step["elapsed_s"] >= 0
+                and isinstance(step.get("capacity"), dict)
+                for step in steps
+            )
+        )
+        configuration_valid = (
+            result.get("tensor_parallel_size") == expected_tp_size
+            and result.get("qwen35_moe_decode_backend") == "batched"
+            and result.get("temperature") == 0
+            and result.get("enable_dynamic_chunked_prefill") is optimized
+            and result.get("enable_decode_kv_reservation") is optimized
+            and result.get("prefill_starvation_threshold")
+            == (FAIRNESS_THRESHOLD if optimized else 0)
+            and result.get("preemption_policy")
+            == ("min_recompute" if optimized else "fcfs")
+        )
+        path_valid = (
+            model_paths.get("mixed_eager", 0) > 0
+            if optimized
+            else model_paths.get("prefill_eager", 0) > 0
+        )
+        numeric = {
+            "total_time_s": result.get("total_time_s"),
+            "output_throughput_tok_s": result.get("output_throughput_tok_s"),
+            "peak_torch_allocated_mib": result.get("peak_torch_allocated_mib"),
+            "p95_ttft_s": latency.get("p95_ttft_s"),
+            "p95_tpot_s": latency.get("p95_tpot_s"),
+            "p95_latency_s": latency.get("p95_latency_s"),
+        }
+        measurements_valid = all(
+            isinstance(value, (int, float))
+            and math.isfinite(value)
+            and value >= 0
+            for value in numeric.values()
+        )
+        scheduler_metrics = {
+            "engine_steps": replay.get("engine_steps"),
+            "preemption_count": metrics.get("preemption_count"),
+            "max_prefill_starvation_steps": metrics.get(
+                "max_prefill_starvation_steps"
+            ),
+        }
+        scheduler_metrics_valid = (
+            isinstance(scheduler_metrics["engine_steps"], int)
+            and not isinstance(scheduler_metrics["engine_steps"], bool)
+            and scheduler_metrics["engine_steps"] > 0
+            and all(
+                isinstance(scheduler_metrics[name], int)
+                and not isinstance(scheduler_metrics[name], bool)
+                and scheduler_metrics[name] >= 0
+                for name in (
+                    "preemption_count",
+                    "max_prefill_starvation_steps",
+                )
+            )
+        )
+        valid = (
+            configuration_valid
+            and path_valid
+            and sample_contract_valid
+            and step_contract_valid
+            and workload.get("name") == "mixed"
+            and workload.get("request_count") == 24
+            and workload.get("requests_by_class") == expected_class_counts
+            and output.get("request_count") == 24
+            and output.get("token_count")
+            == workload.get("requested_output_tokens")
+            and metrics.get("num_finished_requests") == 24
+            and result.get("execution_validation", {}).get("valid") is True
+            and result.get("cuda_available") is True
+            and measurements_valid
+            and scheduler_metrics_valid
+        )
+        rows.append(
+            {
+                "valid": valid,
+                "configuration_valid": configuration_valid,
+                "path_valid": path_valid,
+                "sample_contract_valid": sample_contract_valid,
+                "step_contract_valid": step_contract_valid,
+                "measurements_valid": measurements_valid,
+                "scheduler_metrics_valid": scheduler_metrics_valid,
+                "commit": result.get("commit"),
+                "git_dirty": result.get("git_dirty"),
+                "checkpoint_digest": result.get("checkpoint_manifest", {}).get(
+                    "digest"
+                ),
+                "workload_digest": workload.get("digest"),
+                "output_digest": output.get("digest"),
+                **scheduler_metrics,
+                **numeric,
+            }
+        )
+
+    stable_fields = (
+        "commit",
+        "checkpoint_digest",
+        "workload_digest",
+        "output_digest",
+    )
+    stable = {
+        name: len({row[name] for row in rows}) == 1
+        and rows[0][name] is not None
+        for name in stable_fields
+    }
+    numeric_names = (
+        "total_time_s",
+        "output_throughput_tok_s",
+        "peak_torch_allocated_mib",
+        "p95_ttft_s",
+        "p95_tpot_s",
+        "p95_latency_s",
+    )
+    def median_or_none(name: str):
+        values = [row[name] for row in rows]
+        return (
+            statistics.median(values)
+            if all(
+                isinstance(value, (int, float))
+                and math.isfinite(value)
+                for value in values
+            )
+            else None
+        )
+
+    return {
+        "valid": (
+            len(rows) >= 2
+            and all(row["valid"] for row in rows)
+            and not any(row["git_dirty"] for row in rows)
+            and all(stable.values())
+        ),
+        "repeat_count": len(rows),
+        **{
+            name: rows[0][name] if stable[name] else None
+            for name in stable_fields
+        },
+        **{name: median_or_none(name) for name in numeric_names},
+        "engine_steps": median_or_none("engine_steps"),
+        "preemption_count": median_or_none("preemption_count"),
+        "max_prefill_starvation_steps": (
+            max(row["max_prefill_starvation_steps"] for row in rows)
+            if all(row["scheduler_metrics_valid"] for row in rows)
+            else None
+        ),
+        "runs": rows,
+    }
+
+
+def compare_scheduler_trace_modes(baseline: dict, optimized: dict) -> dict:
+    comparable = (
+        baseline["valid"]
+        and optimized["valid"]
+        and baseline["commit"] == optimized["commit"]
+        and baseline["checkpoint_digest"] == optimized["checkpoint_digest"]
+        and baseline["workload_digest"] == optimized["workload_digest"]
+        and baseline["output_digest"] == optimized["output_digest"]
+    )
+    ratios = {}
+    for name in (
+        "total_time_s",
+        "p95_ttft_s",
+        "p95_tpot_s",
+        "p95_latency_s",
+        "peak_torch_allocated_mib",
+    ):
+        base = baseline[name]
+        candidate = optimized[name]
+        ratios[name] = candidate / base if comparable and base else None
+    return {
+        "valid": comparable,
+        "output_parity": baseline["output_digest"]
+        == optimized["output_digest"],
+        "ratios_optimized_over_baseline": ratios,
+        "throughput_ratio": (
+            optimized["output_throughput_tok_s"]
+            / baseline["output_throughput_tok_s"]
+            if comparable and baseline["output_throughput_tok_s"]
+            else None
+        ),
+        "preemption_delta": (
+            optimized["preemption_count"] - baseline["preemption_count"]
+            if comparable
+            else None
+        ),
+    }
+
+
 def summarize(run_dir: Path, run_id: str) -> dict:
     official_audit = load_json(
         run_dir / "preflight" / "official_checkpoint_header_audit.json"
@@ -2563,6 +2820,11 @@ def summarize(run_dir: Path, run_id: str) -> dict:
     fairness_paths = sorted((run_dir / "fairness").glob("*/tp*/r*.json"))
     if not fairness_paths:
         raise ValueError("no scheduler-fairness benchmark artifacts were found")
+    scheduler_trace_paths = sorted(
+        (run_dir / "scheduler").glob("*/tp*/r*.json")
+    )
+    if not scheduler_trace_paths:
+        raise ValueError("no deterministic scheduler trace artifacts were found")
     cudagraph_paths = sorted(
         (run_dir / "cudagraph").glob("tp*/*/run_*/summary.json")
     )
@@ -2612,6 +2874,7 @@ def summarize(run_dir: Path, run_id: str) -> dict:
     mixed_runs = {}
     kv_pressure = {}
     scheduler_fairness = {}
+    scheduler_traces = {}
     configured_max_decode_batch = performance["workload"]["max_num_seqs"]
     commits = {
         row["commit"]
@@ -3361,6 +3624,34 @@ def summarize(run_dir: Path, run_id: str) -> dict:
         for tp_name, by_mode in scheduler_fairness.items()
         if set(by_mode) == {"disabled", "enabled"}
     }
+    scheduler_trace_results = {}
+    for path in scheduler_trace_paths:
+        result = load_json(path)
+        mode = path.parents[1].name
+        tp_name = path.parent.name
+        if mode not in {"baseline", "optimized"}:
+            raise ValueError(f"unknown scheduler trace mode: {mode}")
+        scheduler_trace_results.setdefault((tp_name, mode), []).append(result)
+        commits.add(result["commit"])
+        clean_worktrees = clean_worktrees and not result["git_dirty"]
+        cuda_measurements = cuda_measurements and result["cuda_available"]
+
+    for (tp_name, mode), results in sorted(scheduler_trace_results.items()):
+        scheduler_traces.setdefault(tp_name, {})[mode] = (
+            summarize_scheduler_trace_repeats(
+                results,
+                expected_tp_size=int(tp_name.removeprefix("tp")),
+                mode=mode,
+            )
+        )
+    scheduler_trace_comparisons = {
+        tp_name: compare_scheduler_trace_modes(
+            by_mode["baseline"],
+            by_mode["optimized"],
+        )
+        for tp_name, by_mode in scheduler_traces.items()
+        if set(by_mode) == {"baseline", "optimized"}
+    }
     for path in mixed_paths:
         result = load_json(path)
         tp_name = path.parent.name
@@ -3694,6 +3985,16 @@ def summarize(run_dir: Path, run_id: str) -> dict:
                 for tp_name, by_mode in scheduler_fairness.items()
             )
         ),
+        "scheduler_trace_evidence": (
+            set(scheduler_traces) == expected_tp_names
+            and all(
+                set(by_mode) == {"baseline", "optimized"}
+                and all(item["valid"] for item in by_mode.values())
+                and scheduler_trace_comparisons.get(tp_name, {}).get("valid")
+                is True
+                for tp_name, by_mode in scheduler_traces.items()
+            )
+        ),
         "normalization_workspace_evidence": (
             set(normalization) == expected_tp_names
             and all(
@@ -3882,6 +4183,12 @@ def summarize(run_dir: Path, run_id: str) -> dict:
             },
             "by_tp": scheduler_fairness,
             "comparisons": fairness_comparisons,
+        },
+        "scheduler_traces": {
+            "arrival_clock": "logical scheduler steps",
+            "profile": "mixed",
+            "by_tp": scheduler_traces,
+            "comparisons": scheduler_trace_comparisons,
         },
     }
 

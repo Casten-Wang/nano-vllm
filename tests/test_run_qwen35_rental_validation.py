@@ -77,6 +77,12 @@ def test_commands_are_fail_fast_and_cover_complete_validation_suite():
         "pressure-min_recompute_reserved-tp4-r1",
         "pressure-min_recompute_reserved-tp4-r2",
         "pressure-min_recompute_reserved-tp4-r3",
+        "scheduler-baseline-tp4-r1",
+        "scheduler-baseline-tp4-r2",
+        "scheduler-baseline-tp4-r3",
+        "scheduler-optimized-tp4-r1",
+        "scheduler-optimized-tp4-r2",
+        "scheduler-optimized-tp4-r3",
         "kernels-long-prefill-tp4",
         "attention-short-tp4",
         "attention-long-tp4",
@@ -110,6 +116,12 @@ def test_commands_are_fail_fast_and_cover_complete_validation_suite():
         "pressure-min_recompute_reserved-tp8-r1",
         "pressure-min_recompute_reserved-tp8-r2",
         "pressure-min_recompute_reserved-tp8-r3",
+        "scheduler-baseline-tp8-r1",
+        "scheduler-baseline-tp8-r2",
+        "scheduler-baseline-tp8-r3",
+        "scheduler-optimized-tp8-r1",
+        "scheduler-optimized-tp8-r2",
+        "scheduler-optimized-tp8-r3",
         "kernels-long-prefill-tp8",
         "attention-short-tp8",
         "attention-long-tp8",
@@ -174,6 +186,26 @@ def test_commands_are_fail_fast_and_cover_complete_validation_suite():
     assert reserved_pressure[
         reserved_pressure.index("--preemption-policy") + 1
     ] == "min_recompute"
+    scheduler_baseline = commands["scheduler-baseline-tp4-r1"]
+    scheduler_optimized = commands["scheduler-optimized-tp4-r1"]
+    assert scheduler_baseline[
+        scheduler_baseline.index("--profile") + 1
+    ] == "mixed"
+    assert scheduler_baseline[
+        scheduler_baseline.index("--temperature") + 1
+    ] == "0"
+    assert "--enable-dynamic-chunked-prefill" not in scheduler_baseline
+    assert scheduler_baseline[
+        scheduler_baseline.index("--require-paths") + 1
+    ] == "prefill_eager"
+    assert "--enable-dynamic-chunked-prefill" in scheduler_optimized
+    assert "--enable-decode-kv-reservation" in scheduler_optimized
+    assert scheduler_optimized[
+        scheduler_optimized.index("--preemption-policy") + 1
+    ] == "min_recompute"
+    assert scheduler_optimized[
+        scheduler_optimized.index("--require-paths") + 1
+    ] == "mixed_eager"
     long_prefill = commands["kernels-long-prefill-tp4"]
     assert "--prefill-only" in long_prefill
     assert long_prefill[long_prefill.index("--prefill-tokens") + 1] == "8192"
@@ -606,6 +638,25 @@ def test_fairness_stage_collects_only_its_mode_repeat(tmp_path):
     artifacts = MODULE.collect_stage_artifacts(
         arguments,
         "fairness-enabled-tp4-r2",
+    )
+
+    assert artifacts == [artifact]
+
+
+def test_scheduler_stage_collects_only_its_mode_repeat(tmp_path):
+    arguments = args()
+    arguments.result_dir = str(tmp_path)
+    scheduler_dir = (
+        tmp_path / arguments.run_id / "scheduler" / "optimized" / "tp4"
+    )
+    scheduler_dir.mkdir(parents=True)
+    artifact = scheduler_dir / "r2.json"
+    artifact.write_text('{"valid": true}\n')
+    (scheduler_dir / "r1.json").write_text('{"valid": true}\n')
+
+    artifacts = MODULE.collect_stage_artifacts(
+        arguments,
+        "scheduler-optimized-tp4-r2",
     )
 
     assert artifacts == [artifact]

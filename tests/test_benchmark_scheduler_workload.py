@@ -94,9 +94,13 @@ def test_external_workload_must_fit_selected_context(tmp_path):
         ({"max_engine_steps": 0}, "max_engine_steps"),
         ({"vocab_size": True}, "vocab_size"),
         ({"prefill_starvation_threshold": -1}, "non-negative"),
-        ({"temperature": 0.0}, "temperature"),
+        ({"temperature": -0.1}, "temperature"),
     ],
 )
 def test_validates_cli_contract(tmp_path, overrides, message):
     with pytest.raises(ValueError, match=message):
         MODULE.validate_args(args(tmp_path, **overrides))
+
+
+def test_greedy_temperature_is_supported(tmp_path):
+    MODULE.validate_args(args(tmp_path, temperature=0.0))

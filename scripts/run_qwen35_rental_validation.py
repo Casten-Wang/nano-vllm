@@ -23,6 +23,9 @@ CHECKPOINT_QUALITY_SCRIPT = (
     ROOT / "scripts" / "compare_qwen35_checkpoint_quality.py"
 )
 ONLINE_MIXED_SCRIPT = ROOT / "scripts" / "benchmark_online_mixed.py"
+SCHEDULER_WORKLOAD_SCRIPT = (
+    ROOT / "scripts" / "benchmark_scheduler_workload.py"
+)
 SUMMARY_SCRIPT = ROOT / "scripts" / "summarize_qwen35_rental.py"
 CUDAGRAPH_PARITY_SCRIPT = ROOT / "scripts" / "verify_cudagraph_parity.py"
 REMOTE_CHECKPOINT_AUDIT_SCRIPT = (
@@ -476,6 +479,58 @@ def commands(args: argparse.Namespace) -> list[tuple[str, list[str]]]:
                                 / "pressure"
                                 / f"tp{tp_size}"
                                 / pressure_name
+                                / f"r{repeat}.json"
+                            ),
+                        ],
+                    )
+                )
+        for scheduler_mode in ("baseline", "optimized"):
+            for repeat in range(1, args.repeats + 1):
+                policy_args = []
+                required_paths = "prefill_eager"
+                if scheduler_mode == "optimized":
+                    policy_args = [
+                        "--enable-dynamic-chunked-prefill",
+                        "--enable-decode-kv-reservation",
+                        "--prefill-starvation-threshold",
+                        str(FAIRNESS_THRESHOLD),
+                        "--prefill-starvation-token-budget",
+                        str(FAIRNESS_TOKEN_BUDGET),
+                        "--preemption-policy",
+                        "min_recompute",
+                    ]
+                    required_paths = "mixed_eager"
+                result.append(
+                    (
+                        f"scheduler-{scheduler_mode}-tp{tp_size}-r{repeat}",
+                        [
+                            sys.executable,
+                            str(SCHEDULER_WORKLOAD_SCRIPT),
+                            "--model",
+                            args.model,
+                            "--profile",
+                            "mixed",
+                            "--tensor-parallel-size",
+                            str(tp_size),
+                            "--qwen35-moe-decode-backend",
+                            "batched",
+                            "--temperature",
+                            "0",
+                            "--max-model-len",
+                            str(args.max_model_len),
+                            "--max-num-batched-tokens",
+                            "2048",
+                            "--max-num-seqs",
+                            str(args.max_num_seqs),
+                            *policy_args,
+                            "--require-paths",
+                            required_paths,
+                            "--output",
+                            str(
+                                root
+                                / "scheduler"
+                                / scheduler_mode
+                                / f"tp{tp_size}"
                                 / f"r{repeat}.json"
                             ),
                         ],
@@ -1125,6 +1180,12 @@ def collect_stage_artifacts(
         tp_name, repeat_name = stage_name.removeprefix("mixed-").rsplit("-", 1)
         search_root = root / "mixed" / tp_name
         required = [search_root / f"{repeat_name}.json"]
+    elif stage_name.startswith("scheduler-"):
+        mode, tp_name, repeat_name = stage_name.removeprefix(
+            "scheduler-"
+        ).rsplit("-", 2)
+        search_root = root / "scheduler" / mode / tp_name
+        required = [search_root / f"{repeat_name}.json"]
     elif stage_name.startswith("pressure-"):
         policy, tp_name, repeat_name = stage_name.removeprefix(
             "pressure-"
@@ -1222,6 +1283,7 @@ def collect_stage_artifacts(
         or stage_name.startswith("pd-transfer-")
         or stage_name.startswith("attention-")
         or stage_name.startswith("mixed-")
+        or stage_name.startswith("scheduler-")
         or stage_name.startswith("pressure-")
         or stage_name.startswith("fairness-")
         or stage_name.startswith("cudagraph-")

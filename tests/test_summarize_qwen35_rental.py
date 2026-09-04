@@ -1057,6 +1057,144 @@ def write_fairness_case(root):
             )
 
 
+def scheduler_trace_result(mode, repeat=1):
+    optimized = mode == "optimized"
+    classes = ("decode-heavy", "prefill-heavy", "short")
+    request_samples = [
+        {
+            "request_id": f"{workload_class}-{index}",
+            "seq_id": class_index * 8 + index,
+            "workload_class": workload_class,
+            "arrival_step": index,
+            "completion_step": index + 4,
+            "input_tokens": 128,
+            "requested_output_tokens": 4,
+            "output_tokens": 4,
+            "ttft_s": 0.1 + repeat * 0.001,
+            "tpot_s": 0.02,
+            "latency_s": 0.2 + repeat * 0.001,
+        }
+        for class_index, workload_class in enumerate(classes)
+        for index in range(8)
+    ]
+    return {
+        "commit": "abc",
+        "checkpoint_manifest": {"digest": "weights"},
+        "git_dirty": False,
+        "cuda_available": True,
+        "tensor_parallel_size": 4,
+        "qwen35_moe_decode_backend": "batched",
+        "temperature": 0.0,
+        "enable_dynamic_chunked_prefill": optimized,
+        "enable_decode_kv_reservation": optimized,
+        "prefill_starvation_threshold": (
+            MODULE.FAIRNESS_THRESHOLD if optimized else 0
+        ),
+        "preemption_policy": "min_recompute" if optimized else "fcfs",
+        "total_time_s": 8.0 if optimized else 10.0,
+        "output_throughput_tok_s": 12.0 if optimized else 9.6,
+        "peak_torch_allocated_mib": 11_900.0 if optimized else 12_000.0,
+        "replay": {
+            "workload": {
+                "name": "mixed",
+                "digest": "mixed-workload",
+                "request_count": 24,
+                "requested_output_tokens": 96,
+                "requests_by_class": {
+                    "decode-heavy": 8,
+                    "prefill-heavy": 8,
+                    "short": 8,
+                },
+            },
+            "engine_steps": 2,
+            "request_samples": request_samples,
+            "output_token_ids": {
+                "digest": "greedy-output",
+                "request_count": 24,
+                "token_count": 96,
+            },
+            "latency": {
+                "all": {
+                    "p95_ttft_s": 0.12 if optimized else 0.15,
+                    "p95_tpot_s": 0.02,
+                    "p95_latency_s": 0.22 if optimized else 0.25,
+                }
+            },
+            "step_samples": [
+                {
+                    "logical_step": step,
+                    "elapsed_s": 0.01,
+                    "capacity": {"kv_blocks_free": 8 - step},
+                }
+                for step in range(2)
+            ],
+            "engine_metrics": {
+                "num_finished_requests": 24,
+                "preemption_count": 0 if optimized else 2,
+                "max_prefill_starvation_steps": 4 if optimized else 12,
+            },
+        },
+        "execution_stats": {
+            "model_path_counts": (
+                {"mixed_eager": 2} if optimized else {"prefill_eager": 2}
+            )
+        },
+        "execution_validation": {"valid": True},
+    }
+
+
+def write_scheduler_trace_case(root):
+    for mode in ("baseline", "optimized"):
+        for repeat in range(1, 4):
+            write(
+                root / f"scheduler/{mode}/tp4/r{repeat}.json",
+                scheduler_trace_result(mode, repeat),
+            )
+
+
+def test_scheduler_trace_comparison_requires_greedy_output_parity():
+    baseline_results = [
+        scheduler_trace_result("baseline", repeat) for repeat in (1, 2)
+    ]
+    optimized_results = [
+        scheduler_trace_result("optimized", repeat) for repeat in (1, 2)
+    ]
+    optimized_results[1]["replay"]["output_token_ids"]["digest"] = "changed"
+
+    baseline = MODULE.summarize_scheduler_trace_repeats(
+        baseline_results,
+        expected_tp_size=4,
+        mode="baseline",
+    )
+    optimized = MODULE.summarize_scheduler_trace_repeats(
+        optimized_results,
+        expected_tp_size=4,
+        mode="optimized",
+    )
+    comparison = MODULE.compare_scheduler_trace_modes(baseline, optimized)
+
+    assert baseline["valid"]
+    assert not optimized["valid"]
+    assert not comparison["valid"]
+
+
+def test_scheduler_trace_rejects_unbalanced_classes_and_missing_metrics():
+    results = [scheduler_trace_result("baseline", repeat) for repeat in (1, 2)]
+    results[0]["replay"]["request_samples"][0]["workload_class"] = "short"
+    results[1]["replay"]["engine_metrics"].pop("preemption_count")
+
+    summary = MODULE.summarize_scheduler_trace_repeats(
+        results,
+        expected_tp_size=4,
+        mode="baseline",
+    )
+
+    assert not summary["valid"]
+    assert not summary["runs"][0]["sample_contract_valid"]
+    assert not summary["runs"][1]["scheduler_metrics_valid"]
+    assert summary["preemption_count"] is None
+
+
 def load_fairness_repeats(root, mode):
     return [
         json.loads(path.read_text())
@@ -1869,6 +2007,7 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     write_mixed_case(tmp_path)
     write_pressure_case(tmp_path)
     write_fairness_case(tmp_path)
+    write_scheduler_trace_case(tmp_path)
     for profile_name, kv_dtype, state_dtype, components in (
         (
             "auto-float32",
@@ -2146,6 +2285,11 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
     assert fairness["comparisons"]["tp4"]["starvation_improved"]
     assert fairness["comparisons"]["tp4"]["injected_ttft_improved"]
     assert fairness["comparisons"]["tp4"]["throughput_ratio"] == 0.98
+    scheduler_traces = report["scheduler_traces"]
+    assert report["evidence"]["scheduler_trace_evidence"]
+    assert scheduler_traces["by_tp"]["tp4"]["baseline"]["repeat_count"] == 3
+    assert scheduler_traces["comparisons"]["tp4"]["output_parity"]
+    assert scheduler_traces["comparisons"]["tp4"]["throughput_ratio"] == 1.25
     assert report["normalization"]["by_tp"]["tp4"]["rmsnorm"][
         "peak_extra_mib_delta"
     ] == -4.0
