@@ -245,14 +245,23 @@ def _measure(
     }
     if host_staging_pool is not None:
         stats = host_staging_pool.storage_stats()
-        expected_reuse = warmup + repeats - 1
+        request_bytes = profile["components"]["total"]
+        cacheable = (
+            stats["max_cached_bytes"] is None
+            or request_bytes <= stats["max_cached_bytes"]
+        )
+        attempts = warmup + repeats
+        expected_reuse = attempts - 1 if cacheable else 0
         result["host_staging_pool"] = {
             **stats,
             "expected_reuse_count": expected_reuse,
             "valid": (
-                stats["allocation_count"] == 1
+                stats["allocation_count"] == int(cacheable)
                 and stats["reuse_count"] == expected_reuse
-                and stats["transient_allocation_count"] == 0
+                and stats["transient_allocation_count"]
+                == (0 if cacheable else attempts)
+                and stats["storage_bytes"]
+                == (request_bytes if cacheable else 0)
                 and stats["leased"] == 0
             ),
         }
@@ -289,12 +298,15 @@ def main() -> None:
     parser.add_argument("--state-dtype", choices=("float32", "model"), required=True)
     parser.add_argument("--warmup", type=int, default=2)
     parser.add_argument("--repeats", type=int, default=10)
+    parser.add_argument("--max-cached-bytes", type=int)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     if not torch.cuda.is_available():
         raise RuntimeError("cache export benchmark requires CUDA")
     if args.warmup < 0 or args.repeats <= 0:
         raise ValueError("warmup must be non-negative and repeats must be positive")
+    if args.max_cached_bytes is not None and args.max_cached_bytes < 0:
+        raise ValueError("max-cached-bytes must be non-negative")
 
     profile = _profile(
         args.memory_preflight,
@@ -317,7 +329,7 @@ def main() -> None:
     reference = _measure(
         source, profile, direct_host=False, warmup=args.warmup, repeats=args.repeats
     )
-    candidate_pool = HostStagingBufferPool()
+    candidate_pool = HostStagingBufferPool(args.max_cached_bytes)
     candidate = _measure(
         source,
         profile,
@@ -346,6 +358,7 @@ def main() -> None:
             **profile,
             "warmup": args.warmup,
             "repeats": args.repeats,
+            "max_cached_bytes": args.max_cached_bytes,
         },
         "reference_gpu_gather_then_host_copy": reference,
         "candidate_direct_host_staging": candidate,

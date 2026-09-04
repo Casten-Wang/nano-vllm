@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -7,10 +8,43 @@ import torch
 from nanovllm.engine.cache_transfer import HostStagingBufferPool
 from scripts.benchmark_cache_export import (
     _export,
+    _measure,
     _payload_host_layout,
     _profile,
     make_source,
 )
+
+
+def test_measure_accepts_bounded_transient_staging(monkeypatch):
+    pool = HostStagingBufferPool(max_cached_bytes=16)
+    profile = {"components": {"total": 17}}
+
+    def export_once(*_args, **_kwargs):
+        lease = pool.acquire(17, pin_memory=False)
+        return SimpleNamespace(release_host_staging=lease.release)
+
+    monkeypatch.setattr(
+        "scripts.benchmark_cache_export._export",
+        export_once,
+    )
+    monkeypatch.setattr(torch.cuda, "synchronize", lambda: None)
+    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: None)
+    monkeypatch.setattr(torch.cuda, "memory_allocated", lambda: 0)
+    monkeypatch.setattr(torch.cuda, "reset_peak_memory_stats", lambda: None)
+    monkeypatch.setattr(torch.cuda, "max_memory_allocated", lambda: 0)
+
+    result = _measure(
+        None,
+        profile,
+        direct_host=True,
+        warmup=1,
+        repeats=2,
+        host_staging_pool=pool,
+    )
+
+    assert result["host_staging_pool"]["valid"]
+    assert result["host_staging_pool"]["storage_bytes"] == 0
+    assert result["host_staging_pool"]["transient_allocation_count"] == 3
 
 
 def write_preflight(path: Path, *, total_delta: int = 0) -> None:
