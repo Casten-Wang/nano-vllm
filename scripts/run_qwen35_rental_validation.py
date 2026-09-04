@@ -1331,6 +1331,33 @@ def validate_source_tree(manifest: dict) -> None:
         raise ValueError("validation source tree changed during the run")
 
 
+def validate_clean_worktree() -> None:
+    """Reject evidence collection from an uncommitted repository state."""
+
+    try:
+        result = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(ROOT),
+                "status",
+                "--porcelain",
+                "--untracked-files=all",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise ValueError("cannot verify validation repository state") from error
+    changes = [line for line in result.stdout.splitlines() if line]
+    if changes:
+        raise ValueError(
+            "rental validation requires a clean Git worktree; "
+            f"found {len(changes)} uncommitted path(s)"
+        )
+
+
 def prepare_manifest(
     path: Path,
     plan: dict,
@@ -1493,6 +1520,10 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     if not args.dry_run:
+        try:
+            validate_clean_worktree()
+        except ValueError as error:
+            raise SystemExit(str(error)) from error
         required_gpus = max(args.tp_sizes)
         available_gpus = visible_gpu_count()
         if available_gpus < required_gpus:
@@ -1521,9 +1552,14 @@ def main() -> None:
         if not args.dry_run:
             try:
                 validate_source_tree(manifest)
+                validate_clean_worktree()
             except ValueError as error:
                 raise SystemExit(str(error)) from error
             subprocess.run(command, cwd=ROOT, check=True)
+            try:
+                validate_clean_worktree()
+            except ValueError as error:
+                raise SystemExit(str(error)) from error
             artifacts = collect_stage_artifacts(args, name)
             mark_stage_completed(manifest_path, manifest, name, artifacts)
 

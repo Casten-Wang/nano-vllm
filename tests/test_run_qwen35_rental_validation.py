@@ -602,6 +602,7 @@ def test_main_rejects_insufficient_gpus_before_building_stages(monkeypatch):
             "4,8",
         ],
     )
+    monkeypatch.setattr(MODULE, "validate_clean_worktree", lambda: None)
     monkeypatch.setattr(MODULE, "visible_gpu_count", lambda: 4)
 
     def unexpected_commands(_):
@@ -611,6 +612,44 @@ def test_main_rejects_insufficient_gpus_before_building_stages(monkeypatch):
 
     with pytest.raises(SystemExit, match="requires 8 visible GPUs.*no checkpoint"):
         MODULE.main()
+
+
+def test_main_rejects_dirty_worktree_before_gpu_probe(monkeypatch):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_qwen35_rental_validation.py",
+            "--model",
+            "/models/qwen35",
+        ],
+    )
+
+    def reject_dirty():
+        raise ValueError("rental validation requires a clean Git worktree")
+
+    monkeypatch.setattr(MODULE, "validate_clean_worktree", reject_dirty)
+    monkeypatch.setattr(
+        MODULE,
+        "visible_gpu_count",
+        lambda: pytest.fail("GPU probing started for a dirty worktree"),
+    )
+
+    with pytest.raises(SystemExit, match="clean Git worktree"):
+        MODULE.main()
+
+
+def test_validate_clean_worktree_reports_uncommitted_paths(monkeypatch):
+    result = MODULE.subprocess.CompletedProcess(
+        args=[],
+        returncode=0,
+        stdout=" M nanovllm/engine/scheduler.py\n?? scratch.py\n",
+        stderr="",
+    )
+    monkeypatch.setattr(MODULE.subprocess, "run", lambda *_args, **_kwargs: result)
+
+    with pytest.raises(ValueError, match=r"found 2 uncommitted path\(s\)"):
+        MODULE.validate_clean_worktree()
 
 
 def test_mixed_stage_collects_only_its_repeat(tmp_path):
