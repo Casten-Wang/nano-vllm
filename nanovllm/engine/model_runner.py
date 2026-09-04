@@ -1603,15 +1603,31 @@ class ModelRunner:
         from nanovllm.engine.cache_transfer import HostStagingBufferPool
 
         if getattr(self, "_cache_send_staging_pool", None) is None:
-            self._cache_send_staging_pool = HostStagingBufferPool()
+            self._cache_send_staging_pool = HostStagingBufferPool(
+                self._host_staging_retention_limit()
+            )
         return self._cache_send_staging_pool
 
     def _host_receive_staging_pool(self):
         from nanovllm.engine.cache_transfer import HostStagingBufferPool
 
         if getattr(self, "_cache_receive_staging_pool", None) is None:
-            self._cache_receive_staging_pool = HostStagingBufferPool()
+            self._cache_receive_staging_pool = HostStagingBufferPool(
+                self._host_staging_retention_limit()
+            )
         return self._cache_receive_staging_pool
+
+    def _host_staging_retention_limit(self) -> int | None:
+        """Split the process-wide retained-buffer budget across TP pools."""
+
+        limit = getattr(
+            getattr(self, "config", None),
+            "max_remote_prefill_staging_bytes",
+            None,
+        )
+        if limit is None:
+            return None
+        return limit // (2 * self.world_size)
 
     def estimate_sequence_cache_bytes(self, seq: Sequence) -> dict:
         """Estimate rank-local host staging bytes without copying tensors."""

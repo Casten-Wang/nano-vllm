@@ -459,6 +459,31 @@ def test_host_staging_pool_never_aliases_concurrent_payloads():
     first.release_host_staging()
 
 
+def test_host_staging_pool_does_not_retain_oversized_allocation():
+    pool = HostStagingBufferPool(max_cached_bytes=16)
+
+    oversized = pool.acquire(17, pin_memory=False)
+    assert pool.storage_stats() == {
+        "storage_bytes": 0,
+        "allocation_count": 0,
+        "reuse_count": 0,
+        "transient_allocation_count": 1,
+        "leased": 0,
+    }
+    oversized.release()
+
+    cached = pool.acquire(16, pin_memory=False)
+    assert pool.storage_stats()["storage_bytes"] == 16
+    assert pool.storage_stats()["leased"] == 1
+    cached.release()
+
+
+@pytest.mark.parametrize("value", [-1, True, 1.5])
+def test_host_staging_pool_rejects_invalid_retention_limit(value):
+    with pytest.raises(ValueError, match="max_cached_bytes"):
+        HostStagingBufferPool(max_cached_bytes=value)
+
+
 @pytest.mark.parametrize("block_ids", [[], [0, 0], [-1], [4]])
 def test_host_export_validates_block_ids_without_materializing_index(block_ids):
     source = make_float_cache()

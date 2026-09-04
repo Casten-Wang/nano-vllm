@@ -43,8 +43,18 @@ class HostStagingLease:
 class HostStagingBufferPool:
     """Retain one largest-fit host buffer without aliasing concurrent sends."""
 
-    def __init__(self) -> None:
+    def __init__(self, max_cached_bytes: int | None = None) -> None:
+        if (
+            max_cached_bytes is not None
+            and (
+                not isinstance(max_cached_bytes, int)
+                or isinstance(max_cached_bytes, bool)
+                or max_cached_bytes < 0
+            )
+        ):
+            raise ValueError("max_cached_bytes must be a non-negative integer")
         self._lock = Lock()
+        self._max_cached_bytes = max_cached_bytes
         self._storage: torch.Tensor | None = None
         self._leased = False
         self.allocation_count = 0
@@ -56,12 +66,16 @@ class HostStagingBufferPool:
             raise ValueError("host staging size must be a positive integer")
         with self._lock:
             storage = self._storage
+            cacheable = (
+                self._max_cached_bytes is None
+                or size <= self._max_cached_bytes
+            )
             compatible = (
                 storage is not None
                 and storage.numel() >= size
                 and storage.is_pinned() == pin_memory
             )
-            if not self._leased:
+            if not self._leased and cacheable:
                 if not compatible:
                     storage = torch.empty(
                         size,

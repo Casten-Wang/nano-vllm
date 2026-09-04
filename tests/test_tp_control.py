@@ -298,6 +298,16 @@ class TPControlTest(unittest.TestCase):
             with self.subTest(name=name), self.assertRaisesRegex(ValueError, name):
                 validate_kv_cache_model_length_capacity(**values)
 
+    def test_host_staging_retention_budget_is_split_across_rank_pools(self):
+        runner = object.__new__(ModelRunner)
+        runner.world_size = 4
+        runner.config = SimpleNamespace(max_remote_prefill_staging_bytes=1001)
+
+        self.assertEqual(runner._host_staging_retention_limit(), 125)
+
+        runner.config.max_remote_prefill_staging_bytes = None
+        self.assertIsNone(runner._host_staging_retention_limit())
+
     def test_kv_block_override_caps_synchronized_capacity(self):
         runner = object.__new__(ModelRunner)
         runner.rank = 0
