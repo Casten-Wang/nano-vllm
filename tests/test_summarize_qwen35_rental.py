@@ -153,6 +153,7 @@ def write_gptq_summary_inputs(root, run_id, *, backend="triton"):
             "storage": {
                 "runtime_buffer_storage_by_rank": [
                     {
+                        "rank": rank,
                         "gptq_expert_workspace_pool_count": 1,
                         "gptq_expert_workspace_bytes": (
                             64 * (2 * (512 // tp) + 2048) * 2
@@ -160,7 +161,7 @@ def write_gptq_summary_inputs(root, run_id, *, backend="triton"):
                         "gptq_expert_workspace_allocation_count": 1,
                         "gptq_expert_workspace_reuse_count": 40,
                     }
-                    for _ in range(tp)
+                    for rank in range(tp)
                 ]
             },
             "repeat_output_digests_match": True,
@@ -830,6 +831,30 @@ def test_optional_gptq_summary_rejects_workspace_without_runtime_reuse(tmp_path)
     assert not report["workspace"]["by_tp"]["tp4"]["valid"]
     assert not report["performance_valid"]
     assert not report["valid"]
+
+
+def test_gptq_workspace_rejects_duplicate_rank_evidence():
+    rank = {
+        "rank": 0,
+        "gptq_expert_workspace_pool_count": 1,
+        "gptq_expert_workspace_bytes": 5120,
+        "gptq_expert_workspace_allocation_count": 1,
+        "gptq_expert_workspace_reuse_count": 1,
+    }
+    summary = MODULE.summarize_gptq_workspace(
+        [
+            {
+                "tensor_parallel_size": 2,
+                "storage": {
+                    "runtime_buffer_storage_by_rank": [rank, dict(rank)]
+                },
+            }
+        ],
+        max_rows=1,
+    )
+
+    assert not summary["valid"]
+    assert not summary["by_tp"]["tp2"]["valid"]
 
 
 def write_attention_case(

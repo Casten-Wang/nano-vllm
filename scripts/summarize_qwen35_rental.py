@@ -86,6 +86,20 @@ OFFICIAL_INDEX_CONTRACTS = {
 }
 
 
+def ranked_records_complete(records: object, tp_size: object) -> bool:
+    """Return whether records identify every TP rank exactly once."""
+
+    return (
+        isinstance(tp_size, int)
+        and not isinstance(tp_size, bool)
+        and tp_size > 0
+        and isinstance(records, list)
+        and len(records) == tp_size
+        and all(isinstance(item, dict) for item in records)
+        and {item.get("rank") for item in records} == set(range(tp_size))
+    )
+
+
 def expected_checkpoint_semantic_contract(quantization_format: str) -> dict:
     tensor_count, total_size = OFFICIAL_INDEX_CONTRACTS[quantization_format]
     quantization = {
@@ -309,7 +323,7 @@ def summarize_gptq_workspace(
             "runtime_buffer_storage_by_rank", []
         )
         valid = (
-            len(ranks) == tp_size
+            ranked_records_complete(ranks, tp_size)
             and all(
                 item.get("gptq_expert_workspace_pool_count") == 1
                 and item.get("gptq_expert_workspace_bytes") == expected_bytes
@@ -699,11 +713,7 @@ def summarize_optional_fp8_audit(
             "runtime_buffer_storage_by_rank",
             [],
         )
-        ranks_complete = (
-            isinstance(tp_size, int)
-            and {item.get("rank") for item in rank_stats}
-            == set(range(tp_size))
-        )
+        ranks_complete = ranked_records_complete(rank_stats, tp_size)
         if runtime_backend == "resident":
             expected_storage_valid = all(
                 isinstance(expected_storage.get(key), int)
@@ -1443,19 +1453,25 @@ def summarize_moe_runtime(rows: list[dict]) -> dict[str, dict]:
             item.get("rank"): item.get("moe_batched_dispatch_count")
             for item in candidate_rank_stats
         }
+        rank_evidence_complete = ranked_records_complete(
+            baseline_rank_stats, key[0]
+        ) and ranked_records_complete(candidate_rank_stats, key[0])
         baseline_sync_observed = (
-            set(baseline_decode_syncs) == expected_ranks
+            rank_evidence_complete
+            and set(baseline_decode_syncs) == expected_ranks
             and all(
                 value is not None and value > 0
                 for value in baseline_decode_syncs.values()
             )
         )
         candidate_sync_eliminated = (
-            set(candidate_decode_syncs) == expected_ranks
+            rank_evidence_complete
+            and set(candidate_decode_syncs) == expected_ranks
             and all(value == 0 for value in candidate_decode_syncs.values())
         )
         candidate_batched_observed = (
-            set(candidate_batched_dispatches) == expected_ranks
+            rank_evidence_complete
+            and set(candidate_batched_dispatches) == expected_ranks
             and all(
                 value is not None and value > 0
                 for value in candidate_batched_dispatches.values()
@@ -3590,8 +3606,7 @@ def summarize(run_dir: Path, run_id: str) -> dict:
             "recurrent_state_storage_by_rank", []
         )
         return (
-            len(ranks) == tp_size
-            and {item.get("rank") for item in ranks} == set(range(tp_size))
+            ranked_records_complete(ranks, tp_size)
             and all(item.get(field) == expected for item in ranks)
         )
 
@@ -3616,13 +3631,10 @@ def summarize(run_dir: Path, run_id: str) -> dict:
         for row in performance["runs"]
     )
     kv_storage_matches_preflight = all(
-        len(row.get("storage", {}).get("kv_cache_storage_by_rank", []))
-        == row["tensor_parallel_size"]
-        and {
-            item.get("rank")
-            for item in row["storage"]["kv_cache_storage_by_rank"]
-        }
-        == set(range(row["tensor_parallel_size"]))
+        ranked_records_complete(
+            row.get("storage", {}).get("kv_cache_storage_by_rank", []),
+            row["tensor_parallel_size"],
+        )
         and all(
             item.get("total_bytes")
             == row["storage"].get("num_kvcache_blocks", 0)
@@ -3677,8 +3689,10 @@ def summarize(run_dir: Path, run_id: str) -> dict:
         )
 
     kv_capacity_accounting_valid = all(
-        len(row.get("storage", {}).get("kv_cache_storage_by_rank", []))
-        == row["tensor_parallel_size"]
+        ranked_records_complete(
+            row.get("storage", {}).get("kv_cache_storage_by_rank", []),
+            row["tensor_parallel_size"],
+        )
         and all(
             kv_capacity_item_valid(
                 item,
