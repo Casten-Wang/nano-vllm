@@ -1875,6 +1875,7 @@ class ModelRunner:
             expected_peer_bytes=expected_peer_bytes,
             timeout_s=timeout_s,
             max_payload_bytes=max_payload_bytes,
+            host_staging_pool=self._host_receive_staging_pool(),
         )
         pending[transfer_id] = {"receiver": receiver, "plan": plan}
         try:

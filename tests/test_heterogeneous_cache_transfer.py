@@ -221,6 +221,38 @@ def test_peer_fragment_socket_round_trip(with_scales):
     }) == 1
 
 
+def test_peer_fragment_receive_reuses_released_host_staging_storage():
+    fragment = build_qwen35_peer_cache_fragments(
+        make_payload(0, 4, with_scales=True),
+        make_plan(with_scales=True),
+    )[0]
+    encoded = MemorySocket()
+    send_peer_cache_fragment(encoded, fragment)
+    pool = HostStagingBufferPool()
+
+    first_wire = MemorySocket()
+    first_wire.data.extend(encoded.data)
+    first = receive_peer_cache_fragment(
+        first_wire,
+        host_staging_pool=pool,
+    )
+    first_ptr = first.slices[0].tensor.untyped_storage().data_ptr()
+    assert pool.storage_stats()["leased"] == 1
+    first.release_host_staging()
+
+    second_wire = MemorySocket()
+    second_wire.data.extend(encoded.data)
+    second = receive_peer_cache_fragment(
+        second_wire,
+        host_staging_pool=pool,
+    )
+
+    assert second.slices[0].tensor.untyped_storage().data_ptr() == first_ptr
+    assert pool.storage_stats()["reuse_count"] == 1
+    second.release_host_staging()
+    assert pool.storage_stats()["leased"] == 0
+
+
 def test_peer_fragment_wire_enforces_limit_and_distinct_magic():
     fragment = build_qwen35_peer_cache_fragments(
         make_payload(0, 4, with_scales=False),
@@ -249,8 +281,11 @@ def test_peer_fragment_wire_rejects_corrupted_payload():
     send_peer_cache_fragment(wire, fragment)
     wire.data[-1] ^= 0xFF
 
+    pool = HostStagingBufferPool()
     with pytest.raises(ValueError, match="checksum mismatch"):
-        receive_peer_cache_fragment(wire)
+        receive_peer_cache_fragment(wire, host_staging_pool=pool)
+
+    assert pool.storage_stats()["leased"] == 0
 
 
 def test_peer_fragment_rejects_wrong_prompt_before_payload_allocation(monkeypatch):
@@ -835,6 +870,7 @@ def test_multi_peer_receiver_defers_ack_until_atomic_assembly():
         for src_rank, dst_rank, byte_count in plan.profile.peer_bytes
         if dst_rank == 0
     }
+    receive_pool = HostStagingBufferPool()
     receiver = PendingPeerCacheReceiveGroup(
         "127.0.0.1",
         0,
@@ -845,6 +881,7 @@ def test_multi_peer_receiver_defers_ack_until_atomic_assembly():
         expected_cached_tokens=7,
         expected_peer_bytes=expected_peer_bytes,
         timeout_s=2.0,
+        host_staging_pool=receive_pool,
     )
     endpoint = receiver.address
     receiver.start()
@@ -879,8 +916,10 @@ def test_multi_peer_receiver_defers_ack_until_atomic_assembly():
     fragments = receiver.fragments()
     payload = assemble_qwen35_peer_cache_fragments(fragments, plan)
     assert payload.nbytes == plan.profile.destination_bytes[0]
+    assert receive_pool.storage_stats()["leased"] == 1
 
     receiver.finish(accepted=True)
+    assert receive_pool.storage_stats()["leased"] == 0
     for sender, staged in zip(senders, staged_sources):
         deadline = monotonic() + 2.0
         while sender.poll()[0] != "ready":
@@ -925,6 +964,8 @@ def test_model_runner_installs_before_acknowledging_peer_receivers():
     runner.build_heterogeneous_cache_receive_plan_for_blocks = Mock(
         return_value=plan
     )
+    receive_pool = HostStagingBufferPool()
+    runner._host_receive_staging_pool = Mock(return_value=receive_pool)
     receiver = Mock()
     receiver.poll.return_value = ("ready", None)
     fragments = (Mock(),)
@@ -973,6 +1014,7 @@ def test_model_runner_installs_before_acknowledging_peer_receivers():
         },
         timeout_s=30.0,
         max_payload_bytes=16 * 1024**3,
+        host_staging_pool=receive_pool,
     )
     receiver.start.assert_called_once_with()
     assert runner.poll_heterogeneous_sequence_cache_receive("transfer-1") == {

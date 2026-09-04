@@ -74,6 +74,7 @@ class PeerCacheFragment:
     slices: tuple[PeerTensorSlice, ...]
     cache_fingerprint: str = LEGACY_CACHE_FINGERPRINT
     token_fingerprint: str = LEGACY_CACHE_FINGERPRINT
+    host_staging_lease: HostStagingLease | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.transfer_id, str) or not self.transfer_id:
@@ -111,6 +112,10 @@ class PeerCacheFragment:
     @property
     def nbytes(self) -> int:
         return sum(item.nbytes for item in self.slices)
+
+    def release_host_staging(self) -> None:
+        if self.host_staging_lease is not None:
+            self.host_staging_lease.release()
 
 
 @dataclass(frozen=True, slots=True)

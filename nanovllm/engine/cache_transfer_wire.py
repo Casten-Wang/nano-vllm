@@ -419,6 +419,7 @@ def receive_peer_cache_fragment(
     sock,
     *,
     max_payload_bytes: int = DEFAULT_MAX_PAYLOAD_BYTES,
+    host_staging_pool: HostStagingBufferPool | None = None,
     expected_transfer_id: str | None = None,
     expected_src_rank: int | None = None,
     expected_dst_rank: int | None = None,
@@ -561,40 +562,57 @@ def receive_peer_cache_fragment(
         in enumerate(parsed)
     ]
     offsets, storage_bytes = _aligned_storage_offsets(storage_descriptors)
-    storage = torch.empty(storage_bytes, dtype=torch.uint8)
-    slices = []
-    for descriptor, offset in zip(parsed, offsets):
-        component, layer, dst_start, dtype, shape, nbytes = descriptor
-        tensor_storage = storage[offset : offset + nbytes]
-        storage_view = _byte_view(tensor_storage)
-        _recv_exact(sock, storage_view)
-        digest.update(storage_view)
-        slices.append(
-            PeerTensorSlice(
-                component=component,
-                layer=layer,
-                dst_start=dst_start,
-                tensor=tensor_storage.view(dtype).reshape(shape),
-            )
-        )
-    received_digest = _recv_bytes(sock, WIRE_DIGEST_BYTES)
-    if not hmac.compare_digest(digest.digest(), received_digest):
-        raise ValueError("peer cache fragment checksum mismatch")
-    fragment = PeerCacheFragment(
-        transfer_id=transfer_id,
-        src_rank=integers["src_rank"],
-        dst_rank=integers["dst_rank"],
-        src_tp_size=integers["src_tp_size"],
-        dst_tp_size=integers["dst_tp_size"],
-        block_size=integers["block_size"],
-        cached_tokens=integers["cached_tokens"],
-        cache_fingerprint=cache_fingerprint,
-        token_fingerprint=token_fingerprint,
-        slices=tuple(slices),
+    lease = (
+        host_staging_pool.acquire(storage_bytes, pin_memory=False)
+        if host_staging_pool is not None
+        else None
     )
-    if fragment.nbytes != body_bytes:
-        raise ValueError("peer cache fragment byte count changed after decode")
-    return fragment
+    storage = (
+        lease.storage
+        if lease is not None
+        else torch.empty(storage_bytes, dtype=torch.uint8)
+    )
+    if storage is None:
+        raise RuntimeError("host staging lease was released before receive")
+    try:
+        slices = []
+        for descriptor, offset in zip(parsed, offsets):
+            component, layer, dst_start, dtype, shape, nbytes = descriptor
+            tensor_storage = storage[offset : offset + nbytes]
+            storage_view = _byte_view(tensor_storage)
+            _recv_exact(sock, storage_view)
+            digest.update(storage_view)
+            slices.append(
+                PeerTensorSlice(
+                    component=component,
+                    layer=layer,
+                    dst_start=dst_start,
+                    tensor=tensor_storage.view(dtype).reshape(shape),
+                )
+            )
+        received_digest = _recv_bytes(sock, WIRE_DIGEST_BYTES)
+        if not hmac.compare_digest(digest.digest(), received_digest):
+            raise ValueError("peer cache fragment checksum mismatch")
+        fragment = PeerCacheFragment(
+            transfer_id=transfer_id,
+            src_rank=integers["src_rank"],
+            dst_rank=integers["dst_rank"],
+            src_tp_size=integers["src_tp_size"],
+            dst_tp_size=integers["dst_tp_size"],
+            block_size=integers["block_size"],
+            cached_tokens=integers["cached_tokens"],
+            cache_fingerprint=cache_fingerprint,
+            token_fingerprint=token_fingerprint,
+            slices=tuple(slices),
+            host_staging_lease=lease,
+        )
+        if fragment.nbytes != body_bytes:
+            raise ValueError("peer cache fragment byte count changed after decode")
+        return fragment
+    except BaseException:
+        if lease is not None:
+            lease.release()
+        raise
 
 
 class RankCacheReceiver:
@@ -871,6 +889,7 @@ class PendingPeerCacheReceiveGroup:
         expected_peer_bytes: dict[int, int],
         timeout_s: float = 30.0,
         max_payload_bytes: int = DEFAULT_MAX_PAYLOAD_BYTES,
+        host_staging_pool: HostStagingBufferPool | None = None,
     ) -> None:
         if not isinstance(host, str) or not host:
             raise ValueError("peer cache receiver host must not be empty")
@@ -947,6 +966,7 @@ class PendingPeerCacheReceiveGroup:
         self._expected_peer_bytes = dict(expected_peer_bytes)
         self._timeout_s = timeout_s
         self._max_payload_bytes = max_payload_bytes
+        self._host_staging_pool = host_staging_pool
         self._deadline = monotonic() + timeout_s
         self._lock = Lock()
         self._fragments: dict[int, PeerCacheFragment] = {}
@@ -1011,6 +1031,7 @@ class PendingPeerCacheReceiveGroup:
             fragment = receive_peer_cache_fragment(
                 connection,
                 max_payload_bytes=self._max_payload_bytes,
+                host_staging_pool=self._host_staging_pool,
                 expected_transfer_id=self._transfer_id,
                 expected_dst_rank=self._dst_rank,
                 expected_src_tp_size=self._expected_src_tp_size,
@@ -1035,6 +1056,8 @@ class PendingPeerCacheReceiveGroup:
             fragment = None
             connection = None
         except BaseException as exc:
+            if fragment is not None:
+                fragment.release_host_staging()
             with self._lock:
                 if not self._terminal and self._error is None:
                     self._error = exc
@@ -1076,9 +1099,12 @@ class PendingPeerCacheReceiveGroup:
                 return
             self._terminal = True
             connections = tuple(self._connections.values())
+            fragments = tuple(self._fragments.values())
             self._connections.clear()
             self._fragments.clear()
         self._listener.close()
+        for fragment in fragments:
+            fragment.release_host_staging()
         acknowledgement = _TRANSFER_ACK if accepted else _TRANSFER_NACK
         for connection in connections:
             try:
