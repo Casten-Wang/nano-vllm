@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from time import perf_counter
 from unittest.mock import Mock, call
 
 import pytest
@@ -466,6 +467,72 @@ def test_expired_reservation_cannot_start_heterogeneous_receive():
     assert not engine._heterogeneous_remote_prefill_source_tp_sizes
     assert [seq.seq_id for seq in engine.scheduler.waiting] == [seq_id]
     assert engine.metrics.to_dict()["remote_prefill_reservation_timed_out"] == 1
+
+
+@pytest.mark.parametrize(
+    ("heterogeneous", "asynchronous", "method_name", "timeout_index"),
+    [
+        (False, False, "receive_sequence_cache_from_endpoint", 4),
+        (False, True, "start_sequence_cache_receive", 3),
+        (True, True, "start_heterogeneous_sequence_cache_receive", 5),
+    ],
+)
+def test_receive_timeout_is_bounded_by_reservation_deadline(
+    heterogeneous,
+    asynchronous,
+    method_name,
+    timeout_index,
+):
+    engine = make_engine(tensor_parallel_size=2)
+    transfer_id = "request/attempt-1"
+    if heterogeneous:
+        engine.add_heterogeneous_remote_prefill_request(
+            [1, 2, 3, 4],
+            SamplingParams(max_tokens=4),
+            transfer_id=transfer_id,
+            source_tp_size=4,
+            timeout_s=30.0,
+        )
+    else:
+        engine.add_remote_prefill_request(
+            [1, 2, 3, 4],
+            SamplingParams(max_tokens=4),
+            transfer_id=transfer_id,
+            timeout_s=30.0,
+        )
+    _, session = engine.scheduler.remote_prefills[transfer_id]
+    session.deadline = perf_counter() + 5.0
+    engine.model_runner.call_rank_results.reset_mock()
+
+    if heterogeneous:
+        engine.start_heterogeneous_remote_prefill_receive(
+            transfer_id,
+            9,
+            [("127.0.0.1", 20001 + rank) for rank in range(4)],
+            timeout_s=20.0,
+        )
+    elif asynchronous:
+        engine.start_remote_prefill_receive(
+            transfer_id,
+            9,
+            [("127.0.0.1", 20001), ("127.0.0.1", 20002)],
+            timeout_s=20.0,
+        )
+    else:
+        engine.receive_remote_prefill(
+            transfer_id,
+            9,
+            [("127.0.0.1", 20001), ("127.0.0.1", 20002)],
+            timeout_s=20.0,
+        )
+
+    call_args = next(
+        item.args
+        for item in engine.model_runner.call_rank_results.call_args_list
+        if item.args[0] == method_name
+    )
+    effective_timeout = call_args[timeout_index]
+    assert 0 < effective_timeout <= 5.0
 
 
 @pytest.mark.parametrize("asynchronous", [False, True])

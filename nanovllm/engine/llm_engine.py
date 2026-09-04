@@ -435,7 +435,10 @@ class LLMEngine:
                 "heterogeneous cache reservations require the heterogeneous "
                 "receive API"
             )
-        seq = self._require_live_remote_prefill_reservation(transfer_id)
+        seq, reservation_timeout_s = (
+            self._require_live_remote_prefill_reservation(transfer_id)
+        )
+        timeout_s = min(timeout_s, reservation_timeout_s)
         _, session = self.scheduler.remote_prefills[transfer_id]
         expected_by_rank = self._remote_prefill_receive_expected_bytes[
             transfer_id
@@ -524,13 +527,13 @@ class LLMEngine:
     def _require_live_remote_prefill_reservation(
         self,
         transfer_id: str,
-    ) -> Sequence:
-        """Reject an expired handoff before allocating rank-local receivers."""
+    ) -> tuple[Sequence, float]:
+        """Return a live reservation and its remaining monotonic lease."""
 
         seq, session = self.scheduler.remote_prefills[transfer_id]
         now = perf_counter()
         if session.poll(now=now) is not CacheTransferPhase.TIMED_OUT:
-            return seq
+            return seq, session.deadline - now
         self.scheduler.abort_remote_prefill(
             transfer_id,
             "cache transfer timed out before receive started",
@@ -569,7 +572,10 @@ class LLMEngine:
                 "heterogeneous cache reservations require the heterogeneous "
                 "receive API"
             )
-        seq = self._require_live_remote_prefill_reservation(transfer_id)
+        seq, reservation_timeout_s = (
+            self._require_live_remote_prefill_reservation(transfer_id)
+        )
+        timeout_s = min(timeout_s, reservation_timeout_s)
         expected_by_rank = self._remote_prefill_receive_expected_bytes[
             transfer_id
         ]
@@ -666,7 +672,10 @@ class LLMEngine:
             receive_tokens = self._remote_prefill_receive_tokens = {}
         if transfer_id in receive_tokens:
             raise ValueError("cache receive id is already active")
-        seq = self._require_live_remote_prefill_reservation(transfer_id)
+        seq, reservation_timeout_s = (
+            self._require_live_remote_prefill_reservation(transfer_id)
+        )
+        timeout_s = min(timeout_s, reservation_timeout_s)
         staged_bytes = self._remote_prefill_receive_reserved_staged_bytes[transfer_id]
         receive_started_at = perf_counter()
         try:
