@@ -1,4 +1,5 @@
 import json
+import subprocess
 import sys
 from argparse import Namespace
 from importlib.util import module_from_spec, spec_from_file_location
@@ -21,6 +22,25 @@ SUMMARY_SPEC = spec_from_file_location(
 assert SUMMARY_SPEC is not None and SUMMARY_SPEC.loader is not None
 SUMMARY_MODULE = module_from_spec(SUMMARY_SPEC)
 SUMMARY_SPEC.loader.exec_module(SUMMARY_MODULE)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "run_qwen35_rental_validation.py",
+        "summarize_qwen35_rental.py",
+    ],
+)
+def test_rental_entry_points_run_from_outside_repository(script, tmp_path):
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / script), "--help"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "usage:" in result.stdout
 
 
 def args():

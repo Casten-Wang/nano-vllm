@@ -4,12 +4,27 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+from importlib.util import module_from_spec, spec_from_file_location
 import json
 import math
 import statistics
+import sys
 from pathlib import Path
 
-from nanovllm.benchmark_metadata import runtime_environment_identity
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    # The runner launches this script by path from arbitrary working directories.
+    sys.path.insert(0, str(ROOT))
+
+_METADATA_SPEC = spec_from_file_location(
+    "rental_summary_benchmark_metadata",
+    ROOT / "nanovllm" / "benchmark_metadata.py",
+)
+if _METADATA_SPEC is None or _METADATA_SPEC.loader is None:
+    raise RuntimeError("could not load benchmark metadata helpers")
+_METADATA = module_from_spec(_METADATA_SPEC)
+_METADATA_SPEC.loader.exec_module(_METADATA)
+runtime_environment_identity = _METADATA.runtime_environment_identity
 
 MOE_RUNTIME_MIN_THROUGHPUT_RATIO = 0.99
 MOE_RUNTIME_MIN_TPOT_SPEEDUP = 1.02

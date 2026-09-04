@@ -4,18 +4,29 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+from importlib.util import module_from_spec, spec_from_file_location
 import json
 import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from nanovllm.benchmark_metadata import (
-    checkpoint_manifest_metadata,
-    collect_runtime_environment,
-)
-
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    # Keep the rental entry point runnable from a fresh repository checkout.
+    sys.path.insert(0, str(ROOT))
+
+_METADATA_SPEC = spec_from_file_location(
+    "rental_benchmark_metadata",
+    ROOT / "nanovllm" / "benchmark_metadata.py",
+)
+if _METADATA_SPEC is None or _METADATA_SPEC.loader is None:
+    raise RuntimeError("could not load benchmark metadata helpers")
+_METADATA = module_from_spec(_METADATA_SPEC)
+_METADATA_SPEC.loader.exec_module(_METADATA)
+checkpoint_manifest_metadata = _METADATA.checkpoint_manifest_metadata
+collect_runtime_environment = _METADATA.collect_runtime_environment
+
 MATRIX_SCRIPT = ROOT / "scripts" / "benchmark_qwen35_matrix.py"
 KERNEL_SCRIPT = ROOT / "scripts" / "benchmark_qwen35_kernels.py"
 ATTENTION_KERNEL_SCRIPT = ROOT / "scripts" / "benchmark_attention_kernel.py"
