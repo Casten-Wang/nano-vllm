@@ -202,6 +202,8 @@ class FakeEngine:
                 "preemption_count": seq_id,
                 "preempted_token_progress": seq_id * 8,
                 "recomputed_tokens": seq_id * 4,
+                "time_to_first_schedule_s": float(seq_id) / 4,
+                "first_token_service_s": float(seq_id + 1) - float(seq_id) / 4,
                 "ttft_s": float(seq_id + 1),
                 "tpot_s": 0.5,
                 "latency_s": float(seq_id + 2),
@@ -258,6 +260,8 @@ def test_replay_injects_at_logical_steps_and_preserves_raw_evidence():
     assert result["request_samples"][1]["preemption_count"] == 1
     assert result["request_samples"][1]["preempted_token_progress"] == 8
     assert result["request_samples"][1]["recomputed_tokens"] == 4
+    assert result["request_samples"][1]["time_to_first_schedule_s"] == 0.25
+    assert result["request_samples"][1]["first_token_service_s"] == 1.75
     assert result["preemption"] == {
         "all": {
             "request_count": 2,

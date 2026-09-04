@@ -38,6 +38,7 @@ class Sequence:
         self.block_table = []
         self.state_slot: int | None = None
         self.arrival_time: float | None = None
+        self.first_scheduled_time: float | None = None
         self.first_token_time: float | None = None
         self.finish_time: float | None = None
         # Scheduler-owned attribution. These counters stay on the request so

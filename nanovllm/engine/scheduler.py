@@ -398,7 +398,10 @@ class Scheduler:
         seq.record_computed_span(0, seq.num_prompt_tokens)
         seq.num_scheduled_tokens = 0
         seq.is_prefill = False
-        seq.first_token_time = perf_counter()
+        committed_at = perf_counter()
+        if seq.first_scheduled_time is None:
+            seq.first_scheduled_time = committed_at
+        seq.first_token_time = committed_at
         seq.append_token(first_token_id)
         if (
             not seq.ignore_eos and first_token_id in self.eos_token_ids
@@ -508,6 +511,11 @@ class Scheduler:
             self.current_prefill_starvation_steps = 0
         self.schedule_steps += 1
         seqs = result.seqs if isinstance(result, ScheduleResult) else result[0]
+        first_scheduled = [seq for seq in seqs if seq.first_scheduled_time is None]
+        if first_scheduled:
+            scheduled_at = perf_counter()
+            for seq in first_scheduled:
+                seq.first_scheduled_time = scheduled_at
         if self.state_manager is not None:
             slots = self.state_manager.acquire_many(seq.seq_id for seq in seqs)
             for seq, slot in zip(seqs, slots):

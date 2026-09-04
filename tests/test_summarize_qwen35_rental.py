@@ -1079,6 +1079,8 @@ def scheduler_trace_result(mode, repeat=1):
             "recomputed_tokens": (
                 16 if not optimized and class_index == 0 and index < 2 else 0
             ),
+            "time_to_first_schedule_s": 0.04 + repeat * 0.0005,
+            "first_token_service_s": 0.06 + repeat * 0.0005,
             "ttft_s": 0.1 + repeat * 0.001,
             "tpot_s": 0.02,
             "latency_s": 0.2 + repeat * 0.001,
@@ -1125,6 +1127,12 @@ def scheduler_trace_result(mode, repeat=1):
             "latency": {
                 "all": {
                     "p95_ttft_s": 0.12 if optimized else 0.15,
+                    "p95_time_to_first_schedule_s": (
+                        0.05 if optimized else 0.07
+                    ),
+                    "p95_first_token_service_s": (
+                        0.07 if optimized else 0.08
+                    ),
                     "p95_tpot_s": 0.02,
                     "p95_latency_s": 0.22 if optimized else 0.25,
                 }
@@ -1293,6 +1301,22 @@ def test_scheduler_trace_rejects_inconsistent_request_preemption_summary():
     assert not summary["valid"]
     assert not summary["runs"][0]["preemption_contract_valid"]
     assert not summary["runs"][1]["scheduler_metrics_valid"]
+
+
+def test_scheduler_trace_rejects_invalid_ttft_decomposition():
+    results = [scheduler_trace_result("baseline", repeat) for repeat in (1, 2)]
+    results[0]["replay"]["request_samples"][0][
+        "first_token_service_s"
+    ] += 1.0
+
+    summary = MODULE.summarize_scheduler_trace_repeats(
+        results,
+        expected_tp_size=4,
+        mode="baseline",
+    )
+
+    assert not summary["valid"]
+    assert not summary["runs"][0]["sample_contract_valid"]
 
 
 def load_fairness_repeats(root, mode):

@@ -282,7 +282,13 @@ def _request_latency_summary(samples: list[dict[str, object]]) -> dict[str, obje
 
     def summarize(items: list[dict[str, object]]) -> dict[str, float | int]:
         result: dict[str, float | int] = {"request_count": len(items)}
-        for name in ("ttft_s", "tpot_s", "latency_s"):
+        for name in (
+            "time_to_first_schedule_s",
+            "first_token_service_s",
+            "ttft_s",
+            "tpot_s",
+            "latency_s",
+        ):
             values = [float(item[name]) for item in items]
             result[f"avg_{name}"] = sum(values) / len(values) if values else 0.0
             for label, rank in (("p50", 0.50), ("p95", 0.95), ("p99", 0.99)):
@@ -471,6 +477,10 @@ def replay_scheduler_workload(
                     metric.get("preempted_token_progress", 0)
                 ),
                 "recomputed_tokens": int(metric.get("recomputed_tokens", 0)),
+                "time_to_first_schedule_s": metric[
+                    "time_to_first_schedule_s"
+                ],
+                "first_token_service_s": metric["first_token_service_s"],
                 "ttft_s": metric["ttft_s"],
                 "tpot_s": metric["tpot_s"],
                 "latency_s": metric["latency_s"],

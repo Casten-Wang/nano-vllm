@@ -2598,7 +2598,20 @@ def summarize_scheduler_trace_repeats(
                     isinstance(item.get(name), (int, float))
                     and math.isfinite(item[name])
                     and item[name] >= 0
-                    for name in ("ttft_s", "tpot_s", "latency_s")
+                    for name in (
+                        "time_to_first_schedule_s",
+                        "first_token_service_s",
+                        "ttft_s",
+                        "tpot_s",
+                        "latency_s",
+                    )
+                )
+                and math.isclose(
+                    item["time_to_first_schedule_s"]
+                    + item["first_token_service_s"],
+                    item["ttft_s"],
+                    rel_tol=1e-9,
+                    abs_tol=1e-9,
                 )
                 for item in samples
             )
@@ -2696,6 +2709,12 @@ def summarize_scheduler_trace_repeats(
             "output_throughput_tok_s": result.get("output_throughput_tok_s"),
             "peak_torch_allocated_mib": result.get("peak_torch_allocated_mib"),
             "p95_ttft_s": latency.get("p95_ttft_s"),
+            "p95_time_to_first_schedule_s": latency.get(
+                "p95_time_to_first_schedule_s"
+            ),
+            "p95_first_token_service_s": latency.get(
+                "p95_first_token_service_s"
+            ),
             "p95_tpot_s": latency.get("p95_tpot_s"),
             "p95_latency_s": latency.get("p95_latency_s"),
         }
@@ -2787,6 +2806,8 @@ def summarize_scheduler_trace_repeats(
         "output_throughput_tok_s",
         "peak_torch_allocated_mib",
         "p95_ttft_s",
+        "p95_time_to_first_schedule_s",
+        "p95_first_token_service_s",
         "p95_tpot_s",
         "p95_latency_s",
         "preempted_request_count",
@@ -2842,6 +2863,8 @@ def compare_scheduler_trace_modes(baseline: dict, optimized: dict) -> dict:
     for name in (
         "total_time_s",
         "p95_ttft_s",
+        "p95_time_to_first_schedule_s",
+        "p95_first_token_service_s",
         "p95_tpot_s",
         "p95_latency_s",
         "preempted_request_count",

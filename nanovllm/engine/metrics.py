@@ -70,12 +70,16 @@ class EngineMetrics:
     peak_remote_prefill_send_staged_bytes: int = 0
     remote_prefill_sent_bytes: int = 0
     request_ttfts: list[float] | None = None
+    request_time_to_first_schedules: list[float] | None = None
+    request_first_token_service_times: list[float] | None = None
     request_tpots: list[float] | None = None
     request_latencies: list[float] | None = None
     request_samples: list[dict[str, int | float]] | None = None
 
     def __post_init__(self):
         self.request_ttfts = []
+        self.request_time_to_first_schedules = []
+        self.request_first_token_service_times = []
         self.request_tpots = []
         self.request_latencies = []
         self.request_samples = []
@@ -140,6 +144,8 @@ class EngineMetrics:
         self.peak_remote_prefill_send_staged_bytes = active_send_staged_bytes
         self.remote_prefill_sent_bytes = 0
         self.request_ttfts.clear()
+        self.request_time_to_first_schedules.clear()
+        self.request_first_token_service_times.clear()
         self.request_tpots.clear()
         self.request_latencies.clear()
         self.request_samples.clear()
@@ -252,8 +258,15 @@ class EngineMetrics:
         TPOT is recorded as 0.
         """
         for seq in seqs:
-            if seq.arrival_time is None or seq.first_token_time is None or seq.finish_time is None:
+            if (
+                seq.arrival_time is None
+                or seq.first_scheduled_time is None
+                or seq.first_token_time is None
+                or seq.finish_time is None
+            ):
                 continue
+            time_to_first_schedule = seq.first_scheduled_time - seq.arrival_time
+            first_token_service = seq.first_token_time - seq.first_scheduled_time
             ttft = seq.first_token_time - seq.arrival_time
             latency = seq.finish_time - seq.arrival_time
             num_output_tokens = seq.num_completion_tokens
@@ -261,6 +274,8 @@ class EngineMetrics:
             if num_output_tokens > 1:
                 tpot = (seq.finish_time - seq.first_token_time) / (num_output_tokens - 1)
             self.request_ttfts.append(ttft)
+            self.request_time_to_first_schedules.append(time_to_first_schedule)
+            self.request_first_token_service_times.append(first_token_service)
             self.request_tpots.append(tpot)
             self.request_latencies.append(latency)
             self.request_samples.append({
@@ -270,6 +285,8 @@ class EngineMetrics:
                 "preemption_count": seq.num_preemptions,
                 "preempted_token_progress": seq.preempted_token_progress,
                 "recomputed_tokens": seq.recomputed_tokens,
+                "time_to_first_schedule_s": time_to_first_schedule,
+                "first_token_service_s": first_token_service,
                 "ttft_s": ttft,
                 "tpot_s": tpot,
                 "latency_s": latency,
@@ -550,6 +567,42 @@ class EngineMetrics:
             "p95_ttft_s": self._percentile(self.request_ttfts, 0.95),
             "p99_ttft_s": self._percentile(self.request_ttfts, 0.99),
             "max_ttft_s": self._max(self.request_ttfts),
+            "avg_time_to_first_schedule_s": self._avg(
+                self.request_time_to_first_schedules
+            ),
+            "p50_time_to_first_schedule_s": self._percentile(
+                self.request_time_to_first_schedules,
+                0.50,
+            ),
+            "p95_time_to_first_schedule_s": self._percentile(
+                self.request_time_to_first_schedules,
+                0.95,
+            ),
+            "p99_time_to_first_schedule_s": self._percentile(
+                self.request_time_to_first_schedules,
+                0.99,
+            ),
+            "max_time_to_first_schedule_s": self._max(
+                self.request_time_to_first_schedules
+            ),
+            "avg_first_token_service_s": self._avg(
+                self.request_first_token_service_times
+            ),
+            "p50_first_token_service_s": self._percentile(
+                self.request_first_token_service_times,
+                0.50,
+            ),
+            "p95_first_token_service_s": self._percentile(
+                self.request_first_token_service_times,
+                0.95,
+            ),
+            "p99_first_token_service_s": self._percentile(
+                self.request_first_token_service_times,
+                0.99,
+            ),
+            "max_first_token_service_s": self._max(
+                self.request_first_token_service_times
+            ),
             "avg_tpot_s": self._avg(self.request_tpots),
             "p50_tpot_s": self._percentile(self.request_tpots, 0.50),
             "p95_tpot_s": self._percentile(self.request_tpots, 0.95),

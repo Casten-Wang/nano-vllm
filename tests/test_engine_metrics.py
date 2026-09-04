@@ -139,6 +139,7 @@ class EngineMetricsTest(unittest.TestCase):
                 SimpleNamespace(
                     seq_id=seq_id,
                     arrival_time=0.0,
+                    first_scheduled_time=latency / 4,
                     first_token_time=latency / 2,
                     finish_time=latency,
                     num_prompt_tokens=8,
@@ -171,6 +172,8 @@ class EngineMetricsTest(unittest.TestCase):
                 "preemption_count": 0,
                 "preempted_token_progress": 0,
                 "recomputed_tokens": 0,
+                "time_to_first_schedule_s": 0.25,
+                "first_token_service_s": 0.25,
                 "ttft_s": 0.5,
                 "tpot_s": 0.5,
                 "latency_s": 1.0,
@@ -179,6 +182,28 @@ class EngineMetricsTest(unittest.TestCase):
 
         metrics.reset()
         self.assertEqual(metrics.to_dict()["request_samples"], [])
+
+    def test_request_latency_decomposes_queue_and_first_token_service(self):
+        metrics = EngineMetrics()
+        seq = SimpleNamespace(
+            seq_id=1,
+            arrival_time=10.0,
+            first_scheduled_time=12.0,
+            first_token_time=15.0,
+            finish_time=17.0,
+            num_prompt_tokens=8,
+            num_completion_tokens=2,
+            num_preemptions=0,
+            preempted_token_progress=0,
+            recomputed_tokens=0,
+        )
+
+        metrics.record_finished_sequences([seq])
+        result = metrics.to_dict()
+
+        self.assertEqual(result["avg_time_to_first_schedule_s"], 2.0)
+        self.assertEqual(result["avg_first_token_service_s"], 3.0)
+        self.assertEqual(result["avg_ttft_s"], 5.0)
 
     def test_empty_request_latency_percentiles_are_zero(self):
         result = EngineMetrics().to_dict()

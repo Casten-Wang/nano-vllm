@@ -498,6 +498,7 @@ def test_remote_prefill_terminal_first_token_releases_resources(
 
     assert seq.status is SequenceStatus.FINISHED
     assert seq.completion_token_ids == [first_token_id]
+    assert seq.first_scheduled_time == seq.first_token_time
     assert seq.computed_token_ranges == [(0, seq.num_prompt_tokens)]
     assert seq.recomputed_tokens == 0
     assert not scheduler.running
@@ -1335,6 +1336,23 @@ def test_recomputed_tokens_count_only_replayed_scheduler_inputs():
     assert seq.preempted_token_progress == 6
     assert seq.recomputed_tokens == 2
     assert seq.computed_token_ranges == [(0, 7)]
+
+
+def test_scheduler_records_first_execution_time_once(monkeypatch):
+    scheduler = make_scheduler(max_tokens=4, max_seqs=1, block_size=4)
+    seq = Sequence([1, 2, 3, 4, 5, 6])
+    scheduler.add(seq)
+    timestamps = iter((12.0, 20.0, 30.0))
+    monkeypatch.setattr(scheduler_mod, "perf_counter", lambda: next(timestamps))
+
+    first = scheduler.schedule()
+    assert seq.first_scheduled_time == 12.0
+    scheduler.postprocess_mixed(first, [7])
+    second = scheduler.schedule()
+
+    assert seq.first_scheduled_time == 12.0
+    scheduler.postprocess_mixed(second, [8])
+    assert seq.first_token_time == 20.0
 
 
 def test_computed_token_ranges_preserve_disjoint_prefix_cache_gaps():
