@@ -100,6 +100,61 @@ def ranked_records_complete(records: object, tp_size: object) -> bool:
     )
 
 
+def preflight_hardware_matches_environment(
+    memory_preflight: dict,
+    environment: dict,
+) -> bool:
+    """Match every preflight rank to the benchmark CUDA device descriptor."""
+
+    devices = environment.get("cuda_devices")
+    device_count = environment.get("cuda_device_count")
+    results = memory_preflight.get("results")
+    if (
+        not isinstance(devices, list)
+        or not isinstance(device_count, int)
+        or isinstance(device_count, bool)
+        or device_count != len(devices)
+        or not isinstance(results, dict)
+        or not results
+    ):
+        return False
+    fields = {
+        "logical_device_index": "index",
+        "name": "name",
+        "compute_capability": "capability",
+        "multiprocessor_count": "multiprocessor_count",
+        "total": "total_memory",
+    }
+    for tp_name, result in results.items():
+        if not isinstance(tp_name, str) or not tp_name.startswith("tp"):
+            return False
+        try:
+            tp_size = int(tp_name.removeprefix("tp"))
+        except ValueError:
+            return False
+        ranks = result.get("memory_by_rank") if isinstance(result, dict) else None
+        if (
+            tp_size <= 0
+            or not isinstance(ranks, list)
+            or len(ranks) != tp_size
+            or len(devices) < tp_size
+        ):
+            return False
+        for rank, preflight_rank in enumerate(ranks):
+            device = devices[rank]
+            if (
+                not isinstance(preflight_rank, dict)
+                or not isinstance(device, dict)
+                or any(
+                    preflight_rank.get(preflight_field)
+                    != device.get(environment_field)
+                    for preflight_field, environment_field in fields.items()
+                )
+            ):
+                return False
+    return True
+
+
 def expected_checkpoint_semantic_contract(quantization_format: str) -> dict:
     tensor_count, total_size = OFFICIAL_INDEX_CONTRACTS[quantization_format]
     quantization = {
@@ -414,6 +469,10 @@ def summarize_optional_gptq(
     memory_valid = (
         memory.get("valid") is True
         and set(memory.get("results", {})) == tp_names
+        and preflight_hardware_matches_environment(
+            memory,
+            performance.get("environment", {}),
+        )
     )
     performance_valid = (
         bool(performance_runs)
@@ -700,6 +759,10 @@ def summarize_optional_fp8_audit(
     memory_valid = (
         memory.get("valid") is True
         and set(memory.get("results", {})) == tp_names
+        and preflight_hardware_matches_environment(
+            memory,
+            performance.get("environment", {}),
+        )
     )
     runtime_storage_by_tp = {}
     for row in performance_runs:
@@ -4527,7 +4590,12 @@ def summarize(run_dir: Path, run_id: str) -> dict:
             )
         ),
         "memory_preflight_valid": (
-            memory["valid"] and set(memory_by_tp) == expected_tp_names
+            memory["valid"]
+            and set(memory_by_tp) == expected_tp_names
+            and preflight_hardware_matches_environment(
+                memory,
+                performance.get("environment", {}),
+            )
         ),
         "pd_transfer_baseline_valid": (
             set(pd_transfer) == expected_tp_names

@@ -230,6 +230,20 @@ class BenchmarkMetadataTest(unittest.TestCase):
             def get_device_capability(index=0):
                 return (9, index)
 
+            @staticmethod
+            def get_device_properties(index=0):
+                return type(
+                    "Properties",
+                    (),
+                    {
+                        "name": f"GPU-{index}",
+                        "major": 9,
+                        "minor": index,
+                        "multi_processor_count": 100 + index,
+                        "total_memory": (80 + index) * 1024**3,
+                    },
+                )()
+
         class FakeTorch:
             __version__ = "test"
             version = FakeVersion()
@@ -253,8 +267,20 @@ class BenchmarkMetadataTest(unittest.TestCase):
         self.assertEqual(
             result["cuda_devices"],
             [
-                {"index": 0, "name": "GPU-0", "capability": [9, 0]},
-                {"index": 1, "name": "GPU-1", "capability": [9, 1]},
+                {
+                    "index": 0,
+                    "name": "GPU-0",
+                    "capability": [9, 0],
+                    "multiprocessor_count": 100,
+                    "total_memory": 80 * 1024**3,
+                },
+                {
+                    "index": 1,
+                    "name": "GPU-1",
+                    "capability": [9, 1],
+                    "multiprocessor_count": 101,
+                    "total_memory": 81 * 1024**3,
+                },
             ],
         )
         self.assertEqual(result["nccl_version"], [2, 27, 3])

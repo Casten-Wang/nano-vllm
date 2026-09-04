@@ -18,6 +18,61 @@ SPEC.loader.exec_module(MODULE)
 SOURCE_COMMIT = "a" * 40
 
 
+def preflight_hardware(tp_size):
+    return [
+        {
+            "logical_device_index": rank,
+            "name": "NVIDIA H100 80GB HBM3",
+            "compute_capability": [9, 0],
+            "multiprocessor_count": 132,
+            "free": 80_000,
+            "total": 81_000,
+        }
+        for rank in range(tp_size)
+    ]
+
+
+def benchmark_environment(device_count=8):
+    return {
+        "cuda_device_count": device_count,
+        "cuda_devices": [
+            {
+                "index": rank,
+                "name": "NVIDIA H100 80GB HBM3",
+                "capability": [9, 0],
+                "multiprocessor_count": 132,
+                "total_memory": 81_000,
+            }
+            for rank in range(device_count)
+        ],
+    }
+
+
+def test_preflight_hardware_matches_benchmark_environment():
+    memory = {
+        "results": {
+            "tp4": {"memory_by_rank": preflight_hardware(4)},
+            "tp8": {"memory_by_rank": preflight_hardware(8)},
+        }
+    }
+
+    assert MODULE.preflight_hardware_matches_environment(
+        memory,
+        benchmark_environment(),
+    )
+
+
+def test_preflight_hardware_rejects_cross_machine_evidence():
+    memory = {"results": {"tp4": {"memory_by_rank": preflight_hardware(4)}}}
+    environment = benchmark_environment(4)
+    environment["cuda_devices"][2]["total_memory"] = 40_000
+
+    assert not MODULE.preflight_hardware_matches_environment(
+        memory,
+        environment,
+    )
+
+
 def write(path, value):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value))
@@ -140,7 +195,13 @@ def write_gptq_summary_inputs(root, run_id, *, backend="triton"):
     )
     write(
         root / "gptq/preflight/memory_preflight.json",
-        {"valid": True, "results": {"tp4": {}, "tp8": {}}},
+        {
+            "valid": True,
+            "results": {
+                "tp4": {"memory_by_rank": preflight_hardware(4)},
+                "tp8": {"memory_by_rank": preflight_hardware(8)},
+            },
+        },
     )
     rows = [
         {
@@ -179,6 +240,7 @@ def write_gptq_summary_inputs(root, run_id, *, backend="triton"):
         {
             "commits": [SOURCE_COMMIT],
             "workload": {"max_num_seqs": 64},
+            "environment": benchmark_environment(),
             "all_execution_paths_valid": True,
             "all_generation_valid": True,
             "all_repeat_output_digests_match": True,
@@ -345,7 +407,13 @@ def write_fp8_summary_inputs(
     )
     write(
         root / "fp8/preflight/memory_preflight.json",
-        {"valid": True, "results": {"tp4": {}, "tp8": {}}},
+        {
+            "valid": True,
+            "results": {
+                "tp4": {"memory_by_rank": preflight_hardware(4)},
+                "tp8": {"memory_by_rank": preflight_hardware(8)},
+            },
+        },
     )
     throughput_by_tp = throughput_by_tp or {4: 90.0, 8: 160.0}
     memory_by_tp = memory_by_tp or {4: 15_000.0, 8: 9_000.0}
@@ -405,6 +473,7 @@ def write_fp8_summary_inputs(
         root / f"fp8/performance/{fp8_run_id}_matrix_summary.json",
         {
             "commits": [SOURCE_COMMIT],
+            "environment": benchmark_environment(),
             "all_execution_paths_valid": True,
             "all_generation_valid": True,
             "all_repeat_output_digests_match": True,
@@ -814,6 +883,19 @@ def test_optional_gptq_summary_rejects_mixed_source_evidence(tmp_path):
     )
 
     assert not report["source_commit_valid"]
+    assert not report["valid"]
+
+
+def test_optional_gptq_rejects_cross_machine_memory_evidence(tmp_path):
+    write_gptq_summary_inputs(tmp_path, "run")
+    path = tmp_path / "gptq/performance/run-gptq_matrix_summary.json"
+    performance = json.loads(path.read_text())
+    performance["environment"]["cuda_devices"][1]["name"] = "different GPU"
+    write(path, performance)
+
+    report = MODULE.summarize_optional_gptq(tmp_path, "run")
+
+    assert not report["memory_preflight_valid"]
     assert not report["valid"]
 
 
@@ -1753,6 +1835,7 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
             "valid": True,
             "results": {
                 "tp4": {
+                    "memory_by_rank": preflight_hardware(4),
                     "local_parameter_bytes": 16_000,
                     "model_max_position_embeddings": 262_144,
                     "configured_max_model_len": 16_384,
@@ -2011,6 +2094,7 @@ def test_summary_selects_valid_performance_and_preserves_evidence(tmp_path):
         tmp_path / f"performance/{run_id}_matrix_summary.json",
         {
             "commits": [SOURCE_COMMIT],
+            "environment": benchmark_environment(4),
             "workload": {
                 "checkpoint_manifest_digest": "weights",
                 "max_num_seqs": 64,

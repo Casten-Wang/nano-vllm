@@ -285,19 +285,26 @@ def collect_benchmark_metadata(torch_module=None) -> dict:
         torch_version = getattr(torch_module, "__version__", "unknown")
         cuda_version = getattr(torch_module.version, "cuda", None)
         if cuda_available:
-            device = torch_module.cuda.get_device_name()
-            device_capability = list(torch_module.cuda.get_device_capability())
             device_count = torch_module.cuda.device_count()
-            cuda_devices = [
-                {
-                    "index": index,
-                    "name": torch_module.cuda.get_device_name(index),
-                    "capability": list(
-                        torch_module.cuda.get_device_capability(index)
-                    ),
-                }
-                for index in range(device_count)
-            ]
+            for index in range(device_count):
+                properties = torch_module.cuda.get_device_properties(index)
+                cuda_devices.append(
+                    {
+                        "index": index,
+                        "name": str(properties.name),
+                        "capability": [
+                            int(properties.major),
+                            int(properties.minor),
+                        ],
+                        "multiprocessor_count": int(
+                            properties.multi_processor_count
+                        ),
+                        "total_memory": int(properties.total_memory),
+                    }
+                )
+            if cuda_devices:
+                device = cuda_devices[0]["name"]
+                device_capability = cuda_devices[0]["capability"]
 
     return {
         "commit": git_value(["rev-parse", "HEAD"]),
