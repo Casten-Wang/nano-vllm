@@ -99,10 +99,16 @@ class Config:
     max_remote_prefill_staging_bytes: int | None = None
     distributed_port: int | None = None
     shared_memory_name: str | None = None
+    cache_transfer_model_id: str | None = None
 
     def __post_init__(self):
         if not os.path.isdir(self.model):
             raise ValueError(f"model directory does not exist: {self.model}")
+        if self.cache_transfer_model_id is not None and (
+            not isinstance(self.cache_transfer_model_id, str)
+            or not self.cache_transfer_model_id
+        ):
+            raise ValueError("cache_transfer_model_id must be a non-empty string")
         _require_positive_int(
             self.max_num_batched_tokens,
             "max_num_batched_tokens",

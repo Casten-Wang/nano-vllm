@@ -64,6 +64,14 @@ CONTROL_RESULT_COMMAND = "__nanovllm_call_with_result__"
 _NO_CONTROL_RESULT = object()
 
 
+def _runner_cache_fingerprint(runner: object) -> str:
+    """Return initialized identity, tolerating lightweight unit-test doubles."""
+
+    from nanovllm.engine.cache_transfer import LEGACY_CACHE_FINGERPRINT
+
+    return getattr(runner, "cache_transfer_fingerprint", LEGACY_CACHE_FINGERPRINT)
+
+
 def dtype_nbytes(dtype: torch.dtype) -> int:
     return torch.empty((), dtype=dtype, device="cpu").element_size()
 
@@ -328,6 +336,8 @@ class ModelRunner:
         ),
     ):
         self.config = config
+        from nanovllm.engine.cache_transfer import build_cache_transfer_fingerprint
+        self.cache_transfer_fingerprint = build_cache_transfer_fingerprint(config)
         hf_config = config.model_config
         model_spec = config.model_spec
         if hf_config is None or model_spec is None:
@@ -1613,6 +1623,7 @@ class ModelRunner:
             tensor_parallel_size=self.world_size,
             block_size=self.block_size,
             cached_tokens=seq.num_cached_tokens,
+            cache_fingerprint=_runner_cache_fingerprint(self),
             recurrent_states=recurrent,
             convolution_states=convolution,
             to_host=to_host,
@@ -1839,6 +1850,7 @@ class ModelRunner:
             transfer_id=transfer_id,
             dst_rank=self.rank,
             dst_tp_size=self.world_size,
+            expected_cache_fingerprint=_runner_cache_fingerprint(self),
             expected_peer_bytes=expected_peer_bytes,
             timeout_s=timeout_s,
             max_payload_bytes=max_payload_bytes,
@@ -1945,6 +1957,7 @@ class ModelRunner:
             src_rank=self.rank,
             block_size=self.block_size,
             cached_tokens=seq.num_cached_tokens,
+            cache_fingerprint=_runner_cache_fingerprint(self),
             plan=plan,
             host_staging_pool=self._host_staging_pool(),
         )
@@ -2266,6 +2279,7 @@ class ModelRunner:
             expected_tensor_parallel_size=self.world_size,
             expected_block_size=self.block_size,
             expected_cached_tokens=seq.num_prompt_tokens,
+            expected_cache_fingerprint=_runner_cache_fingerprint(self),
             expected_payload_bytes=expected_bytes,
         ) as receiver:
             payload = receiver.receive(
@@ -2325,6 +2339,7 @@ class ModelRunner:
             expected_tensor_parallel_size=self.world_size,
             expected_block_size=self.block_size,
             expected_cached_tokens=expected_cached_tokens,
+            expected_cache_fingerprint=_runner_cache_fingerprint(self),
             expected_payload_bytes=(
                 None
                 if expected_payload_bytes is None

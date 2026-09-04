@@ -267,6 +267,21 @@ def test_receive_rejects_mismatched_header_before_payload_allocation():
     assert pool.storage_stats()["allocation_count"] == 0
 
 
+def test_receive_rejects_wrong_cache_fingerprint_before_payload_allocation():
+    sink = BufferSocket()
+    send_rank_cache_transfer(sink, make_payload())
+    pool = HostStagingBufferPool()
+
+    with pytest.raises(ValueError, match="fingerprint does not match destination"):
+        receive_rank_cache_transfer(
+            BufferSocket(sink.data),
+            host_staging_pool=pool,
+            expected_cache_fingerprint="different-model-and-layout",
+        )
+
+    assert pool.storage_stats()["allocation_count"] == 0
+
+
 @pytest.mark.parametrize(
     ("name", "value"),
     [

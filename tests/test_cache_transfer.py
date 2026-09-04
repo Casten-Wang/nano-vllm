@@ -9,6 +9,7 @@ from nanovllm.engine.cache_transfer import (
     CacheTransferSession,
     HostStagingBufferPool,
     RankCacheTransfer,
+    build_cache_transfer_fingerprint,
     estimate_rank_cache_transfer_bytes,
     export_rank_cache,
     import_rank_cache,
@@ -41,6 +42,42 @@ def make_states(fill: bool = True):
     return (
         tuple(torch.zeros_like(tensor) for tensor in recurrent),
         tuple(torch.zeros_like(tensor) for tensor in convolution),
+    )
+
+
+def test_cache_transfer_fingerprint_tracks_identity_and_cache_layout():
+    model_config = SimpleNamespace(
+        num_attention_heads=32,
+        num_key_value_heads=4,
+        head_dim=128,
+        hidden_size=4096,
+        dtype=torch.bfloat16,
+    )
+    model_spec = SimpleNamespace(
+        architecture="Qwen3_5MoeForCausalLM",
+        full_attention_layers=(3, 7),
+        linear_attention_layers=(0, 1, 2, 4, 5, 6),
+        num_hidden_layers=8,
+    )
+
+    def config(model_id, *, block_size=256):
+        return SimpleNamespace(
+            model="/different/local/path",
+            cache_transfer_model_id=model_id,
+            hf_config=SimpleNamespace(_commit_hash=None),
+            model_spec=model_spec,
+            model_config=model_config,
+            kv_cache_dtype="auto",
+            recurrent_state_dtype="float32",
+            kvcache_block_size=block_size,
+            sliding_window_size=None,
+        )
+
+    baseline = build_cache_transfer_fingerprint(config("qwen36-revision-a"))
+    assert baseline == build_cache_transfer_fingerprint(config("qwen36-revision-a"))
+    assert baseline != build_cache_transfer_fingerprint(config("qwen36-revision-b"))
+    assert baseline != build_cache_transfer_fingerprint(
+        config("qwen36-revision-a", block_size=512)
     )
 
 
@@ -231,6 +268,37 @@ def test_float_rank_cache_round_trip_uses_logical_block_order():
         torch.testing.assert_close(actual, expected)
     for expected, actual in zip(convolution, destination_convolution):
         torch.testing.assert_close(actual, expected)
+
+
+def test_import_rejects_wrong_cache_fingerprint_before_modifying_destination():
+    source = make_float_cache()
+    payload = export_rank_cache(
+        source,
+        None,
+        [1],
+        transfer_id="request-fingerprint/attempt-1",
+        tensor_parallel_rank=0,
+        tensor_parallel_size=1,
+        block_size=2,
+        cached_tokens=2,
+        cache_fingerprint="source-model",
+    )
+    destination = make_float_cache(fill=False)
+
+    with pytest.raises(ValueError, match="fingerprint does not match destination"):
+        import_rank_cache(
+            payload,
+            destination,
+            None,
+            [0],
+            transfer_id="request-fingerprint/attempt-1",
+            tensor_parallel_rank=0,
+            tensor_parallel_size=1,
+            block_size=2,
+            cache_fingerprint="destination-model",
+        )
+
+    assert torch.count_nonzero(destination) == 0
 
 
 def test_int8_rank_cache_round_trip_includes_scales():

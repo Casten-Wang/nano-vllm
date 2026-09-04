@@ -1185,6 +1185,7 @@ def reshard_qwen35_rank_cache_transfers(
         first.transfer_id,
         first.block_size,
         first.cached_tokens,
+        first.cache_fingerprint,
         first.num_blocks,
         len(first.recurrent_states),
         len(first.convolution_states),
@@ -1205,6 +1206,7 @@ def reshard_qwen35_rank_cache_transfers(
                 payload.transfer_id,
                 payload.block_size,
                 payload.cached_tokens,
+                payload.cache_fingerprint,
                 payload.num_blocks,
                 len(payload.recurrent_states),
                 len(payload.convolution_states),
@@ -1257,6 +1259,7 @@ def reshard_qwen35_rank_cache_transfers(
             tensor_parallel_size=dst_tp_size,
             block_size=first.block_size,
             cached_tokens=first.cached_tokens,
+            cache_fingerprint=first.cache_fingerprint,
             kv_blocks=destination_kv[rank],
             kv_scales=destination_scales[rank],
             recurrent_states=tuple(

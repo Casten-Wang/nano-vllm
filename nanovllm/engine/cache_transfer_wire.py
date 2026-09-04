@@ -28,7 +28,7 @@ from nanovllm.engine.heterogeneous_cache_transfer import (
 
 
 WIRE_MAGIC = b"NVCT"
-WIRE_VERSION = 1
+WIRE_VERSION = 2
 WIRE_HEADER = struct.Struct("!4sBQQ")
 WIRE_DIGEST_BYTES = hashlib.sha256().digest_size
 MAX_HEADER_BYTES = 64 * 1024
@@ -37,7 +37,7 @@ _CHUNK_BYTES = 1024 * 1024
 _TRANSFER_ACK = b"\x01"
 _TRANSFER_NACK = b"\x00"
 PEER_WIRE_MAGIC = b"NVHP"
-PEER_WIRE_VERSION = 1
+PEER_WIRE_VERSION = 2
 
 _DTYPE_TO_NAME = {
     torch.float16: "float16",
@@ -106,6 +106,7 @@ def send_rank_cache_transfer(sock, payload: RankCacheTransfer) -> int:
             "tensor_parallel_size": payload.tensor_parallel_size,
             "block_size": payload.block_size,
             "cached_tokens": payload.cached_tokens,
+            "cache_fingerprint": payload.cache_fingerprint,
             "tensors": descriptors,
         },
         separators=(",", ":"),
@@ -151,6 +152,7 @@ def send_peer_cache_fragment(sock, fragment: PeerCacheFragment) -> int:
             "dst_tp_size": fragment.dst_tp_size,
             "block_size": fragment.block_size,
             "cached_tokens": fragment.cached_tokens,
+            "cache_fingerprint": fragment.cache_fingerprint,
             "slices": descriptors,
         },
         separators=(",", ":"),
@@ -219,6 +221,7 @@ def receive_rank_cache_transfer(
     expected_tensor_parallel_size: int | None = None,
     expected_block_size: int | None = None,
     expected_cached_tokens: int | None = None,
+    expected_cache_fingerprint: str | None = None,
     expected_payload_bytes: int | None = None,
 ) -> RankCacheTransfer:
     """Receive and verify one payload into newly owned CPU tensors."""
@@ -247,6 +250,7 @@ def receive_rank_cache_transfer(
     tensor_parallel_size = header.get("tensor_parallel_size")
     block_size = header.get("block_size")
     cached_tokens = header.get("cached_tokens")
+    cache_fingerprint = header.get("cache_fingerprint")
     if (
         not isinstance(format_version, int)
         or isinstance(format_version, bool)
@@ -265,6 +269,8 @@ def receive_rank_cache_transfer(
         or not isinstance(cached_tokens, int)
         or isinstance(cached_tokens, bool)
         or cached_tokens <= 0
+        or not isinstance(cache_fingerprint, str)
+        or not cache_fingerprint
     ):
         raise ValueError("cache transfer wire header metadata is invalid")
     expectations = (
@@ -281,6 +287,7 @@ def receive_rank_cache_transfer(
         ),
         ("block size", block_size, expected_block_size),
         ("cached token count", cached_tokens, expected_cached_tokens),
+        ("fingerprint", cache_fingerprint, expected_cache_fingerprint),
         ("payload byte count", body_bytes, expected_payload_bytes),
     )
     for name, actual, expected in expectations:
@@ -379,6 +386,7 @@ def receive_rank_cache_transfer(
             tensor_parallel_size=tensor_parallel_size,
             block_size=block_size,
             cached_tokens=cached_tokens,
+            cache_fingerprint=cache_fingerprint,
             kv_blocks=kv_blocks,
             kv_scales=kv_scales,
             recurrent_states=recurrent,
@@ -406,6 +414,7 @@ def receive_peer_cache_fragment(
     expected_transfer_id: str | None = None,
     expected_src_rank: int | None = None,
     expected_dst_rank: int | None = None,
+    expected_cache_fingerprint: str | None = None,
     expected_payload_bytes: int | None = None,
 ) -> PeerCacheFragment:
     """Receive and verify one heterogeneous-TP peer fragment."""
@@ -429,6 +438,7 @@ def receive_peer_cache_fragment(
     if not isinstance(header, dict):
         raise ValueError("peer cache fragment wire header is invalid")
     transfer_id = header.get("transfer_id")
+    cache_fingerprint = header.get("cache_fingerprint")
     integer_names = (
         "src_rank",
         "dst_rank",
@@ -441,6 +451,8 @@ def receive_peer_cache_fragment(
     if (
         not isinstance(transfer_id, str)
         or not transfer_id
+        or not isinstance(cache_fingerprint, str)
+        or not cache_fingerprint
         or any(
             not isinstance(value, int) or isinstance(value, bool)
             for value in integers.values()
@@ -451,6 +463,7 @@ def receive_peer_cache_fragment(
         ("transfer id", transfer_id, expected_transfer_id),
         ("source rank", integers["src_rank"], expected_src_rank),
         ("destination rank", integers["dst_rank"], expected_dst_rank),
+        ("fingerprint", cache_fingerprint, expected_cache_fingerprint),
         ("payload byte count", body_bytes, expected_payload_bytes),
     )
     for name, actual, expected in expectations:
@@ -539,6 +552,7 @@ def receive_peer_cache_fragment(
         dst_tp_size=integers["dst_tp_size"],
         block_size=integers["block_size"],
         cached_tokens=integers["cached_tokens"],
+        cache_fingerprint=cache_fingerprint,
         slices=tuple(slices),
     )
     if fragment.nbytes != body_bytes:
@@ -562,6 +576,7 @@ class RankCacheReceiver:
         expected_tensor_parallel_size: int | None = None,
         expected_block_size: int | None = None,
         expected_cached_tokens: int | None = None,
+        expected_cache_fingerprint: str | None = None,
         expected_payload_bytes: int | None = None,
     ) -> None:
         if not isinstance(host, str) or not host:
@@ -580,6 +595,7 @@ class RankCacheReceiver:
             "expected_tensor_parallel_size": expected_tensor_parallel_size,
             "expected_block_size": expected_block_size,
             "expected_cached_tokens": expected_cached_tokens,
+            "expected_cache_fingerprint": expected_cache_fingerprint,
             "expected_payload_bytes": expected_payload_bytes,
         }
         self._listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -653,6 +669,7 @@ class PendingRankCacheReceive:
         expected_tensor_parallel_size: int | None = None,
         expected_block_size: int | None = None,
         expected_cached_tokens: int | None = None,
+        expected_cache_fingerprint: str | None = None,
         expected_payload_bytes: int | None = None,
     ) -> None:
         self._receiver = RankCacheReceiver(
@@ -666,6 +683,7 @@ class PendingRankCacheReceive:
             expected_tensor_parallel_size=expected_tensor_parallel_size,
             expected_block_size=expected_block_size,
             expected_cached_tokens=expected_cached_tokens,
+            expected_cache_fingerprint=expected_cache_fingerprint,
             expected_payload_bytes=expected_payload_bytes,
         )
         self._timeout_s = timeout_s
@@ -805,6 +823,7 @@ class PendingPeerCacheReceiveGroup:
         transfer_id: str,
         dst_rank: int,
         dst_tp_size: int,
+        expected_cache_fingerprint: str | None = None,
         expected_peer_bytes: dict[int, int],
         timeout_s: float = 30.0,
         max_payload_bytes: int = DEFAULT_MAX_PAYLOAD_BYTES,
@@ -819,6 +838,11 @@ class PendingPeerCacheReceiveGroup:
             raise ValueError("peer cache receiver port must be in [0, 65535]")
         if not isinstance(transfer_id, str) or not transfer_id:
             raise ValueError("peer cache receiver transfer id must not be empty")
+        if expected_cache_fingerprint is not None and (
+            not isinstance(expected_cache_fingerprint, str)
+            or not expected_cache_fingerprint
+        ):
+            raise ValueError("peer cache receiver fingerprint must not be empty")
         if (
             not isinstance(dst_rank, int)
             or isinstance(dst_rank, bool)
@@ -851,6 +875,7 @@ class PendingPeerCacheReceiveGroup:
         self._transfer_id = transfer_id
         self._dst_rank = dst_rank
         self._dst_tp_size = dst_tp_size
+        self._expected_cache_fingerprint = expected_cache_fingerprint
         self._expected_peer_bytes = dict(expected_peer_bytes)
         self._timeout_s = timeout_s
         self._max_payload_bytes = max_payload_bytes
@@ -920,6 +945,7 @@ class PendingPeerCacheReceiveGroup:
                 max_payload_bytes=self._max_payload_bytes,
                 expected_transfer_id=self._transfer_id,
                 expected_dst_rank=self._dst_rank,
+                expected_cache_fingerprint=self._expected_cache_fingerprint,
             )
             expected_bytes = self._expected_peer_bytes.get(fragment.src_rank)
             if expected_bytes is None:

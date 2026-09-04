@@ -896,6 +896,7 @@ def test_model_runner_installs_before_acknowledging_peer_receivers():
         transfer_id="transfer-1",
         dst_rank=0,
         dst_tp_size=8,
+        expected_cache_fingerprint="legacy-unscoped",
         expected_peer_bytes={
             src_rank: byte_count
             for src_rank, dst_rank, byte_count in plan.profile.peer_bytes

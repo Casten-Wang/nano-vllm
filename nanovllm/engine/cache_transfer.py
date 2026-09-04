@@ -4,13 +4,62 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum, auto
+import hashlib
+import json
 import math
+from pathlib import Path
 from threading import Lock
 
 import torch
 
 
 TRANSFER_FORMAT_VERSION = 1
+LEGACY_CACHE_FINGERPRINT = "legacy-unscoped"
+
+
+def build_cache_transfer_fingerprint(config: object) -> str:
+    """Identify model semantics and cache layout across PD workers."""
+
+    model_spec = getattr(config, "model_spec", None)
+    model_config = getattr(config, "model_config", None)
+    if model_spec is None or model_config is None:
+        raise ValueError("cache transfer requires an initialized model config")
+    explicit_id = getattr(config, "cache_transfer_model_id", None)
+    if explicit_id is not None:
+        if not isinstance(explicit_id, str) or not explicit_id:
+            raise ValueError("cache transfer model id must be a non-empty string")
+        model_identity = f"explicit:{explicit_id}"
+    else:
+        hf_config = getattr(config, "hf_config", None)
+        revision = getattr(hf_config, "_commit_hash", None)
+        model_identity = (
+            f"revision:{revision}"
+            if isinstance(revision, str) and revision
+            else f"local:{Path(getattr(config, 'model')).resolve()}"
+        )
+    factors = {
+        "schema": 1,
+        "model_identity": model_identity,
+        "architecture": model_spec.architecture,
+        "full_attention_layers": model_spec.full_attention_layers,
+        "linear_attention_layers": model_spec.linear_attention_layers,
+        "num_hidden_layers": model_spec.num_hidden_layers,
+        "num_attention_heads": getattr(model_config, "num_attention_heads", None),
+        "num_key_value_heads": getattr(model_config, "num_key_value_heads", None),
+        "head_dim": getattr(model_config, "head_dim", None),
+        "hidden_size": getattr(model_config, "hidden_size", None),
+        "model_dtype": str(getattr(model_config, "dtype", None)),
+        "kv_cache_dtype": getattr(config, "kv_cache_dtype", None),
+        "recurrent_state_dtype": getattr(config, "recurrent_state_dtype", None),
+        "block_size": getattr(config, "kvcache_block_size", None),
+        "sliding_window_size": getattr(config, "sliding_window_size", None),
+    }
+    encoded = json.dumps(
+        factors,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _is_plain_int(value: object) -> bool:
@@ -174,6 +223,7 @@ class RankCacheTransfer:
     kv_scales: torch.Tensor | None
     recurrent_states: tuple[torch.Tensor, ...]
     convolution_states: tuple[torch.Tensor, ...]
+    cache_fingerprint: str = LEGACY_CACHE_FINGERPRINT
     host_staging_lease: HostStagingLease | None = None
 
     @property
@@ -494,6 +544,7 @@ def export_rank_cache(
     tensor_parallel_size: int,
     block_size: int,
     cached_tokens: int,
+    cache_fingerprint: str = LEGACY_CACHE_FINGERPRINT,
     recurrent_states: tuple[torch.Tensor, ...] = (),
     convolution_states: tuple[torch.Tensor, ...] = (),
     to_host: bool = False,
@@ -516,6 +567,8 @@ def export_rank_cache(
         raise ValueError("cache transfer block size must be positive")
     if not _is_plain_int(cached_tokens) or cached_tokens <= 0:
         raise ValueError("cache transfer cached token count must be a positive integer")
+    if not isinstance(cache_fingerprint, str) or not cache_fingerprint:
+        raise ValueError("cache transfer fingerprint must be a non-empty string")
     expected_blocks = (cached_tokens + block_size - 1) // block_size
     if len(block_ids) != expected_blocks:
         raise ValueError(
@@ -609,6 +662,7 @@ def export_rank_cache(
         tensor_parallel_size=tensor_parallel_size,
         block_size=block_size,
         cached_tokens=cached_tokens,
+        cache_fingerprint=cache_fingerprint,
         kv_blocks=kv_blocks,
         kv_scales=kv_scales,
         recurrent_states=exported_recurrent,
@@ -627,6 +681,7 @@ def import_rank_cache(
     tensor_parallel_rank: int,
     tensor_parallel_size: int,
     block_size: int,
+    cache_fingerprint: str | None = None,
     recurrent_states: tuple[torch.Tensor, ...] = (),
     convolution_states: tuple[torch.Tensor, ...] = (),
 ) -> None:
@@ -647,6 +702,15 @@ def import_rank_cache(
         raise ValueError("cache transfer tensor-parallel identity is invalid")
     if not _is_plain_int(block_size) or block_size <= 0:
         raise ValueError("cache transfer block size must be positive")
+    if (
+        cache_fingerprint is not None
+        and (
+            not isinstance(cache_fingerprint, str)
+            or not cache_fingerprint
+            or payload.cache_fingerprint != cache_fingerprint
+        )
+    ):
+        raise ValueError("cache transfer fingerprint does not match destination")
     if (
         not _is_plain_int(payload.format_version)
         or payload.format_version != TRANSFER_FORMAT_VERSION

@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import torch
 
 from nanovllm.engine.cache_transfer import (
+    LEGACY_CACHE_FINGERPRINT,
     TRANSFER_FORMAT_VERSION,
     HostStagingBufferPool,
     HostStagingLease,
@@ -71,10 +72,13 @@ class PeerCacheFragment:
     block_size: int
     cached_tokens: int
     slices: tuple[PeerTensorSlice, ...]
+    cache_fingerprint: str = LEGACY_CACHE_FINGERPRINT
 
     def __post_init__(self) -> None:
         if not isinstance(self.transfer_id, str) or not self.transfer_id:
             raise ValueError("peer cache fragment transfer id must not be empty")
+        if not isinstance(self.cache_fingerprint, str) or not self.cache_fingerprint:
+            raise ValueError("peer cache fragment fingerprint must not be empty")
         for name, value in (
             ("src_rank", self.src_rank),
             ("dst_rank", self.dst_rank),
@@ -247,6 +251,7 @@ def build_qwen35_peer_cache_fragments(
             dst_tp_size=dst_tp_size,
             block_size=payload.block_size,
             cached_tokens=payload.cached_tokens,
+            cache_fingerprint=payload.cache_fingerprint,
             slices=tuple(slices),
         )
         for dst_rank, slices in sorted(grouped.items())
@@ -371,6 +376,7 @@ def stage_qwen35_peer_cache_fragments(
                 dst_tp_size=fragment.dst_tp_size,
                 block_size=fragment.block_size,
                 cached_tokens=fragment.cached_tokens,
+                cache_fingerprint=fragment.cache_fingerprint,
                 slices=tuple(
                     PeerTensorSlice(
                         component=item.component,
@@ -404,6 +410,7 @@ def stage_qwen35_sequence_cache_for_peers(
     src_rank: int,
     block_size: int,
     cached_tokens: int,
+    cache_fingerprint: str = LEGACY_CACHE_FINGERPRINT,
     plan: Qwen35CacheTransferPlan,
     host_staging_pool: HostStagingBufferPool | None = None,
 ) -> StagedPeerCacheFragments:
@@ -423,6 +430,8 @@ def stage_qwen35_sequence_cache_for_peers(
         or not isinstance(cached_tokens, int)
         or isinstance(cached_tokens, bool)
         or cached_tokens <= 0
+        or not isinstance(cache_fingerprint, str)
+        or not cache_fingerprint
     ):
         raise ValueError("live peer cache staging metadata is invalid")
     num_blocks = (cached_tokens + block_size - 1) // block_size
@@ -599,6 +608,7 @@ def stage_qwen35_sequence_cache_for_peers(
                 dst_tp_size=dst_tp_size,
                 block_size=block_size,
                 cached_tokens=cached_tokens,
+                cache_fingerprint=cache_fingerprint,
                 slices=tuple(slices),
             )
             for dst_rank, slices in sorted(grouped.items())
@@ -642,6 +652,7 @@ def assemble_qwen35_peer_cache_fragments(
         first.dst_tp_size,
         first.block_size,
         first.cached_tokens,
+        first.cache_fingerprint,
     )
     if (
         first.src_tp_size != src_tp_size
@@ -664,6 +675,7 @@ def assemble_qwen35_peer_cache_fragments(
                 fragment.dst_tp_size,
                 fragment.block_size,
                 fragment.cached_tokens,
+                fragment.cache_fingerprint,
             )
             != common
             or fragment.src_rank in actual_peer_bytes
@@ -758,6 +770,7 @@ def assemble_qwen35_peer_cache_fragments(
         tensor_parallel_size=dst_tp_size,
         block_size=first.block_size,
         cached_tokens=first.cached_tokens,
+        cache_fingerprint=first.cache_fingerprint,
         kv_blocks=assembled.pop(("kv", -1)),
         kv_scales=assembled.pop(("kv_scale", -1), None),
         recurrent_states=tuple(

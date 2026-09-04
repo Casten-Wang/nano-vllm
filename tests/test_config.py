@@ -303,6 +303,20 @@ def test_invalid_remote_prefill_staging_limit_is_rejected(
         )
 
 
+@pytest.mark.parametrize("value", ["", 1, False])
+def test_invalid_cache_transfer_model_id_is_rejected(
+    monkeypatch,
+    tmp_path,
+    value,
+):
+    with pytest.raises(ValueError, match="cache_transfer_model_id"):
+        make_config(
+            monkeypatch,
+            tmp_path,
+            cache_transfer_model_id=value,
+        )
+
+
 def test_gptq_auto_selects_triton_backend(monkeypatch, tmp_path):
     text_config = qwen36_text_config()
     monkeypatch.setattr(
