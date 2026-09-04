@@ -19,6 +19,16 @@ def _require_positive_int(value: object, name: str) -> None:
         raise ValueError(f"{name} must be a positive integer")
 
 
+def _require_non_negative_int(value: object, name: str) -> None:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise ValueError(f"{name} must be a non-negative integer")
+
+
+def _require_bool(value: object, name: str) -> None:
+    if not isinstance(value, bool):
+        raise ValueError(f"{name} must be a boolean")
+
+
 def resolve_eos_token_ids(
     model: str,
     fallback: int | list[int] | tuple[int, ...] | None,
@@ -99,8 +109,13 @@ class Config:
         )
         _require_positive_int(self.max_num_seqs, "max_num_seqs")
         _require_positive_int(self.max_model_len, "max_model_len")
-        if not 0.0 < self.gpu_memory_utilization <= 1.0:
+        if (
+            isinstance(self.gpu_memory_utilization, bool)
+            or not isinstance(self.gpu_memory_utilization, (int, float))
+            or not 0.0 < self.gpu_memory_utilization <= 1.0
+        ):
             raise ValueError("gpu_memory_utilization must be in (0, 1]")
+        _require_bool(self.enforce_eager, "enforce_eager")
         _require_positive_int(self.kvcache_block_size, "kvcache_block_size")
         if self.kvcache_block_size % 256 != 0:
             raise ValueError("kvcache_block_size must be a positive multiple of 256")
@@ -121,20 +136,32 @@ class Config:
             raise ValueError(
                 "kv_dequant_backend must be one of: 'triton', 'torch', 'fused'"
             )
-        if self.sliding_window_size is not None and self.sliding_window_size <= 0:
-            raise ValueError("sliding_window_size must be positive when provided")
-        if self.prefill_starvation_threshold < 0:
-            raise ValueError("prefill_starvation_threshold must be non-negative")
-        if self.prefill_starvation_token_budget <= 0:
-            raise ValueError("prefill_starvation_token_budget must be positive")
+        if self.sliding_window_size is not None:
+            _require_positive_int(self.sliding_window_size, "sliding_window_size")
+        _require_bool(
+            self.enable_dynamic_chunked_prefill,
+            "enable_dynamic_chunked_prefill",
+        )
+        _require_non_negative_int(
+            self.prefill_starvation_threshold,
+            "prefill_starvation_threshold",
+        )
+        _require_positive_int(
+            self.prefill_starvation_token_budget,
+            "prefill_starvation_token_budget",
+        )
         if self.preemption_policy not in ("fcfs", "min_recompute"):
             raise ValueError("preemption_policy must be 'fcfs' or 'min_recompute'")
         if not isinstance(self.enable_decode_kv_reservation, bool):
             raise ValueError("enable_decode_kv_reservation must be a boolean")
-        if self.int8_partitioned_decode_threshold <= 0:
-            raise ValueError("int8_partitioned_decode_threshold must be positive")
-        if self.int8_partitioned_decode_partition_size <= 0:
-            raise ValueError("int8_partitioned_decode_partition_size must be positive")
+        _require_positive_int(
+            self.int8_partitioned_decode_threshold,
+            "int8_partitioned_decode_threshold",
+        )
+        _require_positive_int(
+            self.int8_partitioned_decode_partition_size,
+            "int8_partitioned_decode_partition_size",
+        )
         if self.recurrent_state_dtype not in ("float32", "model"):
             raise ValueError("recurrent_state_dtype must be 'float32' or 'model'")
         if self.qwen35_decode_conv_backend not in ("weighted", "channel_accumulate"):
@@ -146,8 +173,10 @@ class Config:
             raise ValueError(
                 "qwen35_moe_decode_backend must be 'sorted' or 'batched'"
             )
-        if self.qwen35_moe_decode_chunk_size <= 0:
-            raise ValueError("qwen35_moe_decode_chunk_size must be positive")
+        _require_positive_int(
+            self.qwen35_moe_decode_chunk_size,
+            "qwen35_moe_decode_chunk_size",
+        )
         if (
             not isinstance(self.tp_top_k_reduction_max_width, int)
             or isinstance(self.tp_top_k_reduction_max_width, bool)

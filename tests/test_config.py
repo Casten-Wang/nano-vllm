@@ -160,6 +160,61 @@ def test_scheduler_capacity_requires_integers(
         make_config(monkeypatch, tmp_path, **{name: value})
 
 
+@pytest.mark.parametrize(
+    "name",
+    ["enforce_eager", "enable_dynamic_chunked_prefill"],
+)
+@pytest.mark.parametrize("value", [0, 1, "true"])
+def test_runtime_switches_require_booleans(
+    monkeypatch,
+    tmp_path,
+    name,
+    value,
+):
+    with pytest.raises(ValueError, match=rf"{name} must be a boolean"):
+        make_config(monkeypatch, tmp_path, **{name: value})
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "sliding_window_size",
+        "prefill_starvation_token_budget",
+        "int8_partitioned_decode_threshold",
+        "int8_partitioned_decode_partition_size",
+        "qwen35_moe_decode_chunk_size",
+    ],
+)
+@pytest.mark.parametrize("value", [True, 1.5])
+def test_runtime_sizes_require_integers(
+    monkeypatch,
+    tmp_path,
+    name,
+    value,
+):
+    with pytest.raises(ValueError, match=rf"{name} must be a positive integer"):
+        make_config(monkeypatch, tmp_path, **{name: value})
+
+
+@pytest.mark.parametrize("value", [True, 1.5])
+def test_starvation_threshold_requires_integer(monkeypatch, tmp_path, value):
+    with pytest.raises(
+        ValueError,
+        match="prefill_starvation_threshold must be a non-negative integer",
+    ):
+        make_config(monkeypatch, tmp_path, prefill_starvation_threshold=value)
+
+
+@pytest.mark.parametrize("value", [True, "0.9"])
+def test_gpu_memory_utilization_requires_numeric_fraction(
+    monkeypatch,
+    tmp_path,
+    value,
+):
+    with pytest.raises(ValueError, match="gpu_memory_utilization must be in"):
+        make_config(monkeypatch, tmp_path, gpu_memory_utilization=value)
+
+
 @pytest.mark.parametrize("value", [0, 9, True, 4.0])
 def test_invalid_tensor_parallel_size_is_rejected(monkeypatch, tmp_path, value):
     with pytest.raises(ValueError, match="tensor_parallel_size must be an integer"):
